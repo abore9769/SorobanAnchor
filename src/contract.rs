@@ -1015,6 +1015,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         valid_until: u64,
     ) -> u64 {
         anchor.require_auth();
+        if fee_percentage > 10_000 {
+            panic_with_error!(&env, ErrorCode::InvalidQuote);
+        }
         let inst = env.storage().instance();
         let qcnt_key = soroban_sdk::vec![&env, symbol_short!("QCNT")];
         let next: u64 = inst.get(&qcnt_key).unwrap_or(0u64) + 1;
@@ -1404,6 +1407,54 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             env.storage().persistent().set(&list_key, &list);
             env.storage().persistent().extend_ttl(&list_key, PERSISTENT_TTL, PERSISTENT_TTL);
         }
+    }
+
+    /// Reactivate a previously deactivated anchor (admin-only). Sets `is_active = true`.
+    pub fn reactivate_anchor(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let meta_key = (symbol_short!("ANCHMETA"), anchor.clone());
+        let mut meta: RoutingAnchorMeta = env
+            .storage()
+            .persistent()
+            .get(&meta_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestorNotRegistered));
+        meta.is_active = true;
+        env.storage().persistent().set(&meta_key, &meta);
+        env.storage()
+            .persistent()
+            .extend_ttl(&meta_key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    /// Return the full `RoutingAnchorMeta` for an anchor.
+    pub fn get_anchor_metadata(env: Env, anchor: Address) -> RoutingAnchorMeta {
+        env.storage()
+            .persistent()
+            .get::<_, RoutingAnchorMeta>(&(symbol_short!("ANCHMETA"), anchor))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestorNotRegistered))
+    }
+
+    /// Return all anchors in ANCHLIST where `is_active == true`.
+    pub fn list_active_anchors(env: Env) -> Vec<Address> {
+        let list_key = soroban_sdk::vec![&env, symbol_short!("ANCHLIST")];
+        let anchors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&list_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut active = Vec::new(&env);
+        for anchor in anchors.iter() {
+            let meta_key = (symbol_short!("ANCHMETA"), anchor.clone());
+            if let Some(meta) = env
+                .storage()
+                .persistent()
+                .get::<_, RoutingAnchorMeta>(&meta_key)
+            {
+                if meta.is_active {
+                    active.push_back(anchor);
+                }
+            }
+        }
+        active
     }
 
     pub fn route_transaction(env: Env, options: RoutingOptions) -> Quote {
