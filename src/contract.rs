@@ -802,6 +802,64 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     // Session management
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // KYC data management
+    // -----------------------------------------------------------------------
+
+    /// Submit KYC data for a subject. Stores SHA-256 hash of KYC payload.
+    /// Never stores raw PII, only the hash.
+    pub fn submit_kyc_data(
+        env: Env,
+        subject: Address,
+        kyc_hash: Bytes,
+        attestor: Address,
+    ) {
+        attestor.require_auth();
+        Self::check_attestor(&env, &attestor);
+
+        let key = (symbol_short!("KYC"), subject.clone());
+        let now = env.ledger().timestamp();
+
+        // Store KYC status as Pending initially
+        env.storage().persistent().set(&key, &(kyc_hash.clone(), now));
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("kyc"), symbol_short!("submitted"), subject),
+            WebhookEvent {
+                event_type: String::from_str(&env, "kyc_submitted"),
+                transaction_id: 0,
+                timestamp: now,
+                payload_hash: kyc_hash,
+            },
+        );
+    }
+
+    /// Get the KYC status for a subject.
+    /// Returns KycStatus (Pending, Approved, Rejected).
+    /// Panics with AttestationNotFound if no KYC record exists.
+    pub fn get_kyc_status(env: Env, subject: Address) -> KycStatus {
+        let key = (symbol_short!("KYC"), subject.clone());
+        let status_key = (symbol_short!("KYCSTATUS"), subject);
+
+        // Check if KYC record exists
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, ErrorCode::AttestationNotFound);
+        }
+
+        // Get the status, default to Pending if not set
+        let status: u32 = env.storage().persistent()
+            .get(&status_key)
+            .unwrap_or(0u32);
+
+        match status {
+            0 => KycStatus::Pending,
+            1 => KycStatus::Approved,
+            2 => KycStatus::Rejected,
+            _ => KycStatus::Pending,
+        }
+    }
+
     pub fn create_session(env: Env, initiator: Address) -> u64 {
         initiator.require_auth();
         let inst = env.storage().instance();
