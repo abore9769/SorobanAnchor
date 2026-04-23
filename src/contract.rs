@@ -1414,6 +1414,30 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     }
 
     // -----------------------------------------------------------------------
+    // Transaction state
+    // -----------------------------------------------------------------------
+
+    pub fn create_transaction_record(
+        env: Env,
+        transaction_id: u64,
+        initiator: Address,
+    ) -> TransactionStateRecord {
+        let now = env.ledger().timestamp();
+        let record = TransactionStateRecord {
+            transaction_id,
+            state: TransactionState::Pending,
+            initiator,
+            timestamp: now,
+            last_updated: now,
+            error_message: None,
+        };
+        let key = (symbol_short!("TXSTATE"), transaction_id);
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        record
+    }
+
+    // -----------------------------------------------------------------------
     // Rate limit configuration
     // -----------------------------------------------------------------------
 
