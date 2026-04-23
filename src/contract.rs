@@ -5,6 +5,7 @@ use soroban_sdk::{
 
 use crate::deterministic_hash::{compute_payload_hash, verify_payload_hash};
 use crate::errors::ErrorCode;
+use crate::rate_limiter::{RateLimiter, RateLimitState};
 use crate::sep10_jwt;
 use crate::transaction_state_tracker::{TransactionState, TransactionStateRecord};
 
@@ -1402,6 +1403,16 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         match Self::get_anchor_asset_info(env, anchor, asset_code) {
             asset => asset.withdrawal_enabled,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate limit inspection
+    // -----------------------------------------------------------------------
+
+    /// Return the current RateLimitState for `attestor` (submission count + window start).
+    /// Returns a zeroed state if the attestor has never submitted.
+    pub fn get_rate_limit_state(env: Env, attestor: Address) -> RateLimitState {
+        RateLimiter::get_state(&env, &attestor)
     }
 
     // -----------------------------------------------------------------------

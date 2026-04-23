@@ -1,6 +1,8 @@
-use soroban_sdk::{contracttype, Address, Env, String};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
 use crate::errors::AnchorKitError;
+
+const TXSTATE_TTL: u32 = 1_555_200;
 
 /// Transaction states for the state tracker
 #[contracttype]
@@ -93,6 +95,10 @@ impl TransactionStateTracker {
 
         if self.is_dev_mode {
             self.cache.push(record.clone());
+        } else {
+            let key = (symbol_short!("TXSTATE"), transaction_id);
+            env.storage().persistent().set(&key, &record);
+            env.storage().persistent().extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
         }
 
         Ok(record)
@@ -167,17 +173,32 @@ impl TransactionStateTracker {
                 "Transaction not found in cache",
             ));
         } else {
-            // In production, data would be persisted to DB
-            // For dev mode, use a dummy address
-            let dummy_address = Address::from_string(&String::from_str(env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
-            let record = TransactionStateRecord {
-                transaction_id,
-                state: new_state,
-                initiator: dummy_address,
-                timestamp: current_time,
-                last_updated: current_time,
-                error_message,
-            };
+            let key = (symbol_short!("TXSTATE"), transaction_id);
+            let mut record: TransactionStateRecord = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or_else(|| String::from_str(env, "Transaction not found"))?;
+
+            if !record.state.is_valid_transition(new_state) {
+                return Err(String::from_str(
+                    env,
+                    AnchorKitError::illegal_transition(
+                        record.state.as_str(),
+                        new_state.as_str(),
+                    )
+                    .message
+                    .as_str(),
+                ));
+            }
+
+            record.state = new_state;
+            record.last_updated = current_time;
+            record.error_message = error_message;
+
+            env.storage().persistent().set(&key, &record);
+            env.storage().persistent().extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
+
             Ok(record)
         }
     }
@@ -207,8 +228,10 @@ impl TransactionStateTracker {
             }
             Ok(None)
         } else {
-            // In production, this would query the DB
-            Ok(None)
+            Ok(env
+                .storage()
+                .persistent()
+                .get(&(symbol_short!("TXSTATE"), transaction_id)))
         }
     }
 
