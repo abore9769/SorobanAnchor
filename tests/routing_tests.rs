@@ -125,6 +125,8 @@ mod routing_tests {
             min_reputation: 0,
             max_anchors: 2,
             require_kyc: false,
+            require_compliance: false,
+            subject: Address::generate(&env),
         };
 
         // anchor2 has faster settlement time (200 < 600)
@@ -166,6 +168,8 @@ mod routing_tests {
             min_reputation: 0,
             max_anchors: 2,
             require_kyc: false,
+            require_compliance: false,
+            subject: Address::generate(&env),
         };
 
         // anchor2 has higher reputation (8000 > 3000)

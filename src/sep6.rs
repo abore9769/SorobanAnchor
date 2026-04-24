@@ -24,6 +24,12 @@ pub enum TransactionStatus {
     Completed,
     Refunded,
     Expired,
+    /// No market exists for the requested asset pair (SEP-6 `no_market`).
+    NoMarket,
+    /// Requested amount is below the anchor's minimum (SEP-6 `too_small`).
+    TooSmall,
+    /// Requested amount exceeds the anchor's maximum (SEP-6 `too_large`).
+    TooLarge,
     Error,
 }
 
@@ -39,6 +45,9 @@ impl TransactionStatus {
             "expired" => Self::Expired,
             "incomplete" => Self::Incomplete,
             "pending" => Self::Pending,
+            "no_market" => Self::NoMarket,
+            "too_small" => Self::TooSmall,
+            "too_large" => Self::TooLarge,
             _ => Self::Error,
         }
     }
@@ -54,6 +63,9 @@ impl TransactionStatus {
             Self::Completed => "completed",
             Self::Refunded => "refunded",
             Self::Expired => "expired",
+            Self::NoMarket => "no_market",
+            Self::TooSmall => "too_small",
+            Self::TooLarge => "too_large",
             Self::Error => "error",
         }
     }
@@ -76,6 +88,12 @@ pub struct DepositResponse {
     pub fee_fixed: Option<u64>,
     /// Current status of the transaction.
     pub status: TransactionStatus,
+    /// Whether clawback is enabled for this deposit (SEP-6 `clawback_enabled`).
+    pub clawback_enabled: Option<bool>,
+    /// Stellar memo for identifying the sender, if provided.
+    pub stellar_memo: Option<String>,
+    /// Type of `stellar_memo` (e.g. `"text"`, `"id"`, `"hash"`), if provided.
+    pub stellar_memo_type: Option<String>,
 }
 
 /// Normalized response for a withdrawal initiation.
@@ -144,6 +162,12 @@ pub struct RawDepositResponse {
     pub fee_fixed: Option<u64>,
     /// Raw status string from the anchor (e.g. `"pending_external"`).
     pub status: Option<String>,
+    /// Whether clawback is enabled for this deposit.
+    pub clawback_enabled: Option<bool>,
+    /// Stellar memo for identifying the sender.
+    pub stellar_memo: Option<String>,
+    /// Type of `stellar_memo`.
+    pub stellar_memo_type: Option<String>,
 }
 
 /// Raw fields from an anchor's `/withdraw` response.
@@ -191,6 +215,9 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
             .as_deref()
             .map(TransactionStatus::from_str)
             .unwrap_or(TransactionStatus::Pending),
+        clawback_enabled: raw.clawback_enabled,
+        stellar_memo: raw.stellar_memo,
+        stellar_memo_type: raw.stellar_memo_type,
     })
 }
 
@@ -244,6 +271,32 @@ pub fn fetch_transaction_status(
     })
 }
 
+/// Normalize a list of raw SEP-6 transaction responses (from `GET /transactions`)
+/// into canonical [`TransactionStatusResponse`] values.
+///
+/// Entries with an empty `transaction_id` are silently skipped.
+pub fn list_transactions(
+    raw_list: alloc::vec::Vec<RawTransactionResponse>,
+) -> alloc::vec::Vec<TransactionStatusResponse> {
+    raw_list
+        .into_iter()
+        .filter(|r| !r.transaction_id.is_empty())
+        .map(|r| TransactionStatusResponse {
+            transaction_id: r.transaction_id,
+            kind: r
+                .kind
+                .as_deref()
+                .map(TransactionKind::from_str)
+                .unwrap_or(TransactionKind::Deposit),
+            status: TransactionStatus::from_str(&r.status),
+            amount_in: r.amount_in,
+            amount_out: r.amount_out,
+            amount_fee: r.amount_fee,
+            message: r.message,
+        })
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -259,6 +312,9 @@ mod tests {
             max_amount: Some(10_000),
             fee_fixed: Some(1),
             status: Some("pending_external".to_string()),
+            clawback_enabled: None,
+            stellar_memo: None,
+            stellar_memo_type: None,
         }
     }
 
@@ -360,5 +416,70 @@ mod tests {
         raw.kind = Some("withdraw".to_string());
         let resp = fetch_transaction_status(raw).unwrap();
         assert_eq!(resp.kind, TransactionKind::Withdrawal);
+    }
+
+    #[test]
+    fn test_list_transactions_normalizes_all() {
+        let raw_list = vec![
+            RawTransactionResponse {
+                transaction_id: "txn-001".to_string(),
+                kind: Some("deposit".to_string()),
+                status: "completed".to_string(),
+                amount_in: Some(100),
+                amount_out: Some(99),
+                amount_fee: Some(1),
+                message: None,
+            },
+            RawTransactionResponse {
+                transaction_id: "txn-002".to_string(),
+                kind: Some("withdrawal".to_string()),
+                status: "pending_external".to_string(),
+                amount_in: None,
+                amount_out: None,
+                amount_fee: None,
+                message: Some("awaiting bank".to_string()),
+            },
+        ];
+        let result = list_transactions(raw_list);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].transaction_id, "txn-001");
+        assert_eq!(result[0].status, TransactionStatus::Completed);
+        assert_eq!(result[0].kind, TransactionKind::Deposit);
+        assert_eq!(result[1].transaction_id, "txn-002");
+        assert_eq!(result[1].status, TransactionStatus::PendingExternal);
+        assert_eq!(result[1].kind, TransactionKind::Withdrawal);
+    }
+
+    #[test]
+    fn test_list_transactions_skips_empty_ids() {
+        let raw_list = vec![
+            RawTransactionResponse {
+                transaction_id: "".to_string(),
+                kind: None,
+                status: "completed".to_string(),
+                amount_in: None,
+                amount_out: None,
+                amount_fee: None,
+                message: None,
+            },
+            RawTransactionResponse {
+                transaction_id: "txn-valid".to_string(),
+                kind: None,
+                status: "completed".to_string(),
+                amount_in: Some(50),
+                amount_out: Some(49),
+                amount_fee: Some(1),
+                message: None,
+            },
+        ];
+        let result = list_transactions(raw_list);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].transaction_id, "txn-valid");
+    }
+
+    #[test]
+    fn test_list_transactions_empty_input() {
+        let result = list_transactions(vec![]);
+        assert!(result.is_empty());
     }
 }
