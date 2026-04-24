@@ -45,17 +45,21 @@ pub enum ErrorCode {
     AttestationNotFound = 17,
     InvalidSep10Token = 18,
     KycNotFound = 19,
+ fix/kyc-rejected-error-code-23
+
     KycRejected = 21,
-<<<<<<< fix/kyc-pending-error-code-22
+ fix/kyc-pending-error-code-22
+ main
     KycPending = 22,
-    NotInitialized = 23,
+    KycRejected = 23,
+    NotInitialized = 25,
     IllegalTransition = 24,
-=======
+
     NotInitialized = 22,
     IllegalTransition = 23,
     SessionExpired = 25,
     SessionClosed = 26,
->>>>>>> main
+ main
     CacheExpired = 48,
     CacheNotFound = 49,
 }
@@ -90,12 +94,12 @@ impl ErrorCode {
             ErrorCode::IllegalTransition => "Illegal transaction state transition",
             ErrorCode::CacheExpired => "Cache entry has expired",
             ErrorCode::CacheNotFound => "Cache entry not found",
-<<<<<<< fix/kyc-pending-error-code-22
-=======
+ fix/kyc-pending-error-code-22
+
             ErrorCode::IllegalTransition => "Illegal transaction state transition",
             ErrorCode::SessionExpired => "Session has expired",
             ErrorCode::SessionClosed => "Session is closed",
->>>>>>> main
+ main
         }
     }
 }
@@ -346,11 +350,11 @@ mod tests {
             ErrorCode::InvalidSep10Token,
             ErrorCode::KycNotFound,
             ErrorCode::KycRejected,
-<<<<<<< fix/kyc-pending-error-code-22
+ fix/kyc-pending-error-code-22
             ErrorCode::KycPending,
             ErrorCode::NotInitialized,
-=======
->>>>>>> main
+
+ main
             ErrorCode::IllegalTransition,
             ErrorCode::CacheExpired,
             ErrorCode::CacheNotFound,
