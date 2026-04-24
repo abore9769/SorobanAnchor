@@ -1186,6 +1186,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         let audit_key = (symbol_short!("AUDIT"), log_id);
         env.storage().persistent().set(&audit_key, &audit);
         env.storage().persistent().extend_ttl(&audit_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let slog_key = (symbol_short!("SLOG"), session_id, op_index);
+        env.storage().persistent().set(&slog_key, &log_id);
+        env.storage().persistent().extend_ttl(&slog_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         env.events().publish(
             (
@@ -1252,6 +1255,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         let audit_key = (symbol_short!("AUDIT"), log_id);
         env.storage().persistent().set(&audit_key, &audit);
         env.storage().persistent().extend_ttl(&audit_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let slog_key = (symbol_short!("SLOG"), session_id, op_index);
+        env.storage().persistent().set(&slog_key, &log_id);
+        env.storage().persistent().extend_ttl(&slog_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("added"), attestor),
@@ -1309,6 +1315,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         let audit_key = (symbol_short!("AUDIT"), log_id);
         env.storage().persistent().set(&audit_key, &audit);
         env.storage().persistent().extend_ttl(&audit_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let slog_key = (symbol_short!("SLOG"), session_id, op_index);
+        env.storage().persistent().set(&slog_key, &log_id);
+        env.storage().persistent().extend_ttl(&slog_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("removed"), attestor),
@@ -1338,6 +1347,26 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             .persistent()
             .get::<_, AuditLog>(&(symbol_short!("AUDIT"), log_id))
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound))
+    }
+
+    pub fn get_session_audit_logs(env: Env, session_id: u64, limit: u64) -> Vec<AuditLog> {
+        let total: u64 = env
+            .storage()
+            .persistent()
+            .get(&(symbol_short!("SOPCNT"), session_id))
+            .unwrap_or(0u64);
+        let mut results = Vec::new(&env);
+        let start = if total > limit { total - limit } else { 0 };
+        for i in start..total {
+            let slog_key = (symbol_short!("SLOG"), session_id, i);
+            if let Some(log_id) = env.storage().persistent().get::<_, u64>(&slog_key) {
+                let audit_key = (symbol_short!("AUDIT"), log_id);
+                if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
+                    results.push_back(entry);
+                }
+            }
+        }
+        results
     }
 
     pub fn get_session_operation_count(env: Env, session_id: u64) -> u64 {
