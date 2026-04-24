@@ -494,6 +494,30 @@ impl AnchorKitContract {
         }
     }
 
+    /// Verify a SEP-10 JWT for an arbitrary subject without going through the
+    /// attestor registration flow. Useful for off-chain clients that hold a
+    /// stored verifying key and want to confirm token ownership.
+    ///
+    /// Panics with `InvalidSep10Token` if:
+    /// - no verifying key is stored for `issuer`
+    /// - the token signature, expiry, or `sub` claim does not match `subject`
+    pub fn verify_sep10_token_for_subject(
+        env: Env,
+        token: String,
+        issuer: Address,
+        subject: Address,
+    ) {
+        let pk: Bytes = env
+            .storage()
+            .persistent()
+            .get(&(symbol_short!("SEP10KEY"), issuer.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::InvalidSep10Token));
+        let expected = subject.to_string();
+        if sep10_jwt::verify_sep10_jwt(&env, &token, &pk, Some(&expected)).is_err() {
+            panic_with_error!(&env, ErrorCode::InvalidSep10Token);
+        }
+    }
+
     pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address) {
         Self::require_admin(&env);
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);

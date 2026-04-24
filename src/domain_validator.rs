@@ -153,6 +153,12 @@ fn validate_host(host: &str) -> Result<(), AnchorKitError> {
 
     // Validate each label in the domain
     let labels: Vec<&str> = domain_without_port.split('.').collect();
+
+    // Reject IPv4-style hostnames: all labels purely numeric (e.g. 192.168.1.1)
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
     for label in labels {
         if label.is_empty() {
             return Err(AnchorKitError::invalid_endpoint_format());
