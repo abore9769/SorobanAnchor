@@ -346,4 +346,109 @@ mod session_tests {
         assert_eq!(log2.operation.operation_index, 2);
         assert_eq!(log2.operation.result_data, 1); // attestation id 1
     }
+
+    // -----------------------------------------------------------------------
+    // Session TTL / expiry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_submit_attestation_with_session_panics_when_session_expired() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let session_id = client.create_session(&user);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+
+        // Advance ledger past the 3600s TTL
+        env.ledger().set(LedgerInfo {
+            timestamp: 3601,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        // Should panic with SessionExpired
+        client.submit_attestation_with_session(
+            &session_id,
+            &attestor,
+            &subject,
+            &1700000001u64,
+            &payload(&env, 0x01),
+            &sig(&env, &[0x0a, 0x0b]),
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_with_session_succeeds_within_ttl() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let session_id = client.create_session(&user);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+
+        // Advance to exactly the TTL boundary — should still be valid
+        env.ledger().set(LedgerInfo {
+            timestamp: 3600,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        let id = client.submit_attestation_with_session(
+            &session_id,
+            &attestor,
+            &subject,
+            &1700000001u64,
+            &payload(&env, 0x01),
+            &sig(&env, &[0x0a, 0x0b]),
+        );
+        assert_eq!(id, 0);
+    }
 }

@@ -50,6 +50,7 @@ pub enum ErrorCode {
     WebhookDeliveryFailed = 24,
     NotInitialized = 25,
     IllegalTransition = 26,
+    SessionExpired = 27,
     CacheExpired = 48,
     CacheNotFound = 49,
 }
@@ -82,6 +83,7 @@ impl ErrorCode {
             ErrorCode::WebhookDeliveryFailed => "Webhook delivery failed validation",
             ErrorCode::NotInitialized => "Contract is not initialized",
             ErrorCode::IllegalTransition => "Illegal transaction state transition",
+            ErrorCode::SessionExpired => "Session has expired",
             ErrorCode::CacheExpired => "Cache entry has expired",
             ErrorCode::CacheNotFound => "Cache entry not found",
         }
@@ -233,6 +235,10 @@ impl AnchorKitError {
             &alloc::format!("{} -> {}", from, to),
         )
     }
+
+    pub fn session_expired() -> Self {
+        Self::from_code(ErrorCode::SessionExpired)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +305,7 @@ mod tests {
         assert_eq!(AnchorKitError::kyc_pending().code, ErrorCode::KycPending);
         assert_eq!(AnchorKitError::kyc_rejected().code, ErrorCode::KycRejected);
         assert_eq!(AnchorKitError::webhook_delivery_failed().code, ErrorCode::WebhookDeliveryFailed);
+        assert_eq!(AnchorKitError::session_expired().code, ErrorCode::SessionExpired);
     }
 
     #[test]
@@ -335,6 +342,7 @@ mod tests {
             ErrorCode::WebhookDeliveryFailed,
             ErrorCode::NotInitialized,
             ErrorCode::IllegalTransition,
+            ErrorCode::SessionExpired,
             ErrorCode::CacheExpired,
             ErrorCode::CacheNotFound,
         ];
