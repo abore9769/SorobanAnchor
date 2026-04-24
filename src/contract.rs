@@ -21,6 +21,7 @@ pub struct Session {
     pub created_at: u64,
     pub nonce: u64,
     pub operation_count: u64,
+    pub closed: bool,
 }
 
 #[contracttype]
@@ -272,6 +273,14 @@ const MIN_TEMP_TTL: u32 = 15; // min_temp_entry_ttl - 1
 #[contracttype]
 #[derive(Clone)]
 struct SessionCreatedEvent {
+    session_id: u64,
+    initiator: Address,
+    timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+struct SessionClosedEvent {
     session_id: u64,
     initiator: Address,
     timestamp: u64,
@@ -982,6 +991,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             created_at: now,
             nonce: 0,
             operation_count: 0,
+            closed: false,
         };
         let sess_key = (symbol_short!("SESS"), session_id);
         env.storage().persistent().set(&sess_key, &session);
@@ -997,6 +1007,38 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         );
 
         session_id
+    }
+
+    pub fn close_session(env: Env, session_id: u64, initiator: Address) {
+        initiator.require_auth();
+        let sess_key = (symbol_short!("SESS"), session_id);
+        let mut session: Session = env
+            .storage()
+            .persistent()
+            .get(&sess_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound));
+        if session.closed {
+            panic_with_error!(&env, ErrorCode::SessionClosed);
+        }
+        session.closed = true;
+        env.storage().persistent().set(&sess_key, &session);
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (symbol_short!("session"), symbol_short!("closed"), session_id),
+            SessionClosedEvent { session_id, initiator, timestamp: now },
+        );
+    }
+
+    fn require_session_open(env: &Env, session_id: u64) {
+        let sess_key = (symbol_short!("SESS"), session_id);
+        let session: Session = env
+            .storage()
+            .persistent()
+            .get(&sess_key)
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::AttestationNotFound));
+        if session.closed {
+            panic_with_error!(env, ErrorCode::SessionClosed);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1090,6 +1132,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         signature: Bytes,
     ) -> u64 {
         issuer.require_auth();
+        Self::require_session_open(&env, session_id);
         Self::check_attestor(&env, &issuer);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
@@ -1170,6 +1213,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
 
     pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
         Self::require_admin(&env);
+        Self::require_session_open(&env, session_id);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, ErrorCode::AttestorAlreadyRegistered);
@@ -1227,6 +1271,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
 
     pub fn revoke_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
         Self::require_admin(&env);
+        Self::require_session_open(&env, session_id);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
         if !env.storage().persistent().has(&key) {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
