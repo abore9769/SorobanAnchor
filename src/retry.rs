@@ -37,6 +37,26 @@ impl RetryConfig {
         }
     }
 
+    /// 5 attempts, 50 ms base, 2 s max — for time-sensitive operations.
+    pub fn aggressive() -> Self {
+        RetryConfig {
+            max_attempts: 5,
+            base_delay_ms: 50,
+            max_delay_ms: 2_000,
+            backoff_multiplier: 2,
+        }
+    }
+
+    /// 2 attempts, 500 ms base, 10 s max — for conservative/low-noise retries.
+    pub fn conservative() -> Self {
+        RetryConfig {
+            max_attempts: 2,
+            base_delay_ms: 500,
+            max_delay_ms: 10_000,
+            backoff_multiplier: 2,
+        }
+    }
+
     /// Compute the delay (ms) for a given attempt index (0-based), with jitter.
     ///
     /// delay = min(base * multiplier^attempt, max) + jitter(0..base/2)
@@ -220,5 +240,107 @@ mod retry_tests {
         );
         // 3 attempts → 2 sleeps (no sleep after last attempt)
         assert_eq!(sleep_calls, 2);
+    }
+
+    /// Verify that the delay values passed to sleep_fn match the expected
+    /// exponential sequence.  Uses a mock clock (a Vec accumulator) instead of
+    /// a no-op so we can inspect every value.
+    #[test]
+    fn test_mock_clock_delay_sequence() {
+        // 4 attempts, 100 ms base, 10 s cap, multiplier 2 → delays for
+        // attempts 0, 1, 2 (no sleep after the last attempt):
+        //   attempt 0: 100 * 2^0 = 100  + jitter(seed=3  % 51) = 100 + 3  = 103
+        //   attempt 1: 100 * 2^1 = 200  + jitter(seed=20 % 51) = 200 + 20 = 220
+        //   attempt 2: 100 * 2^2 = 400  + jitter(seed=37 % 51) = 400 + 37 = 437
+        // (jitter_seed = attempt * 17 + 3, jitter = seed % (base/2 + 1) = seed % 51)
+        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let mut recorded: Vec<u64> = Vec::new();
+
+        let _ = retry_with_backoff(
+            &config,
+            |_| Err::<i32, _>(TestError::Transient),
+            is_retryable_test,
+            |ms| recorded.push(ms),
+        );
+
+        // Three sleeps for four attempts.
+        assert_eq!(recorded.len(), 3, "expected 3 sleeps for 4 attempts");
+
+        // Each recorded delay must be >= the pure exponential value (jitter only adds).
+        let base = config.base_delay_ms;
+        let mult = config.backoff_multiplier as u64;
+        for (i, &actual) in recorded.iter().enumerate() {
+            let expected_min = base.saturating_mul(mult.saturating_pow(i as u32));
+            assert!(
+                actual >= expected_min,
+                "attempt {i}: delay {actual} < expected minimum {expected_min}"
+            );
+        }
+
+        // Each delay must be strictly greater than the previous (exponential growth).
+        for window in recorded.windows(2) {
+            assert!(
+                window[1] > window[0],
+                "delays are not strictly increasing: {:?}",
+                recorded
+            );
+        }
+
+        // Verify exact values match the deterministic jitter formula used in
+        // retry_with_backoff (jitter_seed = attempt * 17 + 3).
+        let expected: Vec<u64> = (0..3u32)
+            .map(|a| config.delay_for_attempt(a, a as u64 * 17 + 3))
+            .collect();
+        assert_eq!(recorded, expected, "recorded delays don't match expected sequence");
+    }
+
+    #[test]
+    fn test_aggressive_config() {
+        let cfg = RetryConfig::aggressive();
+        assert_eq!(cfg.max_attempts, 5);
+        assert_eq!(cfg.base_delay_ms, 50);
+        assert_eq!(cfg.max_delay_ms, 2_000);
+        assert_eq!(cfg.backoff_multiplier, 2);
+    }
+
+    #[test]
+    fn test_conservative_config() {
+        let cfg = RetryConfig::conservative();
+        assert_eq!(cfg.max_attempts, 2);
+        assert_eq!(cfg.base_delay_ms, 500);
+        assert_eq!(cfg.max_delay_ms, 10_000);
+        assert_eq!(cfg.backoff_multiplier, 2);
+    }
+
+    #[test]
+    fn test_aggressive_retries_up_to_five_attempts() {
+        let config = RetryConfig::aggressive();
+        let mut calls = 0u32;
+        let _ = retry_with_backoff(
+            &config,
+            |_| {
+                calls += 1;
+                Err::<i32, _>(TestError::Transient)
+            },
+            is_retryable_test,
+            |_| {},
+        );
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn test_conservative_stops_after_two_attempts() {
+        let config = RetryConfig::conservative();
+        let mut calls = 0u32;
+        let _ = retry_with_backoff(
+            &config,
+            |_| {
+                calls += 1;
+                Err::<i32, _>(TestError::Transient)
+            },
+            is_retryable_test,
+            |_| {},
+        );
+        assert_eq!(calls, 2);
     }
 }
