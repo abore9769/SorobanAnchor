@@ -83,3 +83,6 @@ mod capability_detection_tests;
 
 #[cfg(test)]
 mod attestor_endpoint_tests;
+
+#[cfg(test)]
+mod replay_protection_tests;

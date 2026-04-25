@@ -354,6 +354,9 @@ const INSTANCE_TTL: u32 = 518_400;
 /// Default session lifetime in seconds (1 hour). Used when session_ttl_seconds is zero.
 pub const DEFAULT_SESSION_TTL: u64 = 3600;
 
+/// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
+pub const REPLAY_TTL: u32 = 120_960;
+
 // ---------------------------------------------------------------------------
 // Storage key helpers
 // ---------------------------------------------------------------------------
@@ -696,7 +699,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             panic_with_error!(&env, ErrorCode::RateLimitExceeded);
         }
 
-        let used_key = (symbol_short!("USED"), payload_hash.clone());
+        let used_key = (symbol_short!("USED"), issuer.clone(), payload_hash.clone());
         if env.storage().persistent().has(&used_key) {
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
@@ -712,10 +715,10 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             signature,
         );
 
-        env.storage().persistent().set(&used_key, &true);
+        env.storage().persistent().set(&used_key, &timestamp);
         env.storage()
             .persistent()
-            .extend_ttl(&used_key, PERSISTENT_TTL, PERSISTENT_TTL);
+            .extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
         env.events().publish(
             (
@@ -764,7 +767,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             }
         }
 
-        let used_key = (symbol_short!("USED"), payload_hash.clone());
+        let used_key = (symbol_short!("USED"), issuer.clone(), payload_hash.clone());
         if env.storage().persistent().has(&used_key) {
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
@@ -780,10 +783,10 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             signature,
         );
 
-        env.storage().persistent().set(&used_key, &true);
+        env.storage().persistent().set(&used_key, &timestamp);
         env.storage()
             .persistent()
-            .extend_ttl(&used_key, PERSISTENT_TTL, PERSISTENT_TTL);
+            .extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
         env.events().publish(
             (
@@ -826,7 +829,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
-        let used_key = (symbol_short!("USED"), payload_hash.clone());
+        let used_key = (symbol_short!("USED"), issuer.clone(), payload_hash.clone());
         if env.storage().persistent().has(&used_key) {
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
@@ -842,10 +845,10 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             signature,
         );
 
-        env.storage().persistent().set(&used_key, &true);
+        env.storage().persistent().set(&used_key, &timestamp);
         env.storage()
             .persistent()
-            .extend_ttl(&used_key, PERSISTENT_TTL, PERSISTENT_TTL);
+            .extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
         let now = env.ledger().timestamp();
         Self::store_span(
@@ -937,6 +940,16 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         env.storage()
             .persistent()
             .get::<_, Attestation>(&(symbol_short!("ATTEST"), id))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound))
+    }
+
+    /// Returns the original submission timestamp for a given (issuer, payload_hash) pair,
+    /// or panics with `AttestationNotFound` if no such attestation has been submitted.
+    pub fn get_attestation_by_hash(env: Env, issuer: Address, payload_hash: Bytes) -> u64 {
+        let used_key = (symbol_short!("USED"), issuer, payload_hash);
+        env.storage()
+            .persistent()
+            .get::<_, u64>(&used_key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound))
     }
 
@@ -1219,7 +1232,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
-        let used_key = (symbol_short!("USED"), payload_hash.clone());
+        let used_key = (symbol_short!("USED"), issuer.clone(), payload_hash.clone());
         if env.storage().persistent().has(&used_key) {
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
@@ -1235,8 +1248,19 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             signature,
         );
 
-        env.storage().persistent().set(&used_key, &true);
-        env.storage().persistent().extend_ttl(&used_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.storage().persistent().set(&used_key, &timestamp);
+        env.storage().persistent().extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
+
+        // Increment session nonce
+        let sess_key = (symbol_short!("SESS"), session_id);
+        let mut session: Session = env
+            .storage()
+            .persistent()
+            .get(&sess_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound));
+        session.nonce += 1;
+        env.storage().persistent().set(&sess_key, &session);
+        env.storage().persistent().extend_ttl(&sess_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         // Get and increment session operation count
         let sopcnt_key = (symbol_short!("SOPCNT"), session_id);
