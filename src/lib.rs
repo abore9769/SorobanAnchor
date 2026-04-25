@@ -36,6 +36,7 @@ pub use sep6::{
 };
 pub use sep24::{
     initiate_interactive_deposit, initiate_interactive_withdrawal, fetch_sep24_transaction_status,
+    validate_interactive_url, validate_transaction_id,
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
@@ -82,3 +83,6 @@ mod capability_detection_tests;
 
 #[cfg(test)]
 mod attestor_endpoint_tests;
+
+#[cfg(test)]
+mod replay_protection_tests;

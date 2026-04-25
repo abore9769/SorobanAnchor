@@ -451,4 +451,151 @@ mod session_tests {
         );
         assert_eq!(id, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Closed session rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_submit_attestation_with_session_panics_when_session_closed() {
+        let env = make_env();
+        setup_ledger(&env);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let session_id = client.create_session(&user);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+
+        client.close_session(&session_id, &user);
+
+        // Should panic with SessionClosed
+        client.submit_attestation_with_session(
+            &session_id,
+            &attestor,
+            &subject,
+            &1700000001u64,
+            &payload(&env, 0x01),
+            &sig(&env, &[0x0a, 0x0b]),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_register_attestor_with_session_panics_when_session_closed() {
+        let env = make_env();
+        setup_ledger(&env);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        client.initialize(&admin);
+
+        let session_id = client.create_session(&user);
+        client.close_session(&session_id, &user);
+
+        // Should panic with SessionClosed
+        client.register_attestor_with_session(&session_id, &attestor);
+    }
+
+    // -----------------------------------------------------------------------
+    // Valid active session succeeds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_active_session_allows_operations() {
+        let env = make_env();
+        setup_ledger(&env);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let session_id = client.create_session(&user);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+
+        // Session is fresh — all operations should succeed
+        let id = client.submit_attestation_with_session(
+            &session_id,
+            &attestor,
+            &subject,
+            &1700000001u64,
+            &payload(&env, 0x01),
+            &sig(&env, &[0x0a, 0x0b]),
+        );
+        assert_eq!(id, 0);
+
+        let session = client.get_session(&session_id);
+        assert!(!session.closed);
+    }
+
+    // -----------------------------------------------------------------------
+    // TTL boundary: exactly at expiry is still valid, one second past is not
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_session_expired_one_second_past_ttl() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1000,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Session created at t=1000, TTL=3600 → expires at t=4601
+        let session_id = client.create_session(&user);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+
+        // Advance to t=4602 (one second past expiry)
+        env.ledger().set(LedgerInfo {
+            timestamp: 4602,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        // Should panic with SessionExpired
+        client.submit_attestation_with_session(
+            &session_id,
+            &attestor,
+            &subject,
+            &1700000001u64,
+            &payload(&env, 0x01),
+            &sig(&env, &[0x0a, 0x0b]),
+        );
+    }
 }
