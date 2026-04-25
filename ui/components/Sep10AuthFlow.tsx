@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { signTransaction } from "@stellar/freighter-api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Step =
@@ -440,10 +441,13 @@ export default function SEP10AuthFlow() {
   const [step, setStep] = useState<Step>("idle");
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [challenge, setChallenge] = useState<string | null>(null);
+  const [networkPassphrase, setNetworkPassphrase] = useState<string>("Test SDF Network ; September 2015");
+  const [webAuthEndpoint, setWebAuthEndpoint] = useState<string | null>(null);
   const [signedXdr, setSignedXdr] = useState<string | null>(null);
   const [jwt, setJwt] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorStep, setErrorStep] = useState<Step | null>(null);
   const [domain, setDomain] = useState("testanchor.stellar.org");
   const [log, setLog] = useState<string[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
@@ -483,6 +487,7 @@ export default function SEP10AuthFlow() {
   const connectWallet = async () => {
     setLoading(true);
     setError(null);
+    setErrorStep(null);
     addLog("Requesting wallet connection...");
     await sleep(900);
     addLog("Scanning for available wallets...");
@@ -499,57 +504,112 @@ export default function SEP10AuthFlow() {
   const fetchChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog(
-      `GET https://${domain}/auth?account=${wallet?.address.slice(0, 8)}...`,
-    );
-    await sleep(600);
-    addLog("Response: 200 OK");
-    await sleep(300);
-    const xdr = mockXDR();
-    addLog(`Challenge XDR received (${xdr.length} chars)`);
-    setChallenge(xdr);
-    setStep("sign");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      addLog(`GET https://${domain}/.well-known/stellar.toml`);
+      const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+      if (!tomlRes.ok) throw new Error(`stellar.toml fetch failed: ${tomlRes.status}`);
+      const toml = await tomlRes.text();
+      const match = toml.match(/WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/);
+      if (!match) throw new Error("WEB_AUTH_ENDPOINT not found in stellar.toml");
+      const endpoint = match[1];
+      addLog(`web_auth_endpoint: ${endpoint}`);
+      setWebAuthEndpoint(endpoint);
+
+      const url = `${endpoint}?account=${wallet!.address}`;
+      addLog(`GET ${url}`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Challenge fetch failed: ${res.status}`);
+      const data = await res.json();
+      if (!data.transaction) throw new Error("No transaction field in challenge response");
+      addLog(`Response: 200 OK`);
+      addLog(`Challenge XDR received (${data.transaction.length} chars)`);
+      setChallenge(data.transaction);
+      if (data.network_passphrase) setNetworkPassphrase(data.network_passphrase);
+      setStep("sign");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("challenge");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const signChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog("Sending challenge XDR to wallet for signing...");
-    await sleep(800);
-    addLog("User approved signature request");
-    await sleep(600);
-    const signed = mockXDR();
-    addLog("Transaction signed with ED25519 key ✓");
-    setSignedXdr(signed);
-    setStep("token");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      addLog("Sending challenge XDR to Freighter for signing...");
+      const result = await signTransaction(challenge!, { networkPassphrase });
+      if (result.error) throw new Error(String(result.error));
+      addLog("User approved signature request");
+      addLog("Transaction signed with ED25519 key ✓");
+      setSignedXdr(result.signedTxXdr);
+      setStep("token");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("sign");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const submitChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog(`POST https://${domain}/auth`);
-    addLog("Sending signed XDR...");
-    await sleep(700);
-    addLog("Response: 200 OK");
-    await sleep(300);
-    const token = mockJWT();
-    addLog("JWT received ✓");
-    addLog("Auth session established — expires in 24h");
-    setJwt(token);
-    setStep("authenticated");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      const endpoint = webAuthEndpoint ?? `https://${domain}/auth`;
+      addLog(`POST ${endpoint}`);
+      addLog("Sending signed XDR...");
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transaction: signedXdr }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `POST /auth failed: ${res.status}`);
+      if (!data.token) throw new Error("No token in auth response");
+      addLog("Response: 200 OK");
+      addLog("JWT received ✓");
+      addLog("Auth session established — expires in 24h");
+      setJwt(data.token);
+      setStep("authenticated");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("token");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const reset = () => {
     setStep("idle");
     setWallet(null);
     setChallenge(null);
+    setNetworkPassphrase("Test SDF Network ; September 2015");
+    setWebAuthEndpoint(null);
     setSignedXdr(null);
     setJwt(null);
     setError(null);
+    setErrorStep(null);
     addLog("─── Session reset ───");
+  };
+
+  const retryFromStep = () => {
+    setError(null);
+    if (errorStep === "challenge") { setChallenge(null); setStep("challenge"); }
+    else if (errorStep === "sign") { setSignedXdr(null); setStep("sign"); }
+    else if (errorStep === "token") { setSignedXdr(null); setStep("token"); }
+    else reset();
+    setErrorStep(null);
   };
 
   // ─ Step cards config ─
@@ -1115,6 +1175,49 @@ export default function SEP10AuthFlow() {
             );
           })}
         </div>
+
+        {/* ── Error Banner ── */}
+        {error && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 16,
+              padding: "14px 16px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,80,80,0.4)",
+              background: "rgba(255,80,80,0.07)",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 12,
+              animation: "sep10-slide-in 0.3s ease",
+            }}
+          >
+            <span style={{ fontSize: 16, flexShrink: 0, color: "#ff5050" }}>⚠</span>
+            <div style={{ flex: 1, fontSize: 11, color: "#ff9090", lineHeight: 1.5 }}>
+              {error}
+            </div>
+            <button
+              onClick={retryFromStep}
+              style={{
+                flexShrink: 0,
+                padding: "5px 12px",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.15em",
+                textTransform: "uppercase",
+                fontFamily: "inherit",
+                cursor: "pointer",
+                borderRadius: 5,
+                border: "1px solid rgba(255,80,80,0.5)",
+                background: "rgba(255,80,80,0.12)",
+                color: "#ff7070",
+                transition: "all 0.2s",
+              }}
+            >
+              ↺ Try Again
+            </button>
+          </div>
+        )}
 
         {/* ── Step Cards Grid ── */}
         <div
