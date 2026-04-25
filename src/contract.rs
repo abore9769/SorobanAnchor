@@ -163,6 +163,54 @@ pub struct RoutingOptions {
     pub subject: Address,
 }
 
+/// Composite weighted routing strategy.
+/// `fee_weight + speed_weight + reputation_weight` must equal 1.0.
+pub struct WeightedRoutingStrategy {
+    pub fee_weight: f32,
+    pub speed_weight: f32,
+    pub reputation_weight: f32,
+}
+
+impl WeightedRoutingStrategy {
+    /// Validate that weights sum to 1.0 (within floating-point tolerance).
+    pub fn validate(&self) -> bool {
+        let sum = self.fee_weight + self.speed_weight + self.reputation_weight;
+        (sum - 1.0_f32).abs() < 1e-4
+    }
+
+    /// Compute a normalized composite score in [0.0, 1.0].
+    /// Lower fee and faster settlement are better; higher reputation is better.
+    /// Each dimension is normalised against the provided max values.
+    pub fn score_anchor(
+        &self,
+        fee_pct: u32,
+        settlement_time: u64,
+        reputation: u32,
+        max_fee: u32,
+        max_settlement: u64,
+        max_reputation: u32,
+    ) -> f32 {
+        let fee_score = if max_fee == 0 {
+            1.0_f32
+        } else {
+            1.0_f32 - (fee_pct as f32 / max_fee as f32)
+        };
+        let speed_score = if max_settlement == 0 {
+            1.0_f32
+        } else {
+            1.0_f32 - (settlement_time as f32 / max_settlement as f32)
+        };
+        let rep_score = if max_reputation == 0 {
+            0.0_f32
+        } else {
+            reputation as f32 / max_reputation as f32
+        };
+        self.fee_weight * fee_score
+            + self.speed_weight * speed_score
+            + self.reputation_weight * rep_score
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KYC and Compliance types
 // ---------------------------------------------------------------------------
@@ -216,6 +264,10 @@ pub struct MetadataCache {
     pub metadata: AnchorMetadata,
     pub cached_at: u64,
     pub ttl_seconds: u64,
+    /// Grace period after `ttl_seconds` during which stale data may be served.
+    pub stale_ttl_seconds: u64,
+    /// Set to `true` when the entry is within the stale window; caller should refresh.
+    pub needs_refresh: bool,
 }
 
 #[contracttype]
@@ -365,6 +417,10 @@ fn kyc_record_key(subject: &Address) -> (Symbol, Address) {
 
 fn compliance_check_key(subject: &Address, check_type: &String) -> (Symbol, Address, String) {
     (symbol_short!("COMP"), subject.clone(), check_type.clone())
+}
+
+fn anchor_meta_opt(env: &Env, anchor: &Address) -> Option<RoutingAnchorMeta> {
+    env.storage().persistent().get(&(symbol_short!("ANCHMETA"), anchor.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,7 +1538,13 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     pub fn cache_metadata(env: Env, anchor: Address, metadata: AnchorMetadata, ttl_seconds: u64) {
         Self::require_admin(&env);
         let now = env.ledger().timestamp();
-        let entry = MetadataCache { metadata, cached_at: now, ttl_seconds };
+        let entry = MetadataCache {
+            metadata,
+            cached_at: now,
+            ttl_seconds,
+            stale_ttl_seconds: 0,
+            needs_refresh: false,
+        };
         let key = (symbol_short!("METACACHE"), anchor);
         let ledger_ttl = if ttl_seconds as u32 > MIN_TEMP_TTL { ttl_seconds as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
@@ -1504,6 +1566,83 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         Self::require_admin(&env);
         let key = (symbol_short!("METACACHE"), anchor);
         env.storage().temporary().remove(&key);
+    }
+
+    /// Store a metadata entry with a stale-while-revalidate grace period.
+    /// After `ttl_seconds` the entry becomes stale; after `ttl_seconds + stale_ttl_seconds`
+    /// it is fully expired and `get_cached_metadata_swr` will return an error.
+    pub fn cache_metadata_swr(
+        env: Env,
+        anchor: Address,
+        metadata: AnchorMetadata,
+        ttl_seconds: u64,
+        stale_ttl_seconds: u64,
+    ) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let entry = MetadataCache {
+            metadata,
+            cached_at: now,
+            ttl_seconds,
+            stale_ttl_seconds,
+            needs_refresh: false,
+        };
+        let key = (symbol_short!("METACACHE"), anchor);
+        let total_ttl = ttl_seconds.saturating_add(stale_ttl_seconds);
+        let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
+        env.storage().temporary().set(&key, &entry);
+        env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
+    }
+
+    /// Retrieve a metadata entry using the stale-while-revalidate policy.
+    ///
+    /// Returns `(metadata, needs_refresh)`:
+    /// - `needs_refresh = false` → entry is fresh (within primary TTL)
+    /// - `needs_refresh = true`  → entry is stale (within grace period); caller should refresh
+    ///
+    /// Panics with `CacheExpired` once both TTLs have elapsed, or `CacheNotFound` if absent.
+    pub fn get_cached_metadata_swr(env: Env, anchor: Address) -> (AnchorMetadata, bool) {
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        let mut entry: MetadataCache = env.storage().temporary().get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::CacheNotFound));
+        let now = env.ledger().timestamp();
+        let age = now.saturating_sub(entry.cached_at);
+
+        if age <= entry.ttl_seconds {
+            // Fresh
+            (entry.metadata, false)
+        } else if age <= entry.ttl_seconds.saturating_add(entry.stale_ttl_seconds) {
+            // Stale — mark needs_refresh and persist the flag
+            entry.needs_refresh = true;
+            env.storage().temporary().set(&key, &entry);
+            (entry.metadata, true)
+        } else {
+            panic_with_error!(&env, ErrorCode::CacheExpired);
+        }
+    }
+
+    /// Unconditionally replace the cached metadata entry, resetting both TTL clocks.
+    pub fn force_refresh_metadata(
+        env: Env,
+        anchor: Address,
+        metadata: AnchorMetadata,
+        ttl_seconds: u64,
+        stale_ttl_seconds: u64,
+    ) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let entry = MetadataCache {
+            metadata,
+            cached_at: now,
+            ttl_seconds,
+            stale_ttl_seconds,
+            needs_refresh: false,
+        };
+        let key = (symbol_short!("METACACHE"), anchor);
+        let total_ttl = ttl_seconds.saturating_add(stale_ttl_seconds);
+        let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
+        env.storage().temporary().set(&key, &entry);
+        env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
     }
 
     // -----------------------------------------------------------------------
@@ -1785,6 +1924,107 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         best
     }
 
+    /// Return up to `max_results` quotes sorted by descending weighted composite score.
+    /// Weights (scaled ×1000) must sum to 1000; panics with `InvalidWeights` otherwise.
+    pub fn route_anchors(
+        env: Env,
+        fee_weight: u32,       // scaled ×1000, e.g. 333 = 0.333
+        speed_weight: u32,
+        reputation_weight: u32,
+        max_results: u32,
+        min_reputation: u32,
+    ) -> Vec<Quote> {
+        let fw = fee_weight as f32 / 1000.0_f32;
+        let sw = speed_weight as f32 / 1000.0_f32;
+        let rw = reputation_weight as f32 / 1000.0_f32;
+        let strategy = WeightedRoutingStrategy {
+            fee_weight: fw,
+            speed_weight: sw,
+            reputation_weight: rw,
+        };
+        if !strategy.validate() {
+            panic_with_error!(&env, ErrorCode::InvalidWeights);
+        }
+
+        let now = env.ledger().timestamp();
+        let list_key = soroban_sdk::vec![&env, symbol_short!("ANCHLIST")];
+        let anchors: Vec<Address> = env.storage().persistent()
+            .get::<_, Vec<Address>>(&list_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // First pass: find max values for normalisation
+        let mut max_fee: u32 = 1;
+        let mut max_settlement: u64 = 1;
+        let mut max_reputation: u32 = 1;
+
+        for anchor in anchors.iter() {
+            let meta: RoutingAnchorMeta = match anchor_meta_opt(&env, &anchor) {
+                Some(m) if m.is_active && m.reputation_score >= min_reputation => m,
+                _ => continue,
+            };
+            let lq_key = (symbol_short!("LATESTQ"), anchor.clone());
+            let quote_id: u64 = match env.storage().persistent().get(&lq_key) {
+                Some(id) => id,
+                None => continue,
+            };
+            let q_key = (symbol_short!("QUOTE"), anchor.clone(), quote_id);
+            let quote: Quote = match env.storage().persistent().get(&q_key) {
+                Some(q) => q,
+                None => continue,
+            };
+            if quote.valid_until <= now { continue; }
+            if meta.average_settlement_time > max_settlement { max_settlement = meta.average_settlement_time; }
+            if meta.reputation_score > max_reputation { max_reputation = meta.reputation_score; }
+            if quote.fee_percentage > max_fee { max_fee = quote.fee_percentage; }
+        }
+
+        // Second pass: score into a native vec, then sort
+        let mut scored: alloc::vec::Vec<(u32, Quote)> = alloc::vec::Vec::new();
+
+        for anchor in anchors.iter() {
+            let meta: RoutingAnchorMeta = match anchor_meta_opt(&env, &anchor) {
+                Some(m) if m.is_active && m.reputation_score >= min_reputation => m,
+                _ => continue,
+            };
+            let lq_key = (symbol_short!("LATESTQ"), anchor.clone());
+            let quote_id: u64 = match env.storage().persistent().get(&lq_key) {
+                Some(id) => id,
+                None => continue,
+            };
+            let q_key = (symbol_short!("QUOTE"), anchor.clone(), quote_id);
+            let quote: Quote = match env.storage().persistent().get(&q_key) {
+                Some(q) => q,
+                None => continue,
+            };
+            if quote.valid_until <= now { continue; }
+
+            let score = strategy.score_anchor(
+                quote.fee_percentage,
+                meta.average_settlement_time,
+                meta.reputation_score,
+                max_fee,
+                max_settlement,
+                max_reputation,
+            );
+            scored.push(((score * 1_000_000.0_f32) as u32, quote));
+        }
+
+        // Sort descending by score
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        // Return top max_results quotes as a Soroban Vec
+        let limit = if max_results == 0 { 3u32 } else { max_results };
+        let mut result: Vec<Quote> = Vec::new(&env);
+        for (_, quote) in scored.into_iter().take(limit as usize) {
+            result.push_back(quote);
+        }
+        result
+    }
+
+
+        let limit = if max_results == 0 { 3u32 } else { max_results };
+        let mut result: Vec<Quote> = Vec::new(&env);
+        let mut taken = 0u32;
     // -----------------------------------------------------------------------
     // Anchor Info Discovery
     // -----------------------------------------------------------------------

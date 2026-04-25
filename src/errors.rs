@@ -72,6 +72,7 @@ pub enum ErrorCode {
  main
     CacheExpired = 48,
     CacheNotFound = 49,
+    InvalidWeights = 50,
 }
 
 impl ErrorCode {
@@ -105,6 +106,7 @@ impl ErrorCode {
             ErrorCode::SessionExpired => "Session has expired",
             ErrorCode::CacheExpired => "Cache entry has expired",
             ErrorCode::CacheNotFound => "Cache entry not found",
+            ErrorCode::InvalidWeights => "Routing weights must sum to 1.0",
  fix/kyc-pending-error-code-22
 
             ErrorCode::IllegalTransition => "Illegal transaction state transition",

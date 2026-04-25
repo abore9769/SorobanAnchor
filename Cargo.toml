@@ -21,7 +21,12 @@ path = "examples/request_history_example.rs"
 
 [features]
 default = ["std"]
+# std: enables standard library support (networking, filesystem, threads).
+#      Enabled by default for native builds. Must be disabled for WASM targets.
 std = []
+# wasm: targets wasm32-unknown-unknown for Soroban on-chain deployment.
+#       Disables std, reqwest, and any host-only modules (main.rs CLI, examples).
+#       Build with: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
 wasm = []
 mock-only = []
 stress-tests = []

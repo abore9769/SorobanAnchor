@@ -12,9 +12,11 @@ mod transaction_state_tracker;
 pub mod sep6;
 pub mod sep24;
 pub mod contract;
+pub mod stellar_toml;
 
 pub use domain_validator::validate_anchor_domain;
 pub use errors::{AnchorKitError, ErrorCode};
+pub use stellar_toml::{ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
 pub use errors::Error;
@@ -82,3 +84,6 @@ mod capability_detection_tests;
 
 #[cfg(test)]
 mod attestor_endpoint_tests;
+
+#[cfg(test)]
+mod stellar_toml_tests;
