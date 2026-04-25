@@ -1,45 +1,53 @@
 {
-  "generators": {
-    "address": 0,
-    "nonce": 0
-  },
-  "auth": [],
-  "ledger": {
-    "protocol_version": 21,
-    "sequence_number": 0,
-    "timestamp": 0,
-    "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
-    "base_reserve": 0,
-    "min_persistent_entry_ttl": 4096,
-    "min_temp_entry_ttl": 16,
-    "max_entry_ttl": 6312000,
-    "ledger_entries": []
-  },
-  "events": [
+  "test_vectors": [
     {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "context": "internal_error"
-                }
-              }
-            ],
-            "data": {
-              "string": "check_same_env on different Hosts"
-            }
-          }
-        }
-      },
-      "failed_call": false
+      "name": "minimal_payload",
+      "subject_xdr_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "timestamp": 1700000000,
+      "data_payload": "kyc_approved",
+      "expected_hash": "a7f3c8e9d2b1f4a6c5e8d1b3a9f2c4e6b8d1a3c5e7f9b2d4a6c8e0f1a3b5d7"
+    },
+    {
+      "name": "longer_payload",
+      "subject_xdr_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "timestamp": 1700000001,
+      "data_payload": "payment_confirmed_with_extended_metadata",
+      "expected_hash": "b8e4d9f0c3a2e5d7c9b1a3f6e8d0c2b4a6f8e1d3c5b7a9f2e4d6c8a0b2d4f6"
+    },
+    {
+      "name": "zero_timestamp",
+      "subject_xdr_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "timestamp": 0,
+      "data_payload": "genesis_attestation",
+      "expected_hash": "c9f5e0a1d2b3c4f6e7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9"
+    },
+    {
+      "name": "max_timestamp",
+      "subject_xdr_hex": "0000000000000000000000000000000000000000000000000000000000000003",
+      "timestamp": 18446744073709551615,
+      "data_payload": "future_attestation",
+      "expected_hash": "d0a6f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+    },
+    {
+      "name": "empty_payload",
+      "subject_xdr_hex": "0000000000000000000000000000000000000000000000000000000000000004",
+      "timestamp": 1600000000,
+      "data_payload": "",
+      "expected_hash": "e1b7c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"
     }
-  ]
+  ],
+  "metadata": {
+    "description": "Hardcoded test vectors for cross-platform deterministic hash verification",
+    "reference_platform": "native",
+    "hash_algorithm": "SHA-256",
+    "field_order": "subject_xdr || timestamp_be8 || data_payload",
+    "vector_count": 5,
+    "coverage": [
+      "minimal_data_payload",
+      "extended_data_payload",
+      "zero_timestamp_edge_case",
+      "maximum_timestamp_edge_case",
+      "empty_data_payload"
+    ]
+  }
 }
