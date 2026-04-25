@@ -9,6 +9,7 @@ mod rate_limiter;
 mod response_validator;
 mod retry;
 mod transaction_state_tracker;
+pub mod webhook;
 pub mod sep6;
 pub mod sep24;
 pub mod contract;
@@ -26,6 +27,7 @@ pub use response_validator::{
 };
 pub use retry::{retry_with_backoff, is_retryable, RetryConfig};
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
+pub use webhook::{deliver_webhook, get_dead_letter_webhooks, WebhookDeliveryConfig};
 
 #[cfg(test)]
 mod transaction_state_tracker_tests;
