@@ -21,96 +21,106 @@ use soroban_sdk::contracterror;
 
 /// Numeric error codes for every AnchorKit error kind.
 ///
-/// The `#[contracterror]` attribute keeps Soroban on-chain compatibility.
+/// # Numbering scheme
+///
+/// Codes are grouped by category. Gaps are intentional to allow future additions
+/// within each group without renumbering existing codes.
+///
+/// | Range  | Category                        |
+/// |--------|---------------------------------|
+/// |  1–10  | Auth / attestor errors          |
+/// | 11–19  | Validation / quote / flow errors|
+/// | 20–29  | KYC / webhook / state errors    |
+/// | 48–49  | Cache errors                    |
+///
+/// # Discriminant changelog (issue #160 — merge-conflict resolution)
+///
+/// The following values changed from their conflicted branch values to the
+/// canonical values below. Downstream consumers that hard-code numeric codes
+/// must update accordingly:
+///
+/// | Variant              | Old (conflicted)  | Canonical |
+/// |----------------------|-------------------|-----------|
+/// | `KycPending`         | 20 or 22          | 20        |
+/// | `KycRejected`        | 21 or 23          | 21        |
+/// | `WebhookDeliveryFailed` | 24             | 22        |
+/// | `NotInitialized`     | 22, 25            | 23        |
+/// | `IllegalTransition`  | 23, 24, 26        | 24        |
+/// | `SessionExpired`     | 25, 27            | 25        |
+/// | `SessionClosed`      | 26 (one branch)   | 26        |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ErrorCode {
-    AlreadyInitialized = 1,
+    // Auth / attestor errors (1–10)
+    AlreadyInitialized        = 1,
     AttestorAlreadyRegistered = 2,
-    AttestorNotRegistered = 3,
-    UnauthorizedAttestor = 4,
-    InvalidTimestamp = 5,
-    ReplayAttack = 6,
-    InvalidQuote = 7,
-    InvalidServiceType = 8,
-    InvalidTransactionIntent = 9,
-    StaleQuote = 10,
-    ComplianceNotMet = 11,
-    InvalidEndpointFormat = 12,
-    NoQuotesAvailable = 13,
-    ServicesNotConfigured = 14,
-    ValidationError = 15,
-    RateLimitExceeded = 16,
-    AttestationNotFound = 17,
-    InvalidSep10Token = 18,
-    KycNotFound = 19,
- feat/session-expiry-check
-    KycPending = 22,
-    KycRejected = 23,
-    WebhookDeliveryFailed = 24,
-    NotInitialized = 25,
-    IllegalTransition = 26,
-    SessionExpired = 27,
+    AttestorNotRegistered     = 3,
+    UnauthorizedAttestor      = 4,
+    InvalidTimestamp          = 5,
+    ReplayAttack              = 6,
+    InvalidQuote              = 7,
+    InvalidServiceType        = 8,
+    InvalidTransactionIntent  = 9,
+    StaleQuote                = 10,
 
-    KycRejected = 21,
- fix/kyc-pending-error-code-22
- fix/kyc-rejected-error-code-23
+    // Validation / quote / flow errors (11–19)
+    ComplianceNotMet          = 11,
+    InvalidEndpointFormat     = 12,
+    NoQuotesAvailable         = 13,
+    ServicesNotConfigured     = 14,
+    ValidationError           = 15,
+    RateLimitExceeded         = 16,
+    AttestationNotFound       = 17,
+    InvalidSep10Token         = 18,
+    KycNotFound               = 19,
 
-    KycRejected = 21,
- fix/kyc-pending-error-code-22
- main
-    KycPending = 22,
-    KycRejected = 23,
-    NotInitialized = 25,
-    IllegalTransition = 24,
+    // KYC / webhook / state errors (20–29)
+    KycPending                = 20,
+    KycRejected               = 21,
+    WebhookDeliveryFailed     = 22,
+    NotInitialized            = 23,
+    IllegalTransition         = 24,
+    SessionExpired            = 25,
+    SessionClosed             = 26,
 
-    NotInitialized = 22,
-    IllegalTransition = 23,
-    SessionExpired = 25,
-    SessionClosed = 26,
- main
-    CacheExpired = 48,
-    CacheNotFound = 49,
+    // Cache errors (48–49)
+    CacheExpired              = 48,
+    CacheNotFound             = 49,
 }
 
 impl ErrorCode {
     /// Returns the canonical human-readable message for this error code.
     pub fn default_message(&self) -> &'static str {
         match self {
-            ErrorCode::AlreadyInitialized => "Contract is already initialized",
+            ErrorCode::AlreadyInitialized        => "Contract is already initialized",
             ErrorCode::AttestorAlreadyRegistered => "Attestor is already registered",
-            ErrorCode::AttestorNotRegistered => "Attestor is not registered",
-            ErrorCode::UnauthorizedAttestor => "Attestor is not authorized",
-            ErrorCode::InvalidTimestamp => "Timestamp is invalid",
-            ErrorCode::ReplayAttack => "Replay attack detected",
-            ErrorCode::InvalidQuote => "Quote is invalid",
-            ErrorCode::InvalidServiceType => "Service type is invalid",
-            ErrorCode::InvalidTransactionIntent => "Transaction intent is invalid",
-            ErrorCode::StaleQuote => "Quote has expired",
-            ErrorCode::ComplianceNotMet => "Compliance requirements not met",
-            ErrorCode::InvalidEndpointFormat => "Endpoint format is invalid",
-            ErrorCode::NoQuotesAvailable => "No quotes are available",
-            ErrorCode::ServicesNotConfigured => "Services are not configured",
-            ErrorCode::ValidationError => "Response schema validation failed",
-            ErrorCode::RateLimitExceeded => "Rate limit exceeded",
-            ErrorCode::AttestationNotFound => "Attestation not found",
-            ErrorCode::InvalidSep10Token => "SEP-10 JWT is missing, expired, or invalid",
-            ErrorCode::KycNotFound => "KYC record not found",
-            ErrorCode::KycPending => "KYC verification is pending",
-            ErrorCode::KycRejected => "KYC verification was rejected",
-            ErrorCode::WebhookDeliveryFailed => "Webhook delivery failed validation",
-            ErrorCode::NotInitialized => "Contract is not initialized",
-            ErrorCode::IllegalTransition => "Illegal transaction state transition",
-            ErrorCode::SessionExpired => "Session has expired",
-            ErrorCode::CacheExpired => "Cache entry has expired",
-            ErrorCode::CacheNotFound => "Cache entry not found",
- fix/kyc-pending-error-code-22
-
-            ErrorCode::IllegalTransition => "Illegal transaction state transition",
-            ErrorCode::SessionExpired => "Session has expired",
-            ErrorCode::SessionClosed => "Session is closed",
- main
+            ErrorCode::AttestorNotRegistered     => "Attestor is not registered",
+            ErrorCode::UnauthorizedAttestor      => "Attestor is not authorized",
+            ErrorCode::InvalidTimestamp          => "Timestamp is invalid",
+            ErrorCode::ReplayAttack              => "Replay attack detected",
+            ErrorCode::InvalidQuote              => "Quote is invalid",
+            ErrorCode::InvalidServiceType        => "Service type is invalid",
+            ErrorCode::InvalidTransactionIntent  => "Transaction intent is invalid",
+            ErrorCode::StaleQuote                => "Quote has expired",
+            ErrorCode::ComplianceNotMet          => "Compliance requirements not met",
+            ErrorCode::InvalidEndpointFormat     => "Endpoint format is invalid",
+            ErrorCode::NoQuotesAvailable         => "No quotes are available",
+            ErrorCode::ServicesNotConfigured     => "Services are not configured",
+            ErrorCode::ValidationError           => "Response schema validation failed",
+            ErrorCode::RateLimitExceeded         => "Rate limit exceeded",
+            ErrorCode::AttestationNotFound       => "Attestation not found",
+            ErrorCode::InvalidSep10Token         => "SEP-10 JWT is missing, expired, or invalid",
+            ErrorCode::KycNotFound               => "KYC record not found",
+            ErrorCode::KycPending                => "KYC verification is pending",
+            ErrorCode::KycRejected               => "KYC verification was rejected",
+            ErrorCode::WebhookDeliveryFailed     => "Webhook delivery failed validation",
+            ErrorCode::NotInitialized            => "Contract is not initialized",
+            ErrorCode::IllegalTransition         => "Illegal transaction state transition",
+            ErrorCode::SessionExpired            => "Session has expired",
+            ErrorCode::SessionClosed             => "Session is closed",
+            ErrorCode::CacheExpired              => "Cache entry has expired",
+            ErrorCode::CacheNotFound             => "Cache entry not found",
         }
     }
 }
@@ -161,96 +171,39 @@ impl AnchorKitError {
     // Named constructors — one per ErrorCode variant
     // ------------------------------------------------------------------
 
-    pub fn already_initialized() -> Self {
-        Self::from_code(ErrorCode::AlreadyInitialized)
-    }
-
-    pub fn attestor_already_registered() -> Self {
-        Self::from_code(ErrorCode::AttestorAlreadyRegistered)
-    }
-
-    pub fn attestor_not_registered() -> Self {
-        Self::from_code(ErrorCode::AttestorNotRegistered)
-    }
-
-    pub fn unauthorized_attestor() -> Self {
-        Self::from_code(ErrorCode::UnauthorizedAttestor)
-    }
-
-    pub fn invalid_timestamp() -> Self {
-        Self::from_code(ErrorCode::InvalidTimestamp)
-    }
-
-    pub fn replay_attack() -> Self {
-        Self::from_code(ErrorCode::ReplayAttack)
-    }
-
-    pub fn invalid_quote() -> Self {
-        Self::from_code(ErrorCode::InvalidQuote)
-    }
-
-    pub fn invalid_service_type() -> Self {
-        Self::from_code(ErrorCode::InvalidServiceType)
-    }
-
-    pub fn invalid_transaction_intent() -> Self {
-        Self::from_code(ErrorCode::InvalidTransactionIntent)
-    }
-
-    pub fn stale_quote() -> Self {
-        Self::from_code(ErrorCode::StaleQuote)
-    }
-
-    pub fn compliance_not_met() -> Self {
-        Self::from_code(ErrorCode::ComplianceNotMet)
-    }
-
-    pub fn invalid_endpoint_format() -> Self {
-        Self::from_code(ErrorCode::InvalidEndpointFormat)
-    }
-
-    pub fn no_quotes_available() -> Self {
-        Self::from_code(ErrorCode::NoQuotesAvailable)
-    }
-
-    pub fn services_not_configured() -> Self {
-        Self::from_code(ErrorCode::ServicesNotConfigured)
-    }
-
-    pub fn not_initialized() -> Self {
-        Self::from_code(ErrorCode::NotInitialized)
-    }
-
-    pub fn attestation_not_found() -> Self {
-        Self::from_code(ErrorCode::AttestationNotFound)
-    }
-
-    pub fn invalid_sep10_token() -> Self {
-        Self::from_code(ErrorCode::InvalidSep10Token)
-    }
-
-    pub fn kyc_not_found() -> Self {
-        Self::from_code(ErrorCode::KycNotFound)
-    }
-
-    pub fn kyc_pending() -> Self {
-        Self::from_code(ErrorCode::KycPending)
-    }
-
-    pub fn kyc_rejected() -> Self {
-        Self::from_code(ErrorCode::KycRejected)
-    }
-
-    pub fn webhook_delivery_failed() -> Self {
-        Self::from_code(ErrorCode::WebhookDeliveryFailed)
-    }
+    pub fn already_initialized() -> Self { Self::from_code(ErrorCode::AlreadyInitialized) }
+    pub fn attestor_already_registered() -> Self { Self::from_code(ErrorCode::AttestorAlreadyRegistered) }
+    pub fn attestor_not_registered() -> Self { Self::from_code(ErrorCode::AttestorNotRegistered) }
+    pub fn unauthorized_attestor() -> Self { Self::from_code(ErrorCode::UnauthorizedAttestor) }
+    pub fn invalid_timestamp() -> Self { Self::from_code(ErrorCode::InvalidTimestamp) }
+    pub fn replay_attack() -> Self { Self::from_code(ErrorCode::ReplayAttack) }
+    pub fn invalid_quote() -> Self { Self::from_code(ErrorCode::InvalidQuote) }
+    pub fn invalid_service_type() -> Self { Self::from_code(ErrorCode::InvalidServiceType) }
+    pub fn invalid_transaction_intent() -> Self { Self::from_code(ErrorCode::InvalidTransactionIntent) }
+    pub fn stale_quote() -> Self { Self::from_code(ErrorCode::StaleQuote) }
+    pub fn compliance_not_met() -> Self { Self::from_code(ErrorCode::ComplianceNotMet) }
+    pub fn invalid_endpoint_format() -> Self { Self::from_code(ErrorCode::InvalidEndpointFormat) }
+    pub fn no_quotes_available() -> Self { Self::from_code(ErrorCode::NoQuotesAvailable) }
+    pub fn services_not_configured() -> Self { Self::from_code(ErrorCode::ServicesNotConfigured) }
+    pub fn not_initialized() -> Self { Self::from_code(ErrorCode::NotInitialized) }
+    pub fn attestation_not_found() -> Self { Self::from_code(ErrorCode::AttestationNotFound) }
+    pub fn invalid_sep10_token() -> Self { Self::from_code(ErrorCode::InvalidSep10Token) }
+    pub fn kyc_not_found() -> Self { Self::from_code(ErrorCode::KycNotFound) }
+    pub fn kyc_pending() -> Self { Self::from_code(ErrorCode::KycPending) }
+    pub fn kyc_rejected() -> Self { Self::from_code(ErrorCode::KycRejected) }
+    pub fn webhook_delivery_failed() -> Self { Self::from_code(ErrorCode::WebhookDeliveryFailed) }
+    pub fn rate_limit_exceeded() -> Self { Self::from_code(ErrorCode::RateLimitExceeded) }
+    pub fn session_expired() -> Self { Self::from_code(ErrorCode::SessionExpired) }
+    pub fn session_closed() -> Self { Self::from_code(ErrorCode::SessionClosed) }
+    pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
+    pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
 
     pub fn validation_error(context: &str) -> Self {
-        Self::with_context(ErrorCode::ValidationError, ErrorCode::ValidationError.default_message(), context)
-    }
-
-    pub fn rate_limit_exceeded() -> Self {
-        Self::from_code(ErrorCode::RateLimitExceeded)
+        Self::with_context(
+            ErrorCode::ValidationError,
+            ErrorCode::ValidationError.default_message(),
+            context,
+        )
     }
 
     pub fn illegal_transition(from: &str, to: &str) -> Self {
@@ -260,17 +213,6 @@ impl AnchorKitError {
             &alloc::format!("{} -> {}", from, to),
         )
     }
-
-    pub fn session_expired() -> Self {
-        Self::from_code(ErrorCode::SessionExpired)
-    }
- feat/session-expiry-check
-
-
-    pub fn session_closed() -> Self {
-        Self::from_code(ErrorCode::SessionClosed)
-    }
- main
 }
 
 // ---------------------------------------------------------------------------
@@ -318,25 +260,25 @@ mod tests {
 
     #[test]
     fn test_named_constructors() {
-        assert_eq!(AnchorKitError::already_initialized().code, ErrorCode::AlreadyInitialized);
-        assert_eq!(AnchorKitError::attestor_already_registered().code, ErrorCode::AttestorAlreadyRegistered);
-        assert_eq!(AnchorKitError::attestor_not_registered().code, ErrorCode::AttestorNotRegistered);
-        assert_eq!(AnchorKitError::unauthorized_attestor().code, ErrorCode::UnauthorizedAttestor);
-        assert_eq!(AnchorKitError::invalid_timestamp().code, ErrorCode::InvalidTimestamp);
-        assert_eq!(AnchorKitError::replay_attack().code, ErrorCode::ReplayAttack);
-        assert_eq!(AnchorKitError::invalid_quote().code, ErrorCode::InvalidQuote);
-        assert_eq!(AnchorKitError::invalid_service_type().code, ErrorCode::InvalidServiceType);
-        assert_eq!(AnchorKitError::invalid_transaction_intent().code, ErrorCode::InvalidTransactionIntent);
-        assert_eq!(AnchorKitError::stale_quote().code, ErrorCode::StaleQuote);
-        assert_eq!(AnchorKitError::compliance_not_met().code, ErrorCode::ComplianceNotMet);
-        assert_eq!(AnchorKitError::invalid_endpoint_format().code, ErrorCode::InvalidEndpointFormat);
-        assert_eq!(AnchorKitError::no_quotes_available().code, ErrorCode::NoQuotesAvailable);
-        assert_eq!(AnchorKitError::services_not_configured().code, ErrorCode::ServicesNotConfigured);
-        assert_eq!(AnchorKitError::invalid_sep10_token().code, ErrorCode::InvalidSep10Token);
-        assert_eq!(AnchorKitError::kyc_not_found().code, ErrorCode::KycNotFound);
-        assert_eq!(AnchorKitError::kyc_pending().code, ErrorCode::KycPending);
-        assert_eq!(AnchorKitError::kyc_rejected().code, ErrorCode::KycRejected);
-        assert_eq!(AnchorKitError::webhook_delivery_failed().code, ErrorCode::WebhookDeliveryFailed);
+        assert_eq!(AnchorKitError::already_initialized().code,          ErrorCode::AlreadyInitialized);
+        assert_eq!(AnchorKitError::attestor_already_registered().code,  ErrorCode::AttestorAlreadyRegistered);
+        assert_eq!(AnchorKitError::attestor_not_registered().code,      ErrorCode::AttestorNotRegistered);
+        assert_eq!(AnchorKitError::unauthorized_attestor().code,        ErrorCode::UnauthorizedAttestor);
+        assert_eq!(AnchorKitError::invalid_timestamp().code,            ErrorCode::InvalidTimestamp);
+        assert_eq!(AnchorKitError::replay_attack().code,                ErrorCode::ReplayAttack);
+        assert_eq!(AnchorKitError::invalid_quote().code,                ErrorCode::InvalidQuote);
+        assert_eq!(AnchorKitError::invalid_service_type().code,         ErrorCode::InvalidServiceType);
+        assert_eq!(AnchorKitError::invalid_transaction_intent().code,   ErrorCode::InvalidTransactionIntent);
+        assert_eq!(AnchorKitError::stale_quote().code,                  ErrorCode::StaleQuote);
+        assert_eq!(AnchorKitError::compliance_not_met().code,           ErrorCode::ComplianceNotMet);
+        assert_eq!(AnchorKitError::invalid_endpoint_format().code,      ErrorCode::InvalidEndpointFormat);
+        assert_eq!(AnchorKitError::no_quotes_available().code,          ErrorCode::NoQuotesAvailable);
+        assert_eq!(AnchorKitError::services_not_configured().code,      ErrorCode::ServicesNotConfigured);
+        assert_eq!(AnchorKitError::invalid_sep10_token().code,          ErrorCode::InvalidSep10Token);
+        assert_eq!(AnchorKitError::kyc_not_found().code,                ErrorCode::KycNotFound);
+        assert_eq!(AnchorKitError::kyc_pending().code,                  ErrorCode::KycPending);
+        assert_eq!(AnchorKitError::kyc_rejected().code,                 ErrorCode::KycRejected);
+        assert_eq!(AnchorKitError::webhook_delivery_failed().code,      ErrorCode::WebhookDeliveryFailed);
     }
 
     #[test]
@@ -368,23 +310,15 @@ mod tests {
             ErrorCode::AttestationNotFound,
             ErrorCode::InvalidSep10Token,
             ErrorCode::KycNotFound,
- feat/webhook-delivery-failed-error-code-24
-
-            ErrorCode::KycRejected,
- fix/kyc-pending-error-code-22
             ErrorCode::KycPending,
             ErrorCode::KycRejected,
             ErrorCode::WebhookDeliveryFailed,
             ErrorCode::NotInitialized,
-
- main
-            ErrorCode::IllegalTransition,
-            ErrorCode::SessionExpired,
-            ErrorCode::CacheExpired,
-            ErrorCode::CacheNotFound,
             ErrorCode::IllegalTransition,
             ErrorCode::SessionExpired,
             ErrorCode::SessionClosed,
+            ErrorCode::CacheExpired,
+            ErrorCode::CacheNotFound,
         ];
         for code in codes {
             assert!(!code.default_message().is_empty());
@@ -392,8 +326,21 @@ mod tests {
     }
 
     #[test]
+    fn test_no_duplicate_discriminants() {
+        // Verify canonical discriminant values
+        assert_eq!(ErrorCode::KycPending            as u32, 20);
+        assert_eq!(ErrorCode::KycRejected           as u32, 21);
+        assert_eq!(ErrorCode::WebhookDeliveryFailed as u32, 22);
+        assert_eq!(ErrorCode::NotInitialized        as u32, 23);
+        assert_eq!(ErrorCode::IllegalTransition     as u32, 24);
+        assert_eq!(ErrorCode::SessionExpired        as u32, 25);
+        assert_eq!(ErrorCode::SessionClosed         as u32, 26);
+        assert_eq!(ErrorCode::CacheExpired          as u32, 48);
+        assert_eq!(ErrorCode::CacheNotFound         as u32, 49);
+    }
+
+    #[test]
     fn test_type_alias_error_works() {
-        // Ensure backward-compat alias compiles and behaves identically
         let err: Error = AnchorKitError::from_code(ErrorCode::InvalidEndpointFormat);
         assert_eq!(err.code, ErrorCode::InvalidEndpointFormat);
     }
