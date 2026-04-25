@@ -17,6 +17,23 @@ pub fn build_sep10_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::st
     format!("{}.{}", signing_input, sig_b64)
 }
 
+/// Build a JWT with explicit `iat` claim for lifetime-cap tests.
+pub fn build_sep10_jwt_with_iat(
+    signing_key: &SigningKey,
+    sub: &str,
+    iat: u64,
+    exp: u64,
+) -> std::string::String {
+    let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+    let payload = format!(r#"{{"sub":"{}","iat":{},"exp":{}}}"#, sub, iat, exp);
+    let header_b64 = URL_SAFE_NO_PAD.encode(header);
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+    let sig = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    format!("{}.{}", signing_input, sig_b64)
+}
+
 /// Registers an [`SigningKey`] as the SEP-10 JWT verifier for `sep10_issuer` and registers `attestor`
 /// using a JWT whose `sub` matches `attestor`'s strkey.
 pub fn register_attestor_with_sep10(

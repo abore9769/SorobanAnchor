@@ -16,6 +16,12 @@ pub const MAX_JWT_LEN: u32 = 2048;
 /// Storage key used by the admin to configure a custom JWT max length.
 pub const JWT_MAX_LEN_KEY: &[u8] = b"JWTMAXLEN";
 
+/// Maximum allowed token lifetime in seconds (24 hours).
+pub const MAX_JWT_LIFETIME: u64 = 86_400;
+
+/// Default clock skew tolerance in seconds.
+pub const DEFAULT_CLOCK_SKEW: u64 = 60;
+
 fn decode_base64url_char(c: u8) -> Option<u8> {
     match c {
         b'A'..=b'Z' => Some(c - b'A'),
@@ -104,6 +110,25 @@ fn parse_json_nbf(payload: &[u8]) -> Option<u64> {
     if !any { None } else { Some(n) }
 }
 
+/// Parse `"iat": <digits>` (first occurrence). Returns `None` if claim is absent.
+fn parse_json_iat(payload: &[u8]) -> Option<u64> {
+    let key = b"\"iat\":";
+    let pos = find_bytes(payload, key)?;
+    let mut i = pos + key.len();
+    while i < payload.len() && payload[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut n: u64 = 0;
+    let mut any = false;
+    while i < payload.len() && payload[i].is_ascii_digit() {
+        any = true;
+        let d = (payload[i] - b'0') as u64;
+        n = n.checked_mul(10).and_then(|x| x.checked_add(d))?;
+        i += 1;
+    }
+    if !any { None } else { Some(n) }
+}
+
 /// Parse `"jti":"..."` string value (first occurrence). Returns `None` if absent.
 fn parse_json_jti(payload: &[u8]) -> Option<Vec<u8>> {
     let key = b"\"jti\":";
@@ -153,6 +178,10 @@ fn parse_json_sub(env: &Env, payload: &[u8]) -> Result<String, ()> {
 ///
 /// The maximum accepted token length defaults to [`MAX_JWT_LEN`] but can be overridden by
 /// storing a `u32` under the `"JWTMAXLEN"` instance key (issue #64).
+///
+/// Clock skew tolerance (seconds) is read from the `"JWTSKEW"` instance key; defaults to
+/// [`DEFAULT_CLOCK_SKEW`] (60 s). A token whose `exp` is within the skew window of `now` is
+/// still accepted. If `exp - iat` exceeds [`MAX_JWT_LIFETIME`] (86 400 s) the token is rejected.
 ///
 /// When `expected_sub` is [`None`], the token must still contain a parseable `sub` claim, but it
 /// is not compared to a caller-supplied address (see contract `verify_sep10_token`).
@@ -232,8 +261,24 @@ pub fn verify_sep10_jwt(
     let payload_dec = base64url_decode(payload_b64).map_err(|_| ())?;
     let exp = parse_json_exp(&payload_dec)?;
     let now = env.ledger().timestamp();
-    if exp <= now {
+
+    // Read configurable clock skew tolerance (JWTSKEW), default 60 s
+    let skew: u64 = env
+        .storage()
+        .instance()
+        .get::<_, u64>(&soroban_sdk::symbol_short!("JWTSKEW"))
+        .unwrap_or(DEFAULT_CLOCK_SKEW);
+
+    // Token is expired if exp + skew <= now
+    if exp.saturating_add(skew) <= now {
         return Err(());
+    }
+
+    // Enforce maximum token lifetime: exp - iat must not exceed 24 hours
+    if let Some(iat) = parse_json_iat(&payload_dec) {
+        if exp.saturating_sub(iat) > MAX_JWT_LIFETIME {
+            return Err(());
+        }
     }
 
     // Issue #61: reject tokens whose nbf is in the future

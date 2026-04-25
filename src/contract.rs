@@ -465,6 +465,29 @@ impl AnchorKitContract {
             .unwrap_or(sep10_jwt::MAX_JWT_LEN)
     }
 
+    /// Configure the clock skew tolerance (seconds) used by `verify_sep10_jwt`. Admin-only.
+    /// Falls back to 60 s when not set. Maximum allowed value is 300 s.
+    pub fn set_jwt_skew(env: Env, skew_seconds: u64) {
+        Self::require_admin(&env);
+        if skew_seconds > 300 {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("JWTSKEW"), &skew_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Return the currently configured JWT clock skew tolerance in seconds (defaults to 60).
+    pub fn get_jwt_skew(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&symbol_short!("JWTSKEW"))
+            .unwrap_or(sep10_jwt::DEFAULT_CLOCK_SKEW)
+    }
+
     /// Verifies a SEP-10 JWT (JWS compact, EdDSA) using the stored key for `issuer`: signature, `exp`, and `sub`.
     pub fn verify_sep10_token(env: Env, token: String, issuer: Address) {
         let pk: Bytes = env
