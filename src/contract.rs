@@ -351,6 +351,9 @@ const PERSISTENT_TTL: u32 = 1_555_200;
 const SPAN_TTL: u32 = 17_280;
 const INSTANCE_TTL: u32 = 518_400;
 
+/// Default session lifetime in seconds (1 hour). Used when session_ttl_seconds is zero.
+pub const DEFAULT_SESSION_TTL: u64 = 3600;
+
 // ---------------------------------------------------------------------------
 // Storage key helpers
 // ---------------------------------------------------------------------------
@@ -1073,11 +1076,8 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             created_at: now,
             nonce: 0,
             operation_count: 0,
- feat/session-expiry-check
-            session_ttl_seconds: 3600,
-
+            session_ttl_seconds: DEFAULT_SESSION_TTL,
             closed: false,
- main
         };
         let sess_key = (symbol_short!("SESS"), session_id);
         env.storage().persistent().set(&sess_key, &session);
@@ -1103,9 +1103,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             .persistent()
             .get(&sess_key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound));
-        if session.closed {
-            panic_with_error!(&env, ErrorCode::SessionClosed);
-        }
+        Self::validate_session(&env, &session);
         session.closed = true;
         env.storage().persistent().set(&sess_key, &session);
         let now = env.ledger().timestamp();
@@ -1122,9 +1120,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             .persistent()
             .get(&sess_key)
             .unwrap_or_else(|| panic_with_error!(env, ErrorCode::AttestationNotFound));
-        if session.closed {
-            panic_with_error!(env, ErrorCode::SessionClosed);
-        }
+        Self::validate_session(env, &session);
     }
 
     // -----------------------------------------------------------------------
@@ -1218,20 +1214,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         signature: Bytes,
     ) -> u64 {
         issuer.require_auth();
- feat/session-expiry-check
-        let sess_key = (symbol_short!("SESS"), session_id);
-        let session: Session = env
-            .storage()
-            .persistent()
-            .get(&sess_key)
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
-        let now = env.ledger().timestamp();
-        if now > session.created_at + session.session_ttl_seconds {
-            panic_with_error!(&env, ErrorCode::SessionExpired);
-        }
-
         Self::require_session_open(&env, session_id);
- main
         Self::check_attestor(&env, &issuer);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
@@ -1942,6 +1925,24 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Validate that a session is neither expired nor closed.
+    /// Panics with `SessionExpired` if `current_time > created_at + ttl`,
+    /// or `SessionClosed` if `session.closed == true`.
+    fn validate_session(env: &Env, session: &Session) {
+        let ttl = if session.session_ttl_seconds == 0 {
+            DEFAULT_SESSION_TTL
+        } else {
+            session.session_ttl_seconds
+        };
+        let now = env.ledger().timestamp();
+        if now > session.created_at + ttl {
+            panic_with_error!(env, ErrorCode::SessionExpired);
+        }
+        if session.closed {
+            panic_with_error!(env, ErrorCode::SessionClosed);
+        }
+    }
 
     fn enforce_rate_limit(env: &Env, attestor: &Address) {
         let config = RateLimiter::get_config(env);
