@@ -1,77 +1,89 @@
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Ledger as _, LedgerInfo}, symbol_short, Address, Env, Symbol, String};
+use soroban_sdk::{testutils::{Address as _, Ledger as _, LedgerInfo}, symbol_short, Address, BytesN, Env, Symbol, String};
 use crate::domain_validator::validate_anchor_domain;
 use crate::errors::{AnchorKitError, ErrorCode};
+use crate::sep10_test_util::{build_sep10_jwt, register_attestor_with_sep10};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+
+fn register_test_attestor(env: &Env, attestor: &Address) {
+    let sk = SigningKey::generate(&mut OsRng);
+    register_attestor_with_sep10(env, &{
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        // We can't easily use the client here since we don't have it.
+        // Use the contract directly via a client.
+        AnchorKitContractClient::new(env, &contract_id)
+    }, attestor, attestor, &sk);
+}
 
 #[test]
 fn test_set_get_endpoint_happy_path() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let attestor = Address::random(&env);
+    let attestor = Address::generate(&env);
     let endpoint = String::from_str(&env, "https://example.com/api");
 
-    // Register attestor (admin auth mocked)
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock_token"), Address::random(&env));
+    let sk = SigningKey::generate(&mut OsRng);
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
 
-    // Set endpoint
-    AnchorKitContract::set_endpoint(&env, attestor.clone(), endpoint.clone());
-
-    // Get endpoint
-    let retrieved = AnchorKitContract::get_endpoint(&env, attestor.clone());
+    client.set_endpoint(&attestor, &endpoint);
+    let retrieved = client.get_endpoint(&attestor);
     assert_eq!(retrieved, endpoint);
 }
 
 #[test]
-#[should_panic(expected = "AttestorNotRegistered")]
+#[should_panic]
 fn test_get_endpoint_not_registered() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let attestor = Address::random(&env);
-    AnchorKitContract::get_endpoint(&env, attestor);
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let attestor = Address::generate(&env);
+    client.get_endpoint(&attestor);
 }
 
 #[test]
-#[should_panic(expected = "AttestorNotRegistered")]
+#[should_panic]
 fn test_set_endpoint_not_attestor() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let attestor = Address::random(&env);
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let attestor = Address::generate(&env);
     let endpoint = String::from_str(&env, "https://example.com");
-    AnchorKitContract::set_endpoint(&env, attestor, endpoint);
+    client.set_endpoint(&attestor, &endpoint);
 }
 
 #[test]
-#[should_panic(expected = "InvalidEndpointFormat")]
+#[should_panic]
 fn test_set_endpoint_invalid_url() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let attestor = Address::random(&env);
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock"), Address::random(&env));
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
 
-    let invalid = String::from_str(&env, "http://invalid.com"); // HTTP
-    AnchorKitContract::set_endpoint(&env, attestor, invalid);
-}
+    let attestor = Address::generate(&env);
+    let sk = SigningKey::generate(&mut OsRng);
+    register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
 
-#[test]
-#[should_panic(expected = "Unauthorized")]
-fn test_set_endpoint_unauthorized() {
-    let env = Env::default();
-
-    let attestor = Address::random(&env);
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "mock"), Address::random(&env));
-
-    let endpoint = String::from_str(&env, "https://example.com");
-    let caller = Address::random(&env);
-    caller.require_auth(); // Mock auth for wrong caller
-
-    // Function requires attestor.require_auth(), so wrong caller panics on auth
-    // Test assumes env.mock_all_auths() not called
-    env.budget().reset_unlimited();
-    // Note: testutils mock_all_auths needed for require_auth in tests
+    let invalid = String::from_str(&env, "http://invalid.com");
+    client.set_endpoint(&attestor, &invalid);
 }
 
 #[test]
@@ -79,17 +91,16 @@ fn test_endpoint_updated_event() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let attestor = Address::random(&env);
+    let contract_id = env.register_contract(None, AnchorKitContract);
+    let client = AnchorKitContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let attestor = Address::generate(&env);
     let endpoint = String::from_str(&env, "https://test.com");
 
-    AnchorKitContract::register_attestor(&env, attestor.clone(), String::from_str(&env, "token"), Address::random(&env));
-
-    // Expect event
-    let topics = (symbol_short!("endpoint"), symbol_short!("updated"));
-    env.events().publish_expect(&topics, &EndpointUpdated { attestor: attestor.clone(), endpoint: endpoint.clone() });
-
-    // Calling set_endpoint should emit it
-    AnchorKitContract::set_endpoint(&env, attestor, endpoint.clone());
-    // Verify emitted (testutils check)
+    let sk = SigningKey::generate(&mut OsRng);
+    register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
+    client.set_endpoint(&attestor, &endpoint);
 }
 

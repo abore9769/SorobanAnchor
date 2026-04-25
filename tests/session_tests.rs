@@ -10,7 +10,7 @@ mod session_tests {
     use rand::rngs::OsRng;
 
     use crate::contract::{AnchorKitContract, AnchorKitContractClient};
-    use crate::sep10_test_util::register_attestor_with_sep10;
+    use crate::sep10_test_util::{register_attestor_with_sep10, sign_payload};
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -35,14 +35,6 @@ mod session_tests {
         let mut b = Bytes::new(env);
         for _ in 0..32 {
             b.push_back(byte);
-        }
-        b
-    }
-
-    fn sig(env: &Env, bytes: &[u8]) -> Bytes {
-        let mut b = Bytes::new(env);
-        for &x in bytes {
-            b.push_back(x);
         }
         b
     }
@@ -121,7 +113,9 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk_reg = SigningKey::generate(&mut OsRng);
+        let pk_reg = soroban_sdk::BytesN::from_array(&env, sk_reg.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk_reg);
 
         assert_eq!(client.get_session_operation_count(&session_id), 1);
     }
@@ -143,13 +137,15 @@ mod session_tests {
         let sk = SigningKey::generate(&mut OsRng);
         register_attestor_with_sep10(&env, &client, &attestor, &attestor, &sk);
 
+        let ph = payload(&env, 0x01);
+        let real_sig = sign_payload(&env, &sk, &ph);
         client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000001u64,
-            &payload(&env, 0x01),
-            &sig(&env, &[0x0a, 0x0b]),
+            &ph,
+            &real_sig,
         );
 
         assert_eq!(client.get_session_operation_count(&session_id), 1);
@@ -172,7 +168,9 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk);
 
         assert!(client.is_attestor(&attestor));
     }
@@ -190,7 +188,9 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk);
 
         let log = client.get_audit_log(&0u64);
         assert_eq!(log.log_id, 0);
@@ -217,7 +217,9 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk);
         client.revoke_attestor_with_session(&session_id, &attestor);
 
         assert!(!client.is_attestor(&attestor));
@@ -236,7 +238,9 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let pk2 = soroban_sdk::BytesN::from_array(&env, sk2.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk2);
         client.revoke_attestor_with_session(&session_id, &attestor);
 
         // log_id 0 = register, log_id 1 = revoke
@@ -265,14 +269,18 @@ mod session_tests {
         client.initialize(&admin);
 
         let session_id = client.create_session(&user);
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk);
+        let ph = payload(&env, 0x01);
+        let real_sig = sign_payload(&env, &sk, &ph);
         client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000001u64,
-            &payload(&env, 0x01),
-            &sig(&env, &[0x0a]),
+            &ph,
+            &real_sig,
         );
 
         let log0 = client.get_audit_log(&0u64);
@@ -305,25 +313,31 @@ mod session_tests {
         assert_eq!(session_id, 0);
 
         // Step 2: register attestor with session
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&session_id, &attestor, &pk);
         assert!(client.is_attestor(&attestor));
 
         // Step 3: two attestations
+        let ph0 = payload(&env, 0x01);
+        let ph1 = payload(&env, 0x02);
+        let sig0 = sign_payload(&env, &sk, &ph0);
+        let sig1 = sign_payload(&env, &sk, &ph1);
         let id0 = client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000001u64,
-            &payload(&env, 0x01),
-            &sig(&env, &[0x0a, 0x0b, 0x0c, 0x0d]),
+            &ph0,
+            &sig0,
         );
         let id1 = client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000002u64,
-            &payload(&env, 0x02),
-            &sig(&env, &[0x14, 0x15, 0x16, 0x17]),
+            &ph1,
+            &sig1,
         );
         assert_eq!(id0, 0);
         assert_eq!(id1, 1);
@@ -392,13 +406,15 @@ mod session_tests {
         });
 
         // Should panic with SessionExpired
+        let ph = payload(&env, 0x01);
+        let real_sig = sign_payload(&env, &sk, &ph);
         client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000001u64,
-            &payload(&env, 0x01),
-            &sig(&env, &[0x0a, 0x0b]),
+            &ph,
+            &real_sig,
         );
     }
 
@@ -441,13 +457,15 @@ mod session_tests {
             max_entry_ttl: 6312000,
         });
 
+        let ph = payload(&env, 0x01);
+        let real_sig = sign_payload(&env, &sk, &ph);
         let id = client.submit_attestation_with_session(
             &session_id,
             &attestor,
             &subject,
             &1700000001u64,
-            &payload(&env, 0x01),
-            &sig(&env, &[0x0a, 0x0b]),
+            &ph,
+            &real_sig,
         );
         assert_eq!(id, 0);
     }

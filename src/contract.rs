@@ -518,7 +518,7 @@ impl AnchorKitContract {
         }
     }
 
-    pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address) {
+    pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
@@ -529,6 +529,11 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().set(&pk_key, &public_key);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("added"), attestor),
             (),
@@ -542,6 +547,8 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
         }
         env.storage().persistent().remove(&key);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().remove(&pk_key);
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("removed"), attestor),
             (),
@@ -685,6 +692,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -742,6 +750,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::check_timestamp(&env, timestamp);
 
         // Check KYC if required
@@ -820,6 +829,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -1233,6 +1243,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         Self::require_session_open(&env, session_id);
  main
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -1313,7 +1324,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         id
     }
 
-    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
+    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::require_session_open(&env, session_id);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
@@ -1322,6 +1333,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         }
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().set(&pk_key, &public_key);
+        env.storage().persistent().extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         let sopcnt_key = (symbol_short!("SOPCNT"), session_id);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
@@ -1382,6 +1396,8 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
         }
         env.storage().persistent().remove(&key);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().remove(&pk_key);
 
         let sopcnt_key = (symbol_short!("SOPCNT"), session_id);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
@@ -1966,6 +1982,20 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             .has(&(symbol_short!("ATTESTOR"), attestor.clone()))
         {
             panic_with_error!(env, ErrorCode::AttestorNotRegistered);
+        }
+    }
+
+    fn verify_attestation_signature(env: &Env, issuer: &Address, payload_hash: &Bytes, signature: &Bytes) {
+        let pk: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&(symbol_short!("ATPUBKEY"), issuer.clone()))
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::UnauthorizedAttestor));
+        if signature.len() != 64 {
+            panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
+        }
+        if !env.crypto().ed25519_verify(&pk, payload_hash, signature) {
+            panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
         }
     }
 

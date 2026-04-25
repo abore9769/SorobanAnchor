@@ -229,6 +229,7 @@ fn register(
         "--attestor", address,
         "--sep10_token", sep10_token,
         "--sep10_issuer", sep10_issuer,
+        "--public_key", "0000000000000000000000000000000000000000000000000000000000000000",
     ]);
     stellar_invoke(contract_id, source, network, &[
         "configure_services",

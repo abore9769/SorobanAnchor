@@ -3,11 +3,15 @@
 mod capability_detection_tests {
     use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
 
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
     use crate::contract::{
         AnchorKitContract, AnchorKitContractClient, ServiceType,
         SERVICE_DEPOSITS, SERVICE_WITHDRAWALS, SERVICE_QUOTES, SERVICE_KYC,
     };
     use crate::errors::ErrorCode;
+    use crate::sep10_test_util::register_attestor_with_sep10;
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -56,7 +60,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS]));
 
@@ -75,7 +79,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         client.configure_services(&anchor, &services(&env, &[SERVICE_WITHDRAWALS]));
 
@@ -90,7 +94,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         client.configure_services(&anchor, &services(&env, &[SERVICE_QUOTES]));
 
@@ -105,7 +109,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         client.configure_services(
             &anchor,
@@ -123,7 +127,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         // Initial: deposits only
         client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS]));
@@ -145,7 +149,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         let result = client.try_configure_services(&anchor, &services(&env, &[]));
         assert_eq!(
@@ -163,7 +167,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         let result = client.try_configure_services(
             &anchor,
@@ -202,7 +206,7 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        client.register_attestor(&anchor);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
         // No configure_services call
 
         let result = client.try_get_supported_services(&anchor);

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { signTransaction } from "@stellar/freighter-api";
+import { AnchorErrorBoundary } from "./AnchorErrorBoundary";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Step =
@@ -458,8 +459,38 @@ function AuthStatusBadge({ wallet }: { wallet: WalletInfo }) {
   );
 }
 
+// ─── Loading Skeleton ─────────────────────────────────────────────────────────
+
+function LoadingSkeleton() {
+  return (
+    <div
+      data-testid="loading-skeleton"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: "14px 0",
+      }}
+    >
+      {[80, 60, 90].map((w, i) => (
+        <div
+          key={i}
+          style={{
+            height: 12,
+            borderRadius: 4,
+            width: `${w}%`,
+            background: "linear-gradient(90deg,#0d1628 25%,#1e2d45 50%,#0d1628 75%)",
+            backgroundSize: "200% 100%",
+            animation: "sep10-shimmer 1.4s infinite",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export default function SEP10AuthFlow() {
+function SEP10AuthFlowInner() {
   const [step, setStep] = useState<Step>("idle");
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [challenge, setChallenge] = useState<string | null>(null);
@@ -629,6 +660,35 @@ export default function SEP10AuthFlow() {
     addLog("─── Session reset ───");
   };
 
+  const logout = () => {
+    setJwt(null);
+    setStep("token");
+    addLog("─── Token cleared — logged out ───");
+  };
+
+  // Auto-refresh token when < 60 seconds remaining
+  useEffect(() => {
+    if (!jwt) return;
+    try {
+      const parts = jwt.split(".");
+      const payload = JSON.parse(atob(parts[1]));
+      if (!payload.exp) return;
+      const msUntilRefresh = (payload.exp * 1000) - Date.now() - 60_000;
+      if (msUntilRefresh <= 0) {
+        logout();
+        return;
+      }
+      const timer = setTimeout(() => {
+        addLog("Token expiring soon — refreshing...");
+        logout();
+      }, msUntilRefresh);
+      return () => clearTimeout(timer);
+    } catch {
+      // non-standard JWT — skip refresh
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jwt]);
+
   const retryFromStep = () => {
     setError(null);
     if (errorStep === "challenge") { setChallenge(null); setStep("challenge"); }
@@ -789,6 +849,7 @@ export default function SEP10AuthFlow() {
             The anchor generates a unique challenge transaction. This XDR must
             be signed by your wallet to prove key ownership.
           </p>
+          {loading && step === "challenge" ? <LoadingSkeleton /> : (
           <button
             onClick={fetchChallenge}
             disabled={loading || !wallet}
@@ -796,6 +857,7 @@ export default function SEP10AuthFlow() {
           >
             {loading ? <Spinner /> : <>{fetchIcon} Fetch Challenge</>}
           </button>
+          )}
         </div>
       ),
     },
@@ -925,6 +987,7 @@ export default function SEP10AuthFlow() {
         @keyframes sep10-spin { to{transform:rotate(360deg)} }
         @keyframes sep10-slide-in { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
         @keyframes sep10-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+        @keyframes sep10-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
         ::-webkit-scrollbar{width:4px;height:4px}
         ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:#1e2d4580;border-radius:2px}
@@ -1452,6 +1515,27 @@ export default function SEP10AuthFlow() {
               </div>
             </div>
             <AuthStatusBadge wallet={wallet} />
+            <button
+              data-testid="logout-btn"
+              onClick={logout}
+              style={{
+                marginTop: 12,
+                padding: "7px 16px",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.15em",
+                textTransform: "uppercase",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                borderRadius: 5,
+                border: "1px solid rgba(255,80,80,0.4)",
+                background: "transparent",
+                color: "#ff7070",
+                transition: "all 0.2s",
+              }}
+            >
+              ✕ LOGOUT
+            </button>
           </div>
         )}
 
@@ -1662,3 +1746,12 @@ const submitIcon = (
     />
   </svg>
 );
+
+// ─── Wrapped export with AnchorErrorBoundary ─────────────────────────────────
+export default function SEP10AuthFlow() {
+  return (
+    <AnchorErrorBoundary componentLabel="SEP-10 Auth Flow">
+      <SEP10AuthFlowInner />
+    </AnchorErrorBoundary>
+  );
+}

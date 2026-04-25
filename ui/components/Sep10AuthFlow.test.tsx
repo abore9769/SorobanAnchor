@@ -726,4 +726,236 @@ describe('SEP10AuthFlow', () => {
       }, { timeout: 1000 });
     });
   });
+
+  // ─── Required new test cases (#173) ────────────────────────────────────────
+
+  describe('Error state: auth endpoint returns 500', () => {
+    it('renders error banner when WEB_AUTH_ENDPOINT returns 500', async () => {
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') })
+        )
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'Internal Server Error' }) })
+        );
+
+      render(<SEP10AuthFlow />);
+
+      // Connect wallet first
+      await act(async () => {
+        const btn = screen.getAllByText(/Connect Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        fireEvent.click(btn!);
+        await jest.runAllTimersAsync();
+      });
+
+      // Fetch challenge — will hit the 500
+      await act(async () => {
+        const btn = screen.getAllByText(/Fetch Challenge/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        expect(screen.getByText(/Challenge fetch failed: 500/)).toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+  });
+
+  describe('Error state: wallet rejects signing', () => {
+    it('displays user-friendly error when wallet rejects signing', async () => {
+      const { signTransaction: mockSign } = require('@stellar/freighter-api');
+      mockSign.mockRejectedValueOnce(new Error('User declined to sign the transaction'));
+
+      render(<SEP10AuthFlow />);
+
+      // Connect
+      await act(async () => {
+        const btn = screen.getAllByText(/Connect Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        fireEvent.click(btn!);
+        await jest.runAllTimersAsync();
+      });
+
+      // Fetch challenge
+      await act(async () => {
+        const btn = screen.getAllByText(/Fetch Challenge/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      });
+
+      // Sign — wallet rejects
+      await waitFor(() => {
+        const btn = screen.getAllByText(/Sign with Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      }, { timeout: 3000 });
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        expect(screen.getByText(/User declined to sign/)).toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+  });
+
+  describe('Token refresh: auto-refresh when JWT expires in < 60s', () => {
+    it('clears token and triggers refresh when JWT has < 60s remaining', async () => {
+      // Build a JWT whose exp is 30 seconds from now (< 60s threshold)
+      const exp = Math.floor(Date.now() / 1000) + 30;
+      const header = btoa(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).replace(/=/g, '');
+      const payload = btoa(JSON.stringify({ sub: 'GTEST', iat: exp - 86400, exp })).replace(/=/g, '');
+      const nearExpiryJwt = `${header}.${payload}.FAKESIG`;
+
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') })
+        )
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, json: () => Promise.resolve({ transaction: MOCK_XDR, network_passphrase: 'Test SDF Network ; September 2015' }) })
+        )
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, json: () => Promise.resolve({ token: nearExpiryJwt }) })
+        );
+
+      render(<SEP10AuthFlow />);
+
+      // Full flow to get the near-expiry token
+      await act(async () => {
+        const btn = screen.getAllByText(/Connect Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        fireEvent.click(btn!);
+        await jest.runAllTimersAsync();
+      });
+
+      await act(async () => {
+        const btn = screen.getAllByText(/Fetch Challenge/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      });
+
+      await waitFor(() => {
+        const btn = screen.getAllByText(/Sign with Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      }, { timeout: 3000 });
+
+      await waitFor(() => {
+        const btn = screen.getAllByText(/Submit & Get Token/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      }, { timeout: 3000 });
+
+      // Token is near expiry — the refresh timer fires immediately (msUntilRefresh <= 0)
+      await act(async () => {
+        await jest.runAllTimersAsync();
+      });
+
+      // Token should be cleared (jwt = null → step back to token)
+      await waitFor(() => {
+        expect(screen.queryByText(/AUTHENTICATED/)).not.toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+  });
+
+  describe('Loading skeleton during challenge fetch', () => {
+    it('shows loading skeleton while challenge is being fetched', async () => {
+      let resolveFetch!: (v: unknown) => void;
+      const pendingFetch = new Promise(r => { resolveFetch = r; });
+
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') })
+        )
+        .mockImplementationOnce(() => pendingFetch);
+
+      render(<SEP10AuthFlow />);
+
+      // Connect
+      await act(async () => {
+        const btn = screen.getAllByText(/Connect Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        fireEvent.click(btn!);
+        await jest.runAllTimersAsync();
+      });
+
+      // Click fetch — fetch is pending so skeleton should appear
+      await act(async () => {
+        const btn = screen.getAllByText(/Fetch Challenge/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      });
+
+      expect(screen.getByTestId('loading-skeleton')).toBeInTheDocument();
+
+      // Resolve the fetch
+      resolveFetch({ ok: true, json: () => Promise.resolve({ transaction: MOCK_XDR, network_passphrase: 'Test SDF Network ; September 2015' }) });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('loading-skeleton')).not.toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+  });
+
+  describe('Logout: clearing token from state', () => {
+    it('clears token and returns to token step on explicit logout', async () => {
+      render(<SEP10AuthFlow />);
+
+      // Complete full flow
+      await act(async () => {
+        const btn = screen.getAllByText(/Connect Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        fireEvent.click(btn!);
+        await jest.runAllTimersAsync();
+      });
+
+      await act(async () => {
+        const btn = screen.getAllByText(/Fetch Challenge/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      });
+
+      await waitFor(() => {
+        const btn = screen.getAllByText(/Sign with Wallet/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      }, { timeout: 3000 });
+
+      await waitFor(() => {
+        const btn = screen.getAllByText(/Submit & Get Token/)
+          .map(el => el.closest('button') as HTMLButtonElement | null)
+          .find(b => b !== null && !b.disabled);
+        if (btn) fireEvent.click(btn);
+      }, { timeout: 3000 });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('logout-btn')).toBeInTheDocument();
+      }, { timeout: 3000 });
+
+      // Click logout
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('logout-btn'));
+      });
+
+      // Token cleared — authenticated state gone
+      await waitFor(() => {
+        expect(screen.queryByText(/AUTHENTICATED/)).not.toBeInTheDocument();
+        expect(screen.queryByTestId('logout-btn')).not.toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+  });
 });
