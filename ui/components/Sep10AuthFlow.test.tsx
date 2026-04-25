@@ -3,12 +3,44 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import '@testing-library/jest-dom';
 import SEP10AuthFlow from './Sep10AuthFlow';
 
+// Mock Freighter
+jest.mock('@stellar/freighter-api', () => ({
+  signTransaction: jest.fn(() =>
+    Promise.resolve({ signedTxXdr: 'SIGNED_XDR_MOCK', signerAddress: 'GTEST' })
+  ),
+}));
+
 // Mock clipboard API
 Object.assign(navigator, {
   clipboard: {
     writeText: jest.fn(() => Promise.resolve()),
   },
 });
+
+// Mock fetch for SEP-10 challenge and token exchange
+const MOCK_XDR = 'AAAAAQAAAAC' + 'A'.repeat(200) + '==';
+const MOCK_JWT = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJHVEVTVCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDg2NDAwfQ.SIGNATURE';
+global.fetch = jest.fn((url: string, opts?: RequestInit) => {
+  if (String(url).includes('stellar.toml')) {
+    return Promise.resolve({
+      ok: true,
+      text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"'),
+    });
+  }
+  if (String(url).includes('/auth')) {
+    if (opts?.method === 'POST') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ token: MOCK_JWT }),
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ transaction: MOCK_XDR, network_passphrase: 'Test SDF Network ; September 2015' }),
+    });
+  }
+  return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+}) as jest.Mock;
 
 // Mock crypto.randomUUID
 Object.defineProperty(global, 'crypto', {
@@ -21,6 +53,19 @@ describe('SEP10AuthFlow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.useFakeTimers();
+    // Restore default fetch mock after clearAllMocks wipes the implementation
+    (global.fetch as jest.Mock).mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes('stellar.toml')) {
+        return Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') });
+      }
+      if (String(url).includes('/auth')) {
+        if (opts?.method === 'POST') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ token: MOCK_JWT }) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ transaction: MOCK_XDR, network_passphrase: 'Test SDF Network ; September 2015' }) });
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
   });
 
   afterEach(() => {
@@ -595,6 +640,90 @@ describe('SEP10AuthFlow', () => {
       await waitFor(() => {
         expect(screen.getByText(/AUTHENTICATED/)).toBeInTheDocument();
       }, { timeout: 3000 });
+    });
+  });
+
+  describe('Error Banner', () => {
+    // Flush all pending timers and microtasks to complete connectWallet's sleep chain
+    const connectWalletFake = async () => {
+      await act(async () => { await jest.runAllTimersAsync(); });
+    };
+
+    const clickConnectBtn = () => {
+      const btn = screen.getAllByText(/Connect Wallet/)
+        .map(el => el.closest('button') as HTMLButtonElement | null)
+        .find(b => b !== null && !b.disabled);
+      if (!btn) throw new Error('Connect Wallet button not found');
+      fireEvent.click(btn);
+    };
+
+    const getEnabledBtn = (label: RegExp) => {
+      const btn = screen.getAllByText(label)
+        .map(el => el.closest('button') as HTMLButtonElement | null)
+        .find(b => b !== null && !b.disabled);
+      if (!btn) throw new Error(`${label} not enabled`);
+      return btn;
+    };
+
+    it('shows error banner when challenge fetch fails', async () => {
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() => Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') }))
+        .mockImplementationOnce(() => Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }));
+
+      render(<SEP10AuthFlow />);
+      clickConnectBtn();
+      await connectWalletFake();
+
+      await act(async () => { fireEvent.click(getEnabledBtn(/Fetch Challenge/)); });
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        expect(screen.getByText(/↺ Try Again/)).toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+
+    it('shows error banner when token exchange fails', async () => {
+      const { signTransaction: mockSign } = require('@stellar/freighter-api');
+      mockSign.mockResolvedValueOnce({ signedTxXdr: 'SIGNED', signerAddress: 'GTEST' });
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() => Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') }))
+        .mockImplementationOnce(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ transaction: MOCK_XDR, network_passphrase: 'Test SDF Network ; September 2015' }) }))
+        .mockImplementationOnce(() => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'expired challenge' }) }));
+
+      render(<SEP10AuthFlow />);
+      clickConnectBtn();
+      await connectWalletFake();
+
+      await act(async () => { fireEvent.click(getEnabledBtn(/Fetch Challenge/)); });
+      await waitFor(() => getEnabledBtn(/Sign with Wallet/), { timeout: 3000 })
+        .then(async btn => { await act(async () => { fireEvent.click(btn); }); });
+      await waitFor(() => getEnabledBtn(/Submit & Get Token/), { timeout: 3000 })
+        .then(async btn => { await act(async () => { fireEvent.click(btn); }); });
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        expect(screen.getByRole('alert')).toHaveTextContent('expired challenge');
+        expect(screen.getByText(/↺ Try Again/)).toBeInTheDocument();
+      }, { timeout: 3000 });
+    });
+
+    it('clears error and retries when Try Again is clicked', async () => {
+      (global.fetch as jest.Mock)
+        .mockImplementationOnce(() => Promise.resolve({ ok: true, text: () => Promise.resolve('WEB_AUTH_ENDPOINT="https://testanchor.stellar.org/auth"') }))
+        .mockImplementationOnce(() => Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }));
+
+      render(<SEP10AuthFlow />);
+      clickConnectBtn();
+      await connectWalletFake();
+
+      await act(async () => { fireEvent.click(getEnabledBtn(/Fetch Challenge/)); });
+
+      await waitFor(() => screen.getByText(/↺ Try Again/), { timeout: 3000 });
+      await act(async () => { fireEvent.click(screen.getByText(/↺ Try Again/)); });
+
+      await waitFor(() => {
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      }, { timeout: 1000 });
     });
   });
 });

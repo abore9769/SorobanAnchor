@@ -24,7 +24,8 @@
     "ui"
   ],
   "dependencies": {
-    "@albedo-link/intent": "1.0.0",
+    "@stellar/freighter-api": "^6.0.1",
+    "ts-jest": "^29.4.9",
     "zod": "^3.22.4"
   },
   "peerDependencies": {
