@@ -198,6 +198,16 @@ impl AnchorKitError {
     pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
     pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
 
+    /// Richer constructor that captures how many attempts were made and the
+    /// last transport/HTTP error string.
+    pub fn webhook_delivery_failed_with_details(attempts_made: u32, last_error: &str) -> Self {
+        Self::with_context(
+            ErrorCode::WebhookDeliveryFailed,
+            ErrorCode::WebhookDeliveryFailed.default_message(),
+            &alloc::format!("attempts_made={} last_error={}", attempts_made, last_error),
+        )
+    }
+
     pub fn validation_error(context: &str) -> Self {
         Self::with_context(
             ErrorCode::ValidationError,
