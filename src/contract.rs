@@ -89,6 +89,18 @@ pub struct TracingSpan {
     pub started_at: u64,
     pub completed_at: u64,
     pub status: String,
+    /// Raw bytes of the parent span's request_id.id, or empty Bytes if this is a root span.
+    pub parent_request_id_bytes: Bytes,
+    /// Zero-based index of this span within the trace, used for ordering.
+    pub span_index: u32,
+}
+
+/// Holds the root request ID bytes and the current span index counter for a trace.
+#[contracttype]
+#[derive(Clone)]
+pub struct TracingContext {
+    pub root_request_id_bytes: Bytes,
+    pub next_span_index: u32,
 }
 
 #[contracttype]
@@ -1022,6 +1034,93 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         env.storage()
             .temporary()
             .get::<_, TracingSpan>(&(symbol_short!("SPAN"), request_id_bytes))
+    }
+
+    /// Create a child span under a parent span, setting parent_request_id and
+    /// incrementing the span_index from the TracingContext stored for the root.
+    ///
+    /// The TracingContext for the root must have been initialised by a prior
+    /// `submit_with_request_id` call (which stores span_index = 0).
+    pub fn propagate_span(
+        env: Env,
+        parent_request_id: RequestId,
+        child_request_id: RequestId,
+        operation: String,
+        actor: Address,
+    ) {
+        actor.require_auth();
+        let now = env.ledger().timestamp();
+
+        // Load or create the TracingContext for this root trace
+        let ctx_key = (symbol_short!("TRACECTX"), parent_request_id.id.clone());
+        let mut ctx: TracingContext = env
+            .storage()
+            .temporary()
+            .get(&ctx_key)
+            .unwrap_or(TracingContext {
+                root_request_id_bytes: parent_request_id.id.clone(),
+                next_span_index: 1,
+            });
+
+        let span_index = ctx.next_span_index;
+        ctx.next_span_index += 1;
+        env.storage().temporary().set(&ctx_key, &ctx);
+        env.storage().temporary().extend_ttl(&ctx_key, SPAN_TTL, SPAN_TTL);
+
+        // Register child span ID under the root so get_trace can find it
+        let child_list_key = (symbol_short!("TRACEIDS"), parent_request_id.id.clone(), span_index);
+        env.storage().temporary().set(&child_list_key, &child_request_id.id.clone());
+        env.storage().temporary().extend_ttl(&child_list_key, SPAN_TTL, SPAN_TTL);
+
+        Self::store_span_with_parent(
+            &env,
+            &child_request_id,
+            operation,
+            actor,
+            now,
+            String::from_str(&env, "success"),
+            parent_request_id.id.clone(),
+            span_index,
+        );
+    }
+
+    /// Retrieve all spans associated with a root request ID, ordered by span_index.
+    /// Returns the root span first, followed by child spans in creation order.
+    pub fn get_trace(env: Env, root_request_id_bytes: Bytes) -> Vec<TracingSpan> {
+        let mut spans = Vec::new(&env);
+
+        // Root span (span_index = 0)
+        if let Some(root_span) = env
+            .storage()
+            .temporary()
+            .get::<_, TracingSpan>(&(symbol_short!("SPAN"), root_request_id_bytes.clone()))
+        {
+            spans.push_back(root_span);
+        }
+
+        // Child spans registered via propagate_span
+        let ctx_key = (symbol_short!("TRACECTX"), root_request_id_bytes.clone());
+        let ctx: Option<TracingContext> = env.storage().temporary().get(&ctx_key);
+        if let Some(ctx) = ctx {
+            for i in 1..ctx.next_span_index {
+                let child_list_key = (symbol_short!("TRACEIDS"), root_request_id_bytes.clone(), i);
+                if let Some(child_id) = env
+                    .storage()
+                    .temporary()
+                    .get::<_, Bytes>(&child_list_key)
+                {
+                    if let Some(child_span) = env
+                        .storage()
+                        .temporary()
+                        .get::<_, TracingSpan>(&(symbol_short!("SPAN"), child_id))
+                    {
+                        spans.push_back(child_span);
+                    }
+                }
+            }
+        }
+
+        spans
     }
 
     // -----------------------------------------------------------------------
@@ -2439,6 +2538,19 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         now: u64,
         status: String,
     ) {
+        Self::store_span_with_parent(env, request_id, operation, actor, now, status, Bytes::new(env), 0);
+    }
+
+    fn store_span_with_parent(
+        env: &Env,
+        request_id: &RequestId,
+        operation: String,
+        actor: Address,
+        now: u64,
+        status: String,
+        parent_request_id_bytes: Bytes,
+        span_index: u32,
+    ) {
         let span = TracingSpan {
             request_id: request_id.clone(),
             operation,
@@ -2446,6 +2558,8 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             started_at: now,
             completed_at: now,
             status,
+            parent_request_id_bytes,
+            span_index,
         };
         let key = (symbol_short!("SPAN"), request_id.id.clone());
         env.storage().temporary().set(&key, &span);
