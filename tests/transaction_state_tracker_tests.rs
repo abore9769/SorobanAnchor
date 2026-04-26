@@ -199,6 +199,96 @@ mod transaction_state_tracker_tests {
         assert_eq!(record2.timestamp, initial_timestamp);
         assert!(record2.last_updated >= initial_timestamp);
     }
+
+    // -----------------------------------------------------------------------
+    // Backward / same-state transition guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_illegal_backward_transition_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        // Completed → Pending is illegal
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+
+        // Completed → InProgress is illegal
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_illegal_same_state_transition_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        // Pending → Pending is not a valid transition
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_valid_forward_transition_accepted() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().state, TransactionState::InProgress);
+
+        let r = tracker.advance_transaction_state(1, TransactionState::Completed, &env);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().state, TransactionState::Completed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log entries for success and failure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_audit_log_entry_created_on_successful_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        assert_eq!(tracker.audit_log.len(), 1);
+        let entry = &tracker.audit_log[0];
+        assert_eq!(entry.from_state, TransactionState::Pending);
+        assert_eq!(entry.to_state, TransactionState::InProgress);
+        assert!(entry.success);
+    }
+
+    #[test]
+    fn test_audit_log_entry_created_on_failed_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        // Illegal: Pending → Completed
+        let _ = tracker.advance_transaction_state(1, TransactionState::Completed, &env);
+
+        assert_eq!(tracker.audit_log.len(), 1);
+        let entry = &tracker.audit_log[0];
+        assert_eq!(entry.from_state, TransactionState::Pending);
+        assert_eq!(entry.to_state, TransactionState::Completed);
+        assert!(!entry.success);
+    }
 }
 
 #[cfg(test)]
