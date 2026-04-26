@@ -34,6 +34,26 @@ fn decode_base64url_char(c: u8) -> Option<u8> {
 }
 
 /// Base64url decode (no padding required).
+///
+/// Decodes a base64url-encoded byte slice (RFC 4648 §5) without requiring
+/// `=` padding characters. Stops at the first `=` if present.
+///
+/// # Arguments
+///
+/// * `input` - Base64url-encoded bytes.
+///
+/// # Returns
+///
+/// `Ok(Vec<u8>)` on success, `Err(())` if any character is not valid base64url.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep10_jwt::base64url_decode;
+///
+/// let decoded = base64url_decode(b"SGVsbG8").unwrap();
+/// assert_eq!(decoded, b"Hello");
+/// ```
 pub fn base64url_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
     let mut out: Vec<u8> = Vec::new();
     let mut buffer: u32 = 0;
@@ -174,10 +194,46 @@ fn parse_json_sub(env: &Env, payload: &[u8]) -> Result<String, ()> {
     Err(())
 }
 
-/// Verify a SEP-10-style JWT: JWS compact, EdDSA signature, `exp`, `nbf`, `jti` replay, and optional `sub` match.
+/// Verify a SEP-10-style JWT (JWS compact, EdDSA / Ed25519).
 ///
-/// The maximum accepted token length defaults to [`MAX_JWT_LEN`] but can be overridden by
-/// storing a `u32` under the `"JWTMAXLEN"` instance key (issue #64).
+/// Performs the following checks in order:
+/// 1. Token length is within the configured maximum (default [`MAX_JWT_LEN`]).
+/// 2. Token has exactly two `.` separators (three parts).
+/// 3. Header contains `"EdDSA"`.
+/// 4. Signature is 64 bytes and passes Ed25519 verification against `anchor_public_key`.
+/// 5. `exp` claim is present and in the future.
+/// 6. `nbf` claim (if present) is not in the future.
+/// 7. `jti` claim (if present) has not been seen before (replay protection).
+/// 8. `sub` claim is present and, if `expected_sub` is `Some`, matches it.
+///
+/// The maximum accepted token length defaults to [`MAX_JWT_LEN`] (2048) but can
+/// be overridden by storing a `u32` under the `"JWTMAXLEN"` instance storage key.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban execution environment (used for crypto, ledger time, and storage).
+/// * `token` - The compact JWS token string (`header.payload.signature`).
+/// * `anchor_public_key` - The 32-byte Ed25519 public key of the signing anchor.
+/// * `expected_sub` - When `Some`, the `sub` claim must equal this value.
+///   When `None`, the `sub` claim is parsed but not compared.
+///
+/// # Returns
+///
+/// `Ok(())` if all checks pass.
+///
+/// # Errors
+///
+/// Returns `Err(())` if any check fails (invalid signature, expired token,
+/// future `nbf`, replayed `jti`, mismatched `sub`, or malformed token).
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use soroban_sdk::{Env, Bytes, String};
+/// # let env = Env::default();
+/// # let anchor_public_key = Bytes::from_slice(&env, &[0u8; 32]);
+/// # let token = String::from_str(&env, "header.payload.sig");
+/// use anchorkit::sep10_jwt::verify_sep10_jwt;
 ///
 /// Clock skew tolerance (seconds) is read from the `"JWTSKEW"` instance key; defaults to
 /// [`DEFAULT_CLOCK_SKEW`] (60 s). A token whose `exp` is within the skew window of `now` is

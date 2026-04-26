@@ -102,11 +102,35 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AnchorKitError> {
 
 /// Normalizes the anchor's `/transactions/deposit/interactive` response.
 ///
+/// Validates that both `url` and `id` are non-empty before returning the
+/// normalised struct.
+///
 /// # Arguments
-/// * `raw` - Raw response from the anchor
+///
+/// * `raw` - A [`RawInteractiveDepositResponse`] from the anchor's endpoint.
 ///
 /// # Returns
-/// Normalized `InteractiveDepositResponse` or an error
+///
+/// A normalised [`InteractiveDepositResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`AnchorKitError`] with code [`ErrorCode::ValidationError`] if
+/// `url` or `id` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep24::{initiate_interactive_deposit, RawInteractiveDepositResponse};
+///
+/// let raw = RawInteractiveDepositResponse {
+///     url: "https://anchor.example.com/deposit".into(),
+///     id: "tx-123".into(),
+/// };
+/// let resp = initiate_interactive_deposit(raw).unwrap();
+/// assert_eq!(resp.url, "https://anchor.example.com/deposit");
+/// assert_eq!(resp.id, "tx-123");
+/// ```
 pub fn initiate_interactive_deposit(
     raw: RawInteractiveDepositResponse,
 ) -> Result<InteractiveDepositResponse, AnchorKitError> {
@@ -120,11 +144,34 @@ pub fn initiate_interactive_deposit(
 
 /// Normalizes the anchor's `/transactions/withdraw/interactive` response.
 ///
+/// Validates that both `url` and `id` are non-empty before returning the
+/// normalised struct.
+///
 /// # Arguments
-/// * `raw` - Raw response from the anchor
+///
+/// * `raw` - A [`RawInteractiveWithdrawalResponse`] from the anchor's endpoint.
 ///
 /// # Returns
-/// Normalized `InteractiveWithdrawalResponse` or an error
+///
+/// A normalised [`InteractiveWithdrawalResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`AnchorKitError`] with code [`ErrorCode::ValidationError`] if
+/// `url` or `id` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep24::{initiate_interactive_withdrawal, RawInteractiveWithdrawalResponse};
+///
+/// let raw = RawInteractiveWithdrawalResponse {
+///     url: "https://anchor.example.com/withdraw".into(),
+///     id: "tx-456".into(),
+/// };
+/// let resp = initiate_interactive_withdrawal(raw).unwrap();
+/// assert_eq!(resp.id, "tx-456");
+/// ```
 pub fn initiate_interactive_withdrawal(
     raw: RawInteractiveWithdrawalResponse,
 ) -> Result<InteractiveWithdrawalResponse, AnchorKitError> {
@@ -138,13 +185,38 @@ pub fn initiate_interactive_withdrawal(
 
 /// Normalizes the anchor's `/transaction` response for SEP-24 flows.
 ///
-/// Maps SEP-24 specific fields like `more_info_url` and `stellar_transaction_id`.
+/// Maps SEP-24 specific fields (`more_info_url`, `stellar_transaction_id`) and
+/// normalises the status string via [`TransactionStatus::from_str`].
 ///
 /// # Arguments
-/// * `raw` - Raw response from the anchor
+///
+/// * `raw` - A [`RawSep24TransactionResponse`] from the anchor's `/transaction` endpoint.
 ///
 /// # Returns
-/// Normalized `Sep24TransactionStatusResponse` or an error
+///
+/// A normalised [`Sep24TransactionStatusResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`AnchorKitError`] with code [`ErrorCode::ValidationError`] if
+/// `id` or `status` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep24::{fetch_sep24_transaction_status, RawSep24TransactionResponse};
+/// use anchorkit::TransactionStatus;
+///
+/// let raw = RawSep24TransactionResponse {
+///     id: "tx-789".into(),
+///     status: "completed".into(),
+///     more_info_url: Some("https://anchor.example.com/tx/tx-789".into()),
+///     stellar_transaction_id: Some("stellar-tx-123".into()),
+/// };
+/// let resp = fetch_sep24_transaction_status(raw).unwrap();
+/// assert_eq!(resp.status, TransactionStatus::Completed);
+/// assert!(resp.more_info_url.is_some());
+/// ```
 pub fn fetch_sep24_transaction_status(
     raw: RawSep24TransactionResponse,
 ) -> Result<Sep24TransactionStatusResponse, AnchorKitError> {

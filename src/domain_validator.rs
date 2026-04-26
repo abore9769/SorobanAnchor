@@ -12,33 +12,54 @@ use alloc::vec::Vec;
 
 use crate::errors::AnchorKitError;
 
-/// Validates an anchor domain URL
+/// Validates an anchor domain URL.
 ///
-/// # Requirements
-/// - Must be a valid URL format
-/// - Must use HTTPS protocol only
-/// - Must have a valid domain structure
-/// - Must not contain malformed components
+/// Ensures the URL is safe to use as an anchor endpoint before making any
+/// outbound HTTP requests. The following rules are enforced:
+///
+/// - Must be non-empty and between 10 and 2048 characters.
+/// - Must use the `https://` scheme (HTTP, FTP, WS, etc. are rejected).
+/// - Host must contain at least one dot (no bare hostnames like `localhost`).
+/// - No consecutive dots, leading/trailing dots, or leading/trailing hyphens
+///   in any DNS label.
+/// - No IPv4 or IPv6 addresses.
+/// - Port (if present) must be in the range 1–65535.
+/// - No control characters or RFC 3986 invalid characters (`<`, `>`, `{`, `}`,
+///   `|`, `\`).
+/// - Unicode / IDN domains are rejected (ASCII only).
 ///
 /// # Arguments
-/// * `domain` - The domain URL to validate
+///
+/// * `domain` - The full URL string to validate (e.g. `"https://anchor.example.com"`).
 ///
 /// # Returns
-/// * `Ok(())` if the domain is valid
-/// * `Err(AnchorKitError)` if validation fails
+///
+/// `Ok(())` if the domain passes all checks.
+///
+/// # Errors
+///
+/// Returns [`AnchorKitError`] with code [`ErrorCode::InvalidEndpointFormat`] if
+/// any validation rule is violated.
 ///
 /// # Examples
-/// ```
-/// use anchor_kit::domain_validator::validate_anchor_domain;
 ///
-/// // Valid domain
-/// assert!(validate_anchor_domain("https://example.com").is_ok());
+/// ```rust
+/// use anchorkit::validate_anchor_domain;
 ///
-/// // Invalid - not HTTPS
+/// // Valid HTTPS domain
+/// assert!(validate_anchor_domain("https://anchor.example.com").is_ok());
+///
+/// // Valid with port and path
+/// assert!(validate_anchor_domain("https://api.example.com:8080/sep6").is_ok());
+///
+/// // Rejected: HTTP
 /// assert!(validate_anchor_domain("http://example.com").is_err());
 ///
-/// // Invalid - malformed
-/// assert!(validate_anchor_domain("not-a-url").is_err());
+/// // Rejected: no TLD
+/// assert!(validate_anchor_domain("https://localhost").is_err());
+///
+/// // Rejected: IPv4
+/// assert!(validate_anchor_domain("https://192.168.1.1").is_err());
 /// ```
 pub fn validate_anchor_domain(domain: &str) -> Result<(), AnchorKitError> {
     // Check for empty or whitespace-only input

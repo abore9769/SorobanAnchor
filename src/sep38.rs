@@ -12,7 +12,21 @@ use crate::errors::Error;
 
 // ── Normalized response types ────────────────────────────────────────────────
 
-/// Normalized price information from SEP-38 /prices endpoint.
+/// Normalized price information from SEP-38 `/prices` endpoint.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{fetch_prices, RawPrice};
+///
+/// let raw = RawPrice {
+///     buy_asset: "USDC".into(),
+///     sell_asset: "XLM".into(),
+///     price: "0.15".into(),
+/// };
+/// let price = fetch_prices(raw).unwrap();
+/// assert_eq!(price.buy_asset, "USDC");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Price {
     pub buy_asset: String,
@@ -20,7 +34,26 @@ pub struct Price {
     pub price: String,
 }
 
-/// Normalized quote information from SEP-38 /quote endpoint.
+/// Normalized firm quote from SEP-38 `/quote` endpoint.
+///
+/// A firm quote is a binding commitment from the anchor to exchange assets at
+/// the stated `price` until `expires_at`.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{request_firm_quote, RawFirmQuote};
+///
+/// let raw = RawFirmQuote {
+///     id: "quote-123".into(),
+///     expires_at: "1700000000".into(),
+///     price: "0.15".into(),
+///     sell_amount: "1000".into(),
+///     buy_amount: "150".into(),
+/// };
+/// let quote = request_firm_quote(raw).unwrap();
+/// assert_eq!(quote.id, "quote-123");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirmQuote {
     pub id: String,
@@ -108,7 +141,28 @@ fn validate_quote_fields(raw: &RawFirmQuote, current_timestamp: u64) -> Result<u
 
 // ── Service functions ────────────────────────────────────────────────────────
 
-/// Normalizes a raw /prices response from an anchor.
+/// Normalizes a raw `/prices` response from an anchor.
+///
+/// Extracts and passes through `buy_asset`, `sell_asset`, and `price` fields.
+/// Currently performs no field-level validation; all fields are accepted as-is.
+///
+/// # Arguments
+///
+/// * `raw` - A [`RawPrice`] populated from the anchor's `/prices` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`Price`] on success.
+///
+/// # Errors
+///
+/// Currently always returns `Ok(...)`. Future versions may validate that
+/// `price` is a valid decimal string.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{fetch_prices, RawPrice};
 ///
 /// Returns `Err(Error::invalid_quote())` if `price` is not a positive decimal string.
 pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
@@ -122,7 +176,7 @@ pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
     })
 }
 
-/// Normalizes a raw /quote response from an anchor.
+/// Normalizes a raw `/quote` response from an anchor.
 ///
 /// Validates all fields and checks expiry against `current_timestamp`.
 /// Returns `Err(Error::stale_quote())` if the quote has already expired.

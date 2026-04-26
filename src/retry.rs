@@ -1,6 +1,24 @@
 use Vec;
 
 /// Retry configuration for off-chain anchor requests.
+///
+/// Controls how many times a failing operation is retried and how long to wait
+/// between attempts. The delay grows exponentially and is capped at
+/// `max_delay_ms` to prevent unbounded waits.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::RetryConfig;
+///
+/// // Use sensible defaults: 3 attempts, 100 ms base, 5 s cap, ×2 multiplier.
+/// let config = RetryConfig::default();
+/// assert_eq!(config.max_attempts, 3);
+///
+/// // Custom configuration for a high-latency anchor.
+/// let config = RetryConfig::new(5, 200, 10_000, 3);
+/// assert_eq!(config.max_attempts, 5);
+/// ```
 #[derive(Clone, Debug)]
 pub struct RetryConfig {
     /// Maximum number of attempts (including the first try).
@@ -25,6 +43,29 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    /// Create a [`RetryConfig`] with explicit values for all fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_attempts` - Total number of attempts including the first try.
+    ///   Must be at least `1`.
+    /// * `base_delay_ms` - Delay in milliseconds before the first retry.
+    /// * `max_delay_ms` - Upper bound on the computed delay (caps exponential growth).
+    /// * `backoff_multiplier` - Factor by which the delay is multiplied each attempt.
+    ///
+    /// # Returns
+    ///
+    /// A new [`RetryConfig`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::RetryConfig;
+    ///
+    /// let config = RetryConfig::new(5, 200, 10_000, 3);
+    /// assert_eq!(config.max_attempts, 5);
+    /// assert_eq!(config.base_delay_ms, 200);
+    /// ```
     pub fn new(
         max_attempts: u32,
         base_delay_ms: u64,
@@ -164,9 +205,46 @@ pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
 
 /// Execute `f` with exponential backoff retry.
 ///
-/// `f` receives the current attempt number (0-based) and returns `Ok(T)` on
-/// success or `Err(E)` on failure.  `retryable` classifies whether an error
-/// warrants another attempt.
+/// Calls `f` up to `config.max_attempts` times. After each failure that
+/// `retryable` classifies as transient, waits for the computed backoff delay
+/// (via `sleep_fn`) before trying again. Stops immediately on a non-retryable
+/// error or when all attempts are exhausted.
+///
+/// # Arguments
+///
+/// * `config` - Retry parameters (attempts, delays, multiplier).
+/// * `f` - The fallible operation. Receives the current attempt index (0-based).
+/// * `retryable` - Predicate that returns `true` when an error warrants a retry.
+/// * `sleep_fn` - Callback invoked with the delay in milliseconds between attempts.
+///   Inject `|_| {}` in tests to avoid real sleeps.
+///
+/// # Returns
+///
+/// `Ok(T)` on the first successful attempt, or `Err(E)` after all attempts are
+/// exhausted or a non-retryable error is encountered.
+///
+/// # Errors
+///
+/// Returns the last error produced by `f`. The error is non-retryable if
+/// `retryable` returned `false`, or all `max_attempts` were consumed.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::retry::{retry_with_backoff, RetryConfig};
+///
+/// let config = RetryConfig::default();
+/// let mut calls = 0u32;
+///
+/// let result = retry_with_backoff(
+///     &config,
+///     |attempt| {
+///         calls += 1;
+///         if attempt < 2 { Err("transient") } else { Ok(42u32) }
+///     },
+///     |_err| true,   // all errors are retryable
+///     |_ms| {},      // no-op sleep
+/// );
 ///
 /// A `sleep_fn` callback is provided so callers can inject real or mock sleep.
 /// `jitter_source` provides per-attempt seeds to spread retry timing.

@@ -45,6 +45,33 @@ pub struct AnchorInfoResponse {
 
 /// Validates a raw deposit response map, returning a typed [`DepositResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `transaction_id` - Unique transaction ID assigned by the anchor (must be non-empty).
+/// * `status` - Current transaction status string (must be non-empty).
+/// * `deposit_address` - Address or instructions for sending funds (must be non-empty).
+/// * `expires_at` - Unix timestamp when the deposit window closes (`0` is accepted).
+///
+/// # Returns
+///
+/// A validated [`DepositResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any string
+/// field is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::validate_deposit_response;
+///
+/// let resp = validate_deposit_response("dep_123", "pending", "GDEPOSIT...", 9999).unwrap();
+/// assert_eq!(resp.transaction_id, "dep_123");
+///
+/// assert!(validate_deposit_response("", "pending", "GDEPOSIT...", 9999).is_err());
+/// ```
 pub fn validate_deposit_response(
     transaction_id: &str,
     status: &str,
@@ -71,6 +98,32 @@ pub fn validate_deposit_response(
 
 /// Validates a raw withdraw response, returning a typed [`WithdrawResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `transaction_id` - Unique transaction ID assigned by the anchor (must be non-empty).
+/// * `status` - Current transaction status string (must be non-empty).
+/// * `estimated_completion` - Estimated Unix timestamp for completion (`0` is accepted).
+///
+/// # Returns
+///
+/// A validated [`WithdrawResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any string
+/// field is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::validate_withdraw_response;
+///
+/// let resp = validate_withdraw_response("wd_456", "processing", 2000).unwrap();
+/// assert_eq!(resp.transaction_id, "wd_456");
+///
+/// assert!(validate_withdraw_response("", "processing", 2000).is_err());
+/// ```
 pub fn validate_withdraw_response(
     transaction_id: &str,
     status: &str,
@@ -92,6 +145,34 @@ pub fn validate_withdraw_response(
 
 /// Validates a raw quote response, returning a typed [`QuoteResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `id` - Unique quote ID (must be non-empty).
+/// * `status` - Current quote status string (must be non-empty).
+/// * `amount` - Quote amount in asset units (`0` is accepted).
+/// * `asset` - Asset code (must be non-empty).
+/// * `fee` - Fee in asset units (`0` is accepted).
+///
+/// # Returns
+///
+/// A validated [`QuoteResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if `id`, `status`,
+/// or `asset` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::validate_quote_response;
+///
+/// let resp = validate_quote_response("q1", "quoted", 100_000_000, "USDC", 500_000).unwrap();
+/// assert_eq!(resp.asset, "USDC");
+///
+/// assert!(validate_quote_response("", "quoted", 0, "USDC", 0).is_err());
+/// ```
 pub fn validate_quote_response(
     id: &str,
     status: &str,
@@ -120,6 +201,36 @@ pub fn validate_quote_response(
 
 /// Validates a raw anchor info response, returning a typed [`AnchorInfoResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `name` - Human-readable anchor name (must be non-empty).
+/// * `supported_assets` - List of asset codes the anchor supports (must be non-empty).
+///
+/// # Returns
+///
+/// A validated [`AnchorInfoResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if `name` is empty
+/// or `supported_assets` is an empty list.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::validate_anchor_info_response;
+///
+/// let resp = validate_anchor_info_response(
+///     "MyAnchor",
+///     vec!["USDC".into(), "XLM".into()],
+/// ).unwrap();
+/// assert_eq!(resp.name, "MyAnchor");
+/// assert_eq!(resp.supported_assets.len(), 2);
+///
+/// assert!(validate_anchor_info_response("", vec!["USDC".into()]).is_err());
+/// assert!(validate_anchor_info_response("MyAnchor", vec![]).is_err());
+/// ```
 pub fn validate_anchor_info_response(
     name: &str,
     supported_assets: alloc::vec::Vec<alloc::string::String>,
