@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AnchorCapabilityCard Stories</title>
+  <style>
+    body { font-family: sans-serif; background: #f1f5f9; padding: 32px; }
+    h1 { font-size: 22px; margin-bottom: 8px; color: #0f172a; }
+    .story-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: #94a3b8; margin: 32px 0 8px; }
+    .story-frame { background: #fff; border-radius: 16px; padding: 24px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06); max-width: 500px; }
+    pre { background: #0f172a; color: #94a3b8; border-radius: 10px;
+      padding: 16px; font-size: 11px; overflow-x: auto; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>AnchorCapabilityCard — Storybook</h1>
+  <p style="color:#64748b;font-size:13px;">Five capability state stories. Import the component and pass the props below.</p>
+
+  <!-- Story 1: Deposit-Only -->
+  <div class="story-label">Story 1 · Deposit-Only Anchor</div>
+  <div class="story-frame">
+    <p style="color:#475569;font-size:13px;">An anchor that only supports deposits. The Withdraw badge is absent.</p>
+    <pre>&lt;AnchorCapabilityCard
+  anchorName="DepositOnly Anchor"
+  domain="deposit.stellar.org"
+  accentColor="#2563eb"
+  assets={[{
+    code: "USDC", name: "USD Coin",
+    depositEnabled: true, withdrawalEnabled: false,
+    operationTypes: ["deposit"],
+    fees: { deposit: { type: "flat", flatAmount: 1.5, currency: "USD" } },
+    limits: { minDeposit: 10, maxDeposit: 5000, currency: "USD" },
+    kyc: { level: "basic", fields: [] }
+  }]}
+/&gt;</pre>
+  </div>
+
+  <!-- Story 2: Withdrawal-Only -->
+  <div class="story-label">Story 2 · Withdrawal-Only Anchor</div>
+  <div class="story-frame">
+    <p style="color:#475569;font-size:13px;">An anchor that only supports withdrawals.</p>
+    <pre>&lt;AnchorCapabilityCard
+  anchorName="WithdrawOnly Anchor"
+  domain="withdraw.stellar.org"
+  accentColor="#7c3aed"
+  assets={[{
+    code: "EURC", name: "Euro Coin",
+    depositEnabled: false, withdrawalEnabled: true,
+    operationTypes: ["withdrawal"],
+    fees: { withdrawal: { type: "percent", percent: 0.5, currency: "EUR" } },
+    limits: { minWithdrawal: 20, maxWithdrawal: 10000, currency: "EUR" },
+    kyc: { level: "full", fields: [] }
+  }]}
+/&gt;</pre>
+  </div>
+
+  <!-- Story 3: Full-Service -->
+  <div class="story-label">Story 3 · Full-Service Anchor</div>
+  <div class="story-frame">
+    <p style="color:#475569;font-size:13px;">Supports deposits, withdrawals, multiple assets, and all KYC levels.</p>
+    <pre>&lt;AnchorCapabilityCard
+  anchorName="FullService Anchor"
+  domain="full.stellar.org"
+  accentColor="#059669"
+  assets={[
+    { code: "USDC", depositEnabled: true, withdrawalEnabled: true,
+      operationTypes: ["both"], ... },
+    { code: "EURC", depositEnabled: true, withdrawalEnabled: true,
+      operationTypes: ["both"], ... }
+  ]}
+/&gt;</pre>
+  </div>
+
+  <!-- Story 4: Quote-Provider -->
+  <div class="story-label">Story 4 · Quote-Provider Anchor</div>
+  <div class="story-frame">
+    <p style="color:#475569;font-size:13px;">Anchor with tiered fee structure indicating SEP-38 quote support.</p>
+    <pre>&lt;AnchorCapabilityCard
+  anchorName="QuoteProvider Anchor"
+  domain="quotes.stellar.org"
+  accentColor="#f59e0b"
+  assets={[{
+    code: "BTC", name: "Bitcoin",
+    depositEnabled: true, withdrawalEnabled: true,
+    operationTypes: ["both"],
+    fees: {
+      deposit: {
+        type: "tiered", currency: "USD",
+        tiers: [{ upTo: 1000, fee: "$5.00" }, { upTo: null, fee: "0.5%" }]
+      }
+    },
+    limits: { minDeposit: 100, maxDeposit: 100000, currency: "USD" },
+    kyc: { level: "enhanced", fields: [] }
+  }]}
+/&gt;</pre>
+  </div>
+
+  <!-- Story 5: Inactive -->
+  <div class="story-label">Story 5 · Inactive Anchor (No Assets)</div>
+  <div class="story-frame">
+    <p style="color:#475569;font-size:13px;">Anchor with no configured assets — disabled/inactive state.</p>
+    <pre>&lt;AnchorCapabilityCard
+  anchorName="Inactive Anchor"
+  domain="inactive.stellar.org"
+  accentColor="#94a3b8"
+  description="This anchor is currently offline."
+  assets={[]}
+/&gt;</pre>
+  </div>
+</body>
+</html>
