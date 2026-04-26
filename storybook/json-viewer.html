@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>JsonViewer Stories</title>
+  <style>
+    body { font-family: monospace; background: #0e0c0a; color: #e7e5e0; padding: 32px; }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    .story-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: #57534e; margin: 32px 0 8px; }
+    pre { background: #1c1916; border-radius: 10px; padding: 16px;
+      font-size: 11px; overflow-x: auto; margin-top: 12px; color: #78716c; }
+  </style>
+</head>
+<body>
+  <h1>JsonViewer — Storybook</h1>
+
+  <div class="story-label">Story 1 · Flat Object (ember theme)</div>
+  <pre>&lt;JsonViewer
+  data={{ name: "Alice", age: 30, active: true }}
+  title="Flat Object"
+  theme="ember"
+  defaultExpandDepth={2}
+/&gt;</pre>
+
+  <div class="story-label">Story 2 · Deeply Nested Object (arctic theme)</div>
+  <pre>&lt;JsonViewer
+  data={deeplyNestedObject}  // 10+ levels
+  title="Deep Nesting"
+  theme="arctic"
+  maxDepth={3}
+/&gt;</pre>
+
+  <div class="story-label">Story 3 · Large Array — 1000 elements (forest theme)</div>
+  <pre>&lt;JsonViewer
+  data={Array.from({ length: 1000 }, (_, i) =&gt; i)}
+  title="Large Array"
+  theme="forest"
+  maxDepth={0}
+/&gt;</pre>
+
+  <div class="story-label">Story 4 · Special Characters &amp; Unicode</div>
+  <pre>&lt;JsonViewer
+  data={{ unicode: "こんにちは 🌟", escaped: 'say "hello"' }}
+  title="Special Characters"
+  theme="ember"
+  defaultExpandDepth={2}
+/&gt;</pre>
+
+  <div class="story-label">Story 5 · All Primitive Types</div>
+  <pre>&lt;JsonViewer
+  data={{
+    str: "hello",
+    num: 42,
+    float: 3.14,
+    bool_true: true,
+    bool_false: false,
+    nil: null
+  }}
+  title="Primitive Types"
+  theme="arctic"
+  defaultExpandDepth={2}
+/&gt;</pre>
+
+  <div class="story-label">Story 6 · HTTP Error Response (400)</div>
+  <pre>&lt;JsonViewer
+  data={{ error: "Missing required field", field: "asset_code" }}
+  title="POST /sep24/deposit"
+  subtitle="Missing required parameter"
+  status={400}
+  responseTime={22}
+  theme="forest"
+/&gt;</pre>
+
+  <div class="story-label">Story 7 · maxDepth=0 (all collapsed)</div>
+  <pre>&lt;JsonViewer
+  data={{ a: { b: { c: 1 } } }}
+  title="Collapsed"
+  maxDepth={0}
+  theme="ember"
+/&gt;</pre>
+</body>
+</html>
