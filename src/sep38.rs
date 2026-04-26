@@ -12,7 +12,21 @@ use crate::errors::Error;
 
 // ── Normalized response types ────────────────────────────────────────────────
 
-/// Normalized price information from SEP-38 /prices endpoint.
+/// Normalized price information from SEP-38 `/prices` endpoint.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{fetch_prices, RawPrice};
+///
+/// let raw = RawPrice {
+///     buy_asset: "USDC".into(),
+///     sell_asset: "XLM".into(),
+///     price: "0.15".into(),
+/// };
+/// let price = fetch_prices(raw).unwrap();
+/// assert_eq!(price.buy_asset, "USDC");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Price {
     pub buy_asset: String,
@@ -20,7 +34,26 @@ pub struct Price {
     pub price: String,
 }
 
-/// Normalized quote information from SEP-38 /quote endpoint.
+/// Normalized firm quote from SEP-38 `/quote` endpoint.
+///
+/// A firm quote is a binding commitment from the anchor to exchange assets at
+/// the stated `price` until `expires_at`.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{request_firm_quote, RawFirmQuote};
+///
+/// let raw = RawFirmQuote {
+///     id: "quote-123".into(),
+///     expires_at: "1700000000".into(),
+///     price: "0.15".into(),
+///     sell_amount: "1000".into(),
+///     buy_amount: "150".into(),
+/// };
+/// let quote = request_firm_quote(raw).unwrap();
+/// assert_eq!(quote.id, "quote-123");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirmQuote {
     pub id: String,
@@ -52,9 +85,37 @@ pub struct RawFirmQuote {
 
 // ── Service functions ────────────────────────────────────────────────────────
 
-/// Normalizes a raw /prices response from an anchor.
+/// Normalizes a raw `/prices` response from an anchor.
 ///
-/// Extracts and validates `buy_asset`, `sell_asset`, and `price` fields.
+/// Extracts and passes through `buy_asset`, `sell_asset`, and `price` fields.
+/// Currently performs no field-level validation; all fields are accepted as-is.
+///
+/// # Arguments
+///
+/// * `raw` - A [`RawPrice`] populated from the anchor's `/prices` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`Price`] on success.
+///
+/// # Errors
+///
+/// Currently always returns `Ok(...)`. Future versions may validate that
+/// `price` is a valid decimal string.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{fetch_prices, RawPrice};
+///
+/// let raw = RawPrice {
+///     buy_asset: "USDC".into(),
+///     sell_asset: "XLM".into(),
+///     price: "0.15".into(),
+/// };
+/// let price = fetch_prices(raw).unwrap();
+/// assert_eq!(price.sell_asset, "XLM");
+/// ```
 pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
     Ok(Price {
         buy_asset: raw.buy_asset,
@@ -63,9 +124,37 @@ pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
     })
 }
 
-/// Normalizes a raw /quote response from an anchor.
+/// Normalizes a raw `/quote` response from an anchor.
 ///
-/// Extracts and validates `id`, `expires_at`, `price`, `sell_amount`, and `buy_amount` fields.
+/// Passes through all fields from the raw response into a typed [`FirmQuote`].
+///
+/// # Arguments
+///
+/// * `raw` - A [`RawFirmQuote`] populated from the anchor's `/quote` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`FirmQuote`] on success.
+///
+/// # Errors
+///
+/// Currently always returns `Ok(...)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{request_firm_quote, RawFirmQuote};
+///
+/// let raw = RawFirmQuote {
+///     id: "quote-123".into(),
+///     expires_at: "1700000000".into(),
+///     price: "0.15".into(),
+///     sell_amount: "1000".into(),
+///     buy_amount: "150".into(),
+/// };
+/// let quote = request_firm_quote(raw).unwrap();
+/// assert_eq!(quote.price, "0.15");
+/// ```
 pub fn request_firm_quote(raw: RawFirmQuote) -> Result<FirmQuote, Error> {
     Ok(FirmQuote {
         id: raw.id,
@@ -78,7 +167,34 @@ pub fn request_firm_quote(raw: RawFirmQuote) -> Result<FirmQuote, Error> {
 
 /// Checks if a quote has expired based on the current timestamp.
 ///
-/// Returns `true` if the quote's `expires_at` is in the past.
+/// Attempts to parse `quote.expires_at` as a Unix timestamp (`u64`). If
+/// parsing fails the quote is assumed to be still valid (returns `false`).
+///
+/// # Arguments
+///
+/// * `quote` - The [`FirmQuote`] to check.
+/// * `current_timestamp` - The current Unix timestamp in seconds.
+///
+/// # Returns
+///
+/// `true` if `expires_at <= current_timestamp`, `false` otherwise or if
+/// `expires_at` cannot be parsed as a `u64`.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep38::{is_quote_expired, FirmQuote};
+///
+/// let quote = FirmQuote {
+///     id: "q1".into(),
+///     expires_at: "1000".into(),
+///     price: "0.15".into(),
+///     sell_amount: "100".into(),
+///     buy_amount: "15".into(),
+/// };
+/// assert!(is_quote_expired(&quote, 2000));
+/// assert!(!is_quote_expired(&quote, 500));
+/// ```
 pub fn is_quote_expired(quote: &FirmQuote, current_timestamp: u64) -> bool {
     // Parse expires_at as a timestamp string (ISO 8601 or Unix timestamp)
     // For now, we'll try to parse as u64 directly, or return false if parsing fails

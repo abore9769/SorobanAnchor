@@ -1,10 +1,33 @@
+//! Transaction state machine for on-chain and off-chain transaction tracking.
+//!
+//! Enforces legal state transitions (`Pending → InProgress → Completed | Failed`)
+//! and persists records either in Soroban persistent storage (production) or an
+//! in-memory cache (dev/test mode).
+
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
 use crate::errors::AnchorKitError;
 
 const TXSTATE_TTL: u32 = 1_555_200;
 
-/// Transaction states for the state tracker
+/// The lifecycle states a tracked transaction can occupy.
+///
+/// Legal forward transitions are:
+/// - [`Pending`](TransactionState::Pending) → [`InProgress`](TransactionState::InProgress)
+/// - [`InProgress`](TransactionState::InProgress) → [`Completed`](TransactionState::Completed)
+/// - [`InProgress`](TransactionState::InProgress) → [`Failed`](TransactionState::Failed)
+///
+/// All other transitions are rejected by [`TransactionState::is_valid_transition`].
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::TransactionState;
+///
+/// assert!(TransactionState::Pending.is_valid_transition(TransactionState::InProgress));
+/// assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Completed));
+/// assert_eq!(TransactionState::Completed.as_str(), "completed");
+/// ```
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -16,6 +39,19 @@ pub enum TransactionState {
 }
 
 impl TransactionState {
+    /// Return the canonical lowercase string representation of this state.
+    ///
+    /// # Returns
+    ///
+    /// One of `"pending"`, `"in_progress"`, `"completed"`, or `"failed"`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionState;
+    ///
+    /// assert_eq!(TransactionState::InProgress.as_str(), "in_progress");
+    /// ```
     pub fn as_str(&self) -> &'static str {
         match self {
             TransactionState::Pending => "pending",
@@ -25,6 +61,24 @@ impl TransactionState {
         }
     }
 
+    /// Parse a state from its canonical string representation.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - One of `"pending"`, `"in_progress"`, `"completed"`, or `"failed"`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(TransactionState)` on a recognised string, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionState;
+    ///
+    /// assert_eq!(TransactionState::from_str("completed"), Some(TransactionState::Completed));
+    /// assert_eq!(TransactionState::from_str("unknown"), None);
+    /// ```
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(TransactionState::Pending),
@@ -36,7 +90,24 @@ impl TransactionState {
     }
 
     /// Returns true only for legal forward transitions:
-    /// Pending → InProgress, InProgress → Completed, InProgress → Failed
+    /// `Pending → InProgress`, `InProgress → Completed`, `InProgress → Failed`.
+    ///
+    /// # Arguments
+    ///
+    /// * `to` - The target state.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the transition from `self` to `to` is permitted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionState;
+    ///
+    /// assert!(TransactionState::Pending.is_valid_transition(TransactionState::InProgress));
+    /// assert!(!TransactionState::Completed.is_valid_transition(TransactionState::InProgress));
+    /// ```
     pub fn is_valid_transition(&self, to: TransactionState) -> bool {
         matches!(
             (self, to),
@@ -47,7 +118,10 @@ impl TransactionState {
     }
 }
 
-/// Transaction state record
+/// A snapshot of a tracked transaction's current state.
+///
+/// Stored in Soroban persistent storage (production) or an in-memory cache
+/// (dev mode). Retrieved via [`TransactionStateTracker::get_transaction_state`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionStateRecord {
@@ -59,7 +133,27 @@ pub struct TransactionStateRecord {
     pub error_message: Option<String>,
 }
 
-/// Transaction state tracker
+/// State-machine tracker for on-chain transactions.
+///
+/// In production mode (`is_dev_mode = false`) records are persisted to Soroban
+/// persistent storage with a TTL of ~90 days. In dev/test mode they are kept in
+/// an in-memory `Vec` for fast iteration.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use soroban_sdk::Env;
+/// # use soroban_sdk::testutils::Address as _;
+/// # let env = Env::default();
+/// # let initiator = soroban_sdk::Address::generate(&env);
+/// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+///
+/// let mut tracker = TransactionStateTracker::new(true); // dev mode
+/// tracker.create_transaction(1, initiator, &env).unwrap();
+/// tracker.start_transaction(1, &env).unwrap();
+/// let record = tracker.complete_transaction(1, &env).unwrap();
+/// assert_eq!(record.state, TransactionState::Completed);
+/// ```
 #[derive(Clone)]
 pub struct TransactionStateTracker {
     cache: alloc::vec::Vec<TransactionStateRecord>,
@@ -67,7 +161,25 @@ pub struct TransactionStateTracker {
 }
 
 impl TransactionStateTracker {
-    /// Create a new transaction state tracker
+    /// Create a new transaction state tracker.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_dev_mode` - When `true`, records are stored in an in-memory cache
+    ///   instead of Soroban persistent storage. Use `true` in tests.
+    ///
+    /// # Returns
+    ///
+    /// A new, empty [`TransactionStateTracker`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let tracker = TransactionStateTracker::new(true);
+    /// assert_eq!(tracker.cache_size(), 0);
+    /// ```
     pub fn new(is_dev_mode: bool) -> Self {
         TransactionStateTracker {
             cache: alloc::vec::Vec::new(),
@@ -75,7 +187,35 @@ impl TransactionStateTracker {
         }
     }
 
-    /// Create a transaction with pending state
+    /// Create a transaction with [`TransactionState::Pending`] state.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - Unique numeric identifier for the transaction.
+    /// * `initiator` - The Stellar address that initiated the transaction.
+    /// * `env` - The Soroban execution environment (used for timestamp and storage).
+    ///
+    /// # Returns
+    ///
+    /// The newly created [`TransactionStateRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error message if storage fails (production mode only).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// let record = tracker.create_transaction(42, initiator, &env).unwrap();
+    /// assert_eq!(record.state, TransactionState::Pending);
+    /// ```
     pub fn create_transaction(
         &mut self,
         transaction_id: u64,
@@ -104,7 +244,37 @@ impl TransactionStateTracker {
         Ok(record)
     }
 
-    /// Update transaction state to in-progress
+    /// Transition a transaction from [`Pending`](TransactionState::Pending) to
+    /// [`InProgress`](TransactionState::InProgress).
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to advance.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`TransactionStateRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error if the transaction is not found or the transition
+    /// is illegal (e.g. already `Completed`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// let record = tracker.start_transaction(1, &env).unwrap();
+    /// assert_eq!(record.state, TransactionState::InProgress);
+    /// ```
     pub fn start_transaction(
         &mut self,
         transaction_id: u64,
@@ -113,7 +283,38 @@ impl TransactionStateTracker {
         self.update_state(transaction_id, TransactionState::InProgress, None, env)
     }
 
-    /// Mark transaction as completed
+    /// Transition a transaction from [`InProgress`](TransactionState::InProgress) to
+    /// [`Completed`](TransactionState::Completed).
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to complete.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`TransactionStateRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error if the transaction is not found or the transition
+    /// is illegal (e.g. still `Pending`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// let record = tracker.complete_transaction(1, &env).unwrap();
+    /// assert_eq!(record.state, TransactionState::Completed);
+    /// ```
     pub fn complete_transaction(
         &mut self,
         transaction_id: u64,
@@ -122,7 +323,43 @@ impl TransactionStateTracker {
         self.update_state(transaction_id, TransactionState::Completed, None, env)
     }
 
-    /// Mark transaction as failed
+    /// Transition a transaction to [`Failed`](TransactionState::Failed) with an error message.
+    ///
+    /// The transition is legal from both [`Pending`](TransactionState::Pending) and
+    /// [`InProgress`](TransactionState::InProgress).
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to fail.
+    /// * `error_message` - A Soroban [`String`] describing the failure reason.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`TransactionStateRecord`] with `error_message` populated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error if the transaction is not found or the transition
+    /// is illegal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{Env, String};
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// let msg = String::from_str(&env, "network timeout");
+    /// let record = tracker.fail_transaction(1, msg, &env).unwrap();
+    /// assert_eq!(record.state, TransactionState::Failed);
+    /// assert!(record.error_message.is_some());
+    /// ```
     pub fn fail_transaction(
         &mut self,
         transaction_id: u64,
@@ -204,7 +441,43 @@ impl TransactionStateTracker {
     }
 
     /// Advance a transaction to `new_state`, enforcing legal transition rules.
-    /// Returns an error if the transition is illegal or the transaction is not found.
+    ///
+    /// This is the general-purpose state-advance method. Prefer the named helpers
+    /// ([`start_transaction`](Self::start_transaction),
+    /// [`complete_transaction`](Self::complete_transaction),
+    /// [`fail_transaction`](Self::fail_transaction)) for clarity.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to advance.
+    /// * `new_state` - The target [`TransactionState`].
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`TransactionStateRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error if the transaction is not found or the transition
+    /// from the current state to `new_state` is illegal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env).unwrap();
+    /// assert_eq!(r.state, TransactionState::InProgress);
+    /// // Illegal transition returns an error.
+    /// assert!(tracker.advance_transaction_state(1, TransactionState::Pending, &env).is_err());
+    /// ```
     pub fn advance_transaction_state(
         &mut self,
         transaction_id: u64,
@@ -214,7 +487,36 @@ impl TransactionStateTracker {
         self.update_state(transaction_id, new_state, None, env)
     }
 
-    /// Get transaction state by ID
+    /// Get transaction state by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to look up.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(record))` if found, `Ok(None)` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error only on storage failures (production mode).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// let state = tracker.get_transaction_state(1, &env).unwrap();
+    /// assert_eq!(state.unwrap().state, TransactionState::Pending);
+    /// assert!(tracker.get_transaction_state(99, &env).unwrap().is_none());
+    /// ```
     pub fn get_transaction_state(
         &self,
         transaction_id: u64,
@@ -235,7 +537,40 @@ impl TransactionStateTracker {
         }
     }
 
-    /// Get all transactions in a specific state
+    /// Get all transactions in a specific state.
+    ///
+    /// In production mode this always returns an empty `Vec` (full scans are not
+    /// supported on-chain). In dev mode it filters the in-memory cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The [`TransactionState`] to filter by.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec` of matching [`TransactionStateRecord`]s.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok(...)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator.clone(), &env).unwrap();
+    /// tracker.create_transaction(2, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    ///
+    /// let pending = tracker.get_transactions_by_state(TransactionState::Pending).unwrap();
+    /// assert_eq!(pending.len(), 1);
+    /// ```
     pub fn get_transactions_by_state(
         &self,
         state: TransactionState,
@@ -254,7 +589,33 @@ impl TransactionStateTracker {
         }
     }
 
-    /// Get all transactions
+    /// Get all transactions (dev mode only).
+    ///
+    /// Returns all records from the in-memory cache. In production mode returns
+    /// an empty `Vec` because full-table scans are not supported on-chain.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec` of all [`TransactionStateRecord`]s.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok(...)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator.clone(), &env).unwrap();
+    /// tracker.create_transaction(2, initiator, &env).unwrap();
+    /// assert_eq!(tracker.get_all_transactions().unwrap().len(), 2);
+    /// ```
     pub fn get_all_transactions(&self) -> Result<alloc::vec::Vec<TransactionStateRecord>, String> {
         if self.is_dev_mode {
             Ok(self.cache.clone())
@@ -264,7 +625,28 @@ impl TransactionStateTracker {
         }
     }
 
-    /// Clear all cached transactions (dev mode only)
+    /// Clear all cached transactions (dev mode only).
+    ///
+    /// Resets the in-memory cache to empty. Calling this in production mode
+    /// returns an error.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` in dev mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` error when called in production mode.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// assert!(tracker.clear_cache().is_ok());
+    /// assert_eq!(tracker.cache_size(), 0);
+    /// ```
     pub fn clear_cache(&mut self) -> Result<(), String> {
         if self.is_dev_mode {
             self.cache = alloc::vec::Vec::new();
@@ -274,7 +656,22 @@ impl TransactionStateTracker {
         }
     }
 
-    /// Get cache size
+    /// Return the number of records currently in the in-memory cache.
+    ///
+    /// Always returns `0` in production mode (no in-memory cache).
+    ///
+    /// # Returns
+    ///
+    /// The number of cached [`TransactionStateRecord`]s.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let tracker = TransactionStateTracker::new(true);
+    /// assert_eq!(tracker.cache_size(), 0);
+    /// ```
     pub fn cache_size(&self) -> usize {
         self.cache.len()
     }

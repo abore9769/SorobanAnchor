@@ -6,7 +6,19 @@
 use soroban_sdk::{contracttype, Address, Env};
 use crate::errors::{AnchorKitError, ErrorCode};
 
-/// Rate limit configuration stored in contract storage
+/// Rate limit configuration stored in contract storage.
+///
+/// Defines the sliding-window parameters used by [`RateLimiter::check_and_increment`].
+/// The admin can update this at runtime via [`RateLimiter::update_config`].
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use anchorkit::RateLimitConfig;
+///
+/// // Allow at most 5 submissions per 50-ledger window.
+/// let config = RateLimitConfig { max_submissions: 5, window_length: 50 };
+/// ```
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateLimitConfig {
@@ -16,7 +28,19 @@ pub struct RateLimitConfig {
     pub window_length: u32,
 }
 
-/// Per-attestor rate limit state stored in contract storage
+/// Per-attestor rate limit state stored in contract storage.
+///
+/// Tracks how many submissions an attestor has made in the current window and
+/// when that window started. Automatically reset when the window expires.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use anchorkit::RateLimitState;
+///
+/// let state = RateLimitState { submission_count: 3, window_start_ledger: 1000 };
+/// assert_eq!(state.submission_count, 3);
+/// ```
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateLimitState {
@@ -26,14 +50,49 @@ pub struct RateLimitState {
     pub window_start_ledger: u32,
 }
 
-/// Rate limiter for attestation submissions
+/// Per-attestor sliding-window rate limiter for attestation submissions.
+///
+/// All methods are associated functions that operate directly on Soroban
+/// persistent storage, so no instance state is needed.
+///
+/// The default configuration (10 submissions per 100-ledger window) is used
+/// when no config has been stored yet.
 pub struct RateLimiter;
 
 impl RateLimiter {
-    /// Check if an attestor can submit an attestation and increment their counter
+    /// Check whether an attestor is within their rate limit and increment the counter.
     ///
-    /// Returns `Ok(())` if the attestor is within the rate limit.
-    /// Returns `Err(AnchorKitError::rate_limit_exceeded())` if the limit is exceeded.
+    /// If the current window has expired it is automatically reset before the
+    /// check. The counter is only incremented when the check passes.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `attestor` - The address of the attestor being checked.
+    /// * `config` - The active [`RateLimitConfig`] (fetch via [`RateLimiter::get_config`]).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the attestor is within the rate limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnchorKitError`] with code [`ErrorCode::RateLimitExceeded`] when
+    /// the attestor has reached `config.max_submissions` in the current window.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let attestor = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::{RateLimiter, RateLimitConfig};
+    ///
+    /// let config = RateLimitConfig { max_submissions: 10, window_length: 100 };
+    /// // First call succeeds.
+    /// assert!(RateLimiter::check_and_increment(&env, &attestor, &config).is_ok());
+    /// ```
     pub fn check_and_increment(
         env: &Env,
         attestor: &Address,
@@ -69,7 +128,32 @@ impl RateLimiter {
         Ok(())
     }
     
-    /// Get the current rate limit state for an attestor
+    /// Get the current rate limit state for an attestor.
+    ///
+    /// Returns a default state (zero submissions, current ledger as window start)
+    /// if no state has been stored yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `attestor` - The address of the attestor to query.
+    ///
+    /// # Returns
+    ///
+    /// The current [`RateLimitState`] for the attestor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let attestor = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::RateLimiter;
+    ///
+    /// let state = RateLimiter::get_state(&env, &attestor);
+    /// assert_eq!(state.submission_count, 0);
+    /// ```
     pub fn get_state(env: &Env, attestor: &Address) -> RateLimitState {
         let state_key = Self::get_state_key(env, attestor);
         env.storage().persistent().get::<_, RateLimitState>(&state_key)
@@ -79,7 +163,39 @@ impl RateLimiter {
             })
     }
     
-    /// Update the rate limit configuration (admin only)
+    /// Update the rate limit configuration (admin only).
+    ///
+    /// Stores the new configuration in persistent contract storage. The change
+    /// takes effect immediately for all subsequent calls to
+    /// [`RateLimiter::check_and_increment`].
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `_admin` - The admin address (authorization is the caller's responsibility).
+    /// * `config` - The new [`RateLimitConfig`] to store.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok(())`. Future versions may return
+    /// [`ErrorCode::UnauthorizedAttestor`] if the caller is not the admin.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let admin = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::{RateLimiter, RateLimitConfig};
+    ///
+    /// let new_config = RateLimitConfig { max_submissions: 20, window_length: 200 };
+    /// assert!(RateLimiter::update_config(&env, &admin, &new_config).is_ok());
+    /// ```
     pub fn update_config(
         env: &Env,
         _admin: &Address,
@@ -92,7 +208,30 @@ impl RateLimiter {
         Ok(())
     }
     
-    /// Get the current rate limit configuration
+    /// Get the current rate limit configuration.
+    ///
+    /// Returns the stored configuration, or the default (10 submissions per
+    /// 100-ledger window) if none has been set.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// The active [`RateLimitConfig`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::Env;
+    /// # let env = Env::default();
+    /// use anchorkit::RateLimiter;
+    ///
+    /// let config = RateLimiter::get_config(&env);
+    /// assert_eq!(config.max_submissions, 10);
+    /// assert_eq!(config.window_length, 100);
+    /// ```
     pub fn get_config(env: &Env) -> RateLimitConfig {
         let config_key = Self::get_config_key(env);
         env.storage().persistent().get::<_, RateLimitConfig>(&config_key)

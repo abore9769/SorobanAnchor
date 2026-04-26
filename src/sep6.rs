@@ -13,6 +13,19 @@ use crate::errors::Error;
 // ── Normalized response types ────────────────────────────────────────────────
 
 /// Normalized status values across all SEP-6 anchors.
+///
+/// Maps the raw string values returned by anchor APIs to typed variants so
+/// callers can use `match` without string comparisons.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::TransactionStatus;
+///
+/// assert_eq!(TransactionStatus::from_str("completed"), TransactionStatus::Completed);
+/// assert_eq!(TransactionStatus::from_str("unknown_value"), TransactionStatus::Error);
+/// assert_eq!(TransactionStatus::Completed.as_str(), "completed");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionStatus {
     Pending,
@@ -34,6 +47,26 @@ pub enum TransactionStatus {
 }
 
 impl TransactionStatus {
+    /// Parse a raw anchor status string into a [`TransactionStatus`] variant.
+    ///
+    /// Unrecognised strings map to [`TransactionStatus::Error`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The raw status string from the anchor API.
+    ///
+    /// # Returns
+    ///
+    /// The corresponding [`TransactionStatus`] variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionStatus;
+    ///
+    /// assert_eq!(TransactionStatus::from_str("pending_external"), TransactionStatus::PendingExternal);
+    /// assert_eq!(TransactionStatus::from_str("garbage"), TransactionStatus::Error);
+    /// ```
     pub fn from_str(s: &str) -> Self {
         match s {
             "pending_external" => Self::PendingExternal,
@@ -52,6 +85,19 @@ impl TransactionStatus {
         }
     }
 
+    /// Return the canonical SEP-6 string representation of this status.
+    ///
+    /// # Returns
+    ///
+    /// A static `&str` matching the SEP-6 specification.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionStatus;
+    ///
+    /// assert_eq!(TransactionStatus::PendingUser.as_str(), "pending_user");
+    /// ```
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -134,6 +180,15 @@ pub struct TransactionStatusResponse {
 }
 
 /// Whether the transaction is a deposit or withdrawal.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::TransactionKind;
+///
+/// assert_eq!(TransactionKind::from_str("withdrawal"), TransactionKind::Withdrawal);
+/// assert_eq!(TransactionKind::from_str("deposit"), TransactionKind::Deposit);
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionKind {
     Deposit,
@@ -141,6 +196,27 @@ pub enum TransactionKind {
 }
 
 impl TransactionKind {
+    /// Parse a raw kind string into a [`TransactionKind`] variant.
+    ///
+    /// Both `"withdrawal"` and `"withdraw"` map to [`TransactionKind::Withdrawal`].
+    /// Everything else maps to [`TransactionKind::Deposit`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The raw kind string from the anchor API.
+    ///
+    /// # Returns
+    ///
+    /// The corresponding [`TransactionKind`] variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionKind;
+    ///
+    /// assert_eq!(TransactionKind::from_str("withdraw"), TransactionKind::Withdrawal);
+    /// assert_eq!(TransactionKind::from_str("deposit"), TransactionKind::Deposit);
+    /// ```
     pub fn from_str(s: &str) -> Self {
         match s {
             "withdrawal" | "withdraw" => Self::Withdrawal,
@@ -197,7 +273,42 @@ pub struct RawTransactionResponse {
 
 /// Normalize a raw anchor deposit response into a canonical [`DepositResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if required fields are missing.
+/// Validates that the required fields `transaction_id` and `how` are non-empty,
+/// then maps optional fields and normalises the status string.
+///
+/// # Arguments
+///
+/// * `raw` - A [`RawDepositResponse`] populated from the anchor's `/deposit` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`DepositResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidTransactionIntent`] if `transaction_id` or `how` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep6::{initiate_deposit, RawDepositResponse, TransactionStatus};
+///
+/// let raw = RawDepositResponse {
+///     transaction_id: "txn-001".into(),
+///     how: "Send to bank account 1234".into(),
+///     extra_info: None,
+///     min_amount: Some(10),
+///     max_amount: Some(10_000),
+///     fee_fixed: Some(1),
+///     status: Some("pending_external".into()),
+///     clawback_enabled: None,
+///     stellar_memo: None,
+///     stellar_memo_type: None,
+/// };
+/// let resp = initiate_deposit(raw).unwrap();
+/// assert_eq!(resp.transaction_id, "txn-001");
+/// assert_eq!(resp.status, TransactionStatus::PendingExternal);
+/// ```
 pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Error> {
     if raw.transaction_id.is_empty() || raw.how.is_empty() {
         return Err(Error::InvalidTransactionIntent);
@@ -223,7 +334,39 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
 
 /// Normalize a raw anchor withdrawal response into a canonical [`WithdrawalResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if required fields are missing.
+/// Validates that `transaction_id` and `account_id` are non-empty, then maps
+/// optional fields and normalises the status string.
+///
+/// # Arguments
+///
+/// * `raw` - A [`RawWithdrawalResponse`] populated from the anchor's `/withdraw` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`WithdrawalResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidTransactionIntent`] if `transaction_id` or `account_id` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep6::{initiate_withdrawal, RawWithdrawalResponse, TransactionStatus};
+///
+/// let raw = RawWithdrawalResponse {
+///     transaction_id: "txn-002".into(),
+///     account_id: "GABC123".into(),
+///     memo: Some("12345".into()),
+///     memo_type: Some("id".into()),
+///     min_amount: None,
+///     max_amount: None,
+///     fee_fixed: None,
+///     status: Some("pending_user".into()),
+/// };
+/// let resp = initiate_withdrawal(raw).unwrap();
+/// assert_eq!(resp.status, TransactionStatus::PendingUser);
+/// ```
 pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalResponse, Error> {
     if raw.transaction_id.is_empty() || raw.account_id.is_empty() {
         return Err(Error::InvalidTransactionIntent);
@@ -248,7 +391,35 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
 /// Normalize a raw anchor transaction-status response into a canonical
 /// [`TransactionStatusResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if the transaction ID is missing.
+/// # Arguments
+///
+/// * `raw` - A [`RawTransactionResponse`] from the anchor's `/transaction` endpoint.
+///
+/// # Returns
+///
+/// A normalised [`TransactionStatusResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidTransactionIntent`] if `transaction_id` is empty.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep6::{fetch_transaction_status, RawTransactionResponse, TransactionStatus};
+///
+/// let raw = RawTransactionResponse {
+///     transaction_id: "txn-001".into(),
+///     kind: Some("deposit".into()),
+///     status: "completed".into(),
+///     amount_in: Some(100),
+///     amount_out: Some(99),
+///     amount_fee: Some(1),
+///     message: None,
+/// };
+/// let resp = fetch_transaction_status(raw).unwrap();
+/// assert_eq!(resp.status, TransactionStatus::Completed);
+/// ```
 pub fn fetch_transaction_status(
     raw: RawTransactionResponse,
 ) -> Result<TransactionStatusResponse, Error> {
@@ -275,6 +446,43 @@ pub fn fetch_transaction_status(
 /// into canonical [`TransactionStatusResponse`] values.
 ///
 /// Entries with an empty `transaction_id` are silently skipped.
+///
+/// # Arguments
+///
+/// * `raw_list` - A `Vec` of [`RawTransactionResponse`] values from the anchor.
+///
+/// # Returns
+///
+/// A `Vec` of normalised [`TransactionStatusResponse`] values (empty entries excluded).
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep6::{list_transactions, RawTransactionResponse};
+///
+/// let raw_list = vec![
+///     RawTransactionResponse {
+///         transaction_id: "txn-001".into(),
+///         kind: Some("deposit".into()),
+///         status: "completed".into(),
+///         amount_in: Some(100),
+///         amount_out: Some(99),
+///         amount_fee: Some(1),
+///         message: None,
+///     },
+///     RawTransactionResponse {
+///         transaction_id: "".into(), // skipped
+///         kind: None,
+///         status: "completed".into(),
+///         amount_in: None,
+///         amount_out: None,
+///         amount_fee: None,
+///         message: None,
+///     },
+/// ];
+/// let result = list_transactions(raw_list);
+/// assert_eq!(result.len(), 1);
+/// ```
 pub fn list_transactions(
     raw_list: alloc::vec::Vec<RawTransactionResponse>,
 ) -> alloc::vec::Vec<TransactionStatusResponse> {

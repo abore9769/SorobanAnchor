@@ -21,7 +21,23 @@ use soroban_sdk::contracterror;
 
 /// Numeric error codes for every AnchorKit error kind.
 ///
-/// The `#[contracterror]` attribute keeps Soroban on-chain compatibility.
+/// Each variant maps to a stable `u32` discriminant that is stored on-chain via
+/// the `#[contracterror]` attribute. This means the numeric values are part of
+/// the public ABI and **must not be changed** once deployed.
+///
+/// Use the named constructors on [`AnchorKitError`] (e.g.
+/// [`AnchorKitError::replay_attack`]) rather than constructing errors from raw
+/// codes directly.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::{AnchorKitError, ErrorCode};
+///
+/// let err = AnchorKitError::from_code(ErrorCode::ValidationError);
+/// assert_eq!(err.code, ErrorCode::ValidationError);
+/// assert!(!err.message.is_empty());
+/// ```
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -76,6 +92,21 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Returns the canonical human-readable message for this error code.
+    ///
+    /// The returned string is a static `&str` suitable for embedding in
+    /// [`AnchorKitError::message`] without heap allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::ErrorCode;
+    ///
+    /// assert_eq!(
+    ///     ErrorCode::AlreadyInitialized.default_message(),
+    ///     "Contract is already initialized"
+    /// );
+    /// assert!(!ErrorCode::ValidationError.default_message().is_empty());
+    /// ```
     pub fn default_message(&self) -> &'static str {
         match self {
             ErrorCode::AlreadyInitialized => "Contract is already initialized",
@@ -125,6 +156,31 @@ impl ErrorCode {
 /// - `code`: the [`ErrorCode`] identifying the error kind
 /// - `message`: a human-readable description
 /// - `context`: optional extra detail (field name, received value, etc.)
+///
+/// Prefer the named constructors (e.g. [`AnchorKitError::replay_attack`]) over
+/// constructing this struct directly so that messages stay consistent.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::{AnchorKitError, ErrorCode};
+///
+/// // Named constructor
+/// let err = AnchorKitError::replay_attack();
+/// assert_eq!(err.code, ErrorCode::ReplayAttack);
+///
+/// // Custom message
+/// let err = AnchorKitError::new(ErrorCode::InvalidQuote, "Quote amount is zero");
+/// assert_eq!(err.message, "Quote amount is zero");
+///
+/// // With context detail
+/// let err = AnchorKitError::with_context(
+///     ErrorCode::ValidationError,
+///     "Schema mismatch",
+///     "field: transaction_id",
+/// );
+/// assert_eq!(err.context.as_deref(), Some("field: transaction_id"));
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnchorKitError {
     pub code: ErrorCode,
@@ -134,6 +190,26 @@ pub struct AnchorKitError {
 
 impl AnchorKitError {
     /// Create a new error with a custom message and no context.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The [`ErrorCode`] variant that classifies this error.
+    /// * `message` - A human-readable description of what went wrong.
+    ///
+    /// # Returns
+    ///
+    /// A new [`AnchorKitError`] with `context` set to `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::{AnchorKitError, ErrorCode};
+    ///
+    /// let err = AnchorKitError::new(ErrorCode::InvalidQuote, "Quote amount is zero");
+    /// assert_eq!(err.code, ErrorCode::InvalidQuote);
+    /// assert_eq!(err.message, "Quote amount is zero");
+    /// assert!(err.context.is_none());
+    /// ```
     pub fn new(code: ErrorCode, message: &str) -> Self {
         AnchorKitError {
             code,
@@ -143,6 +219,29 @@ impl AnchorKitError {
     }
 
     /// Create a new error with a custom message and context detail.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The [`ErrorCode`] variant that classifies this error.
+    /// * `message` - A human-readable description of what went wrong.
+    /// * `context` - Additional detail such as a field name or received value.
+    ///
+    /// # Returns
+    ///
+    /// A new [`AnchorKitError`] with `context` populated.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::{AnchorKitError, ErrorCode};
+    ///
+    /// let err = AnchorKitError::with_context(
+    ///     ErrorCode::ValidationError,
+    ///     "Schema mismatch",
+    ///     "field: transaction_id",
+    /// );
+    /// assert_eq!(err.context.as_deref(), Some("field: transaction_id"));
+    /// ```
     pub fn with_context(code: ErrorCode, message: &str, context: &str) -> Self {
         AnchorKitError {
             code,
@@ -152,6 +251,26 @@ impl AnchorKitError {
     }
 
     /// Create an error using the default message for the given code.
+    ///
+    /// This is the preferred way to construct errors when no additional context
+    /// is needed, as it keeps messages consistent across the codebase.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The [`ErrorCode`] variant to construct an error for.
+    ///
+    /// # Returns
+    ///
+    /// A new [`AnchorKitError`] whose `message` is [`ErrorCode::default_message`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::{AnchorKitError, ErrorCode};
+    ///
+    /// let err = AnchorKitError::from_code(ErrorCode::AlreadyInitialized);
+    /// assert_eq!(err.message, "Contract is already initialized");
+    /// ```
     pub fn from_code(code: ErrorCode) -> Self {
         let message = code.default_message();
         AnchorKitError::new(code, message)
