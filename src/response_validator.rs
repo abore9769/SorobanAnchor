@@ -92,6 +92,9 @@ pub fn validate_deposit_response(
     if status.is_empty() {
         return Err(Error::validation_error("status is empty"));
     }
+    if !is_valid_sep6_status(status) {
+        return Err(Error::validation_error("invalid status value"));
+    }
     if deposit_address.is_empty() {
         return Err(Error::validation_error("deposit_address is empty"));
     }
@@ -294,6 +297,26 @@ pub fn validate_transaction_status_response(
     })
 }
 
+fn is_valid_sep6_status(status: &str) -> bool {
+    match status {
+        "pending_external"
+        | "pending_anchor"
+        | "pending_trust"
+        | "pending_user"
+        | "pending_user_transfer_start"
+        | "completed"
+        | "refunded"
+        | "expired"
+        | "incomplete"
+        | "pending"
+        | "no_market"
+        | "too_small"
+        | "too_large"
+        | "error" => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +344,13 @@ mod tests {
     #[test]
     fn test_deposit_missing_status() {
         let result = validate_deposit_response("dep_123", "", "GDEPOSIT...", 9999);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_deposit_invalid_status() {
+        let result = validate_deposit_response("dep_123", "garbage_status", "GDEPOSIT...", 9999);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
