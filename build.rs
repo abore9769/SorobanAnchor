@@ -4,113 +4,49 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=config_schema.json");
     println!("cargo:rerun-if-changed=configs/");
-    println!("cargo:rerun-if-changed=src/config.rs");
-    println!("cargo:rerun-if-changed=src/validation.rs");
+    println!("cargo:rerun-if-changed=validate_config_strict.py");
+    println!("cargo:rerun-if-changed=scripts/validate_all.sh");
+    println!("cargo:rerun-if-changed=scripts/validate_all.ps1");
 
-    // Strict compile-time validation to prevent misconfiguration bugs
     validate_configs_at_build();
     validate_schema_consistency();
 }
 
 fn validate_configs_at_build() {
-    let validator = Path::new("validate_config_strict.py");
     let schema = Path::new("config_schema.json");
     let configs_dir = Path::new("configs");
 
-    if !validator.exists() || !schema.exists() || !configs_dir.exists() {
-        println!("cargo:warning=Skipping config validation: missing validator or configs");
+    if !schema.exists() || !configs_dir.exists() {
+        println!("cargo:warning=Skipping config validation: missing schema or configs/");
         return;
     }
 
-    // Check if Python3 is available
-    let python_check = Command::new("python3").arg("--version").output();
-
-    if python_check.is_err() {
-        println!("cargo:warning=Python3 not found, skipping config validation");
-        return;
-    }
-
-    // Check if required Python modules are installed
-    let module_check = Command::new("python3")
-        .arg("-c")
-        .arg("import jsonschema, toml")
-        .output();
-
-    match module_check {
-        Ok(result) if !result.status.success() => {
-            println!("cargo:warning=Python modules (jsonschema, toml) not installed. Run: pip3 install jsonschema toml");
-            println!("cargo:warning=Skipping compile-time config validation");
-            return;
-        }
-        Err(_) => {
-            println!("cargo:warning=Failed to check Python modules");
-            println!("cargo:warning=Skipping compile-time config validation");
-            return;
-        }
-        _ => {}
-    }
-
-    println!("cargo:warning=Running strict schema validation at compile time...");
-
-    // Validate each config file
-    let config_files = match std::fs::read_dir(configs_dir) {
-        Ok(files) => files,
-        Err(_) => {
-            println!("cargo:warning=Failed to read configs directory");
-            return;
-        }
+    // On Windows run the PowerShell script; everywhere else run the bash script.
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "windows") {
+        ("powershell", &["-ExecutionPolicy", "Bypass", "-File", "scripts/validate_all.ps1"])
+    } else {
+        ("bash", &["scripts/validate_all.sh"])
     };
 
-    let mut validated_count = 0;
+    println!("cargo:warning=Running config validation ({program})...");
 
-    for entry in config_files {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+    let output = Command::new(program).args(args).output();
 
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) == Some("json")
-            || path.extension().and_then(|s| s.to_str()) == Some("toml")
-        {
-            let output = Command::new("python3")
-                .arg(validator)
-                .arg(&path)
-                .arg(schema)
-                .output();
-
-            match output {
-                Ok(result) if !result.status.success() => {
-                    let stderr = String::from_utf8_lossy(&result.stderr);
-                    let stdout = String::from_utf8_lossy(&result.stdout);
-                    panic!(
-                        "\n\n❌ STRICT VALIDATION FAILED ❌\nConfiguration validation failed for {:?}:\n{}\n{}\n",
-                        path.file_name().unwrap(),
-                        stdout,
-                        stderr
-                    );
-                }
-                Ok(_) => {
-                    validated_count += 1;
-                    println!("cargo:warning=✓ Validated: {:?}", path.file_name().unwrap());
-                }
-                Err(e) => {
-                    println!(
-                        "cargo:warning=Failed to validate {:?}: {}",
-                        path.file_name().unwrap(),
-                        e
-                    );
-                }
-            }
+    match output {
+        Ok(out) if out.status.success() => {
+            println!("cargo:warning=✓ All configs valid.");
         }
-    }
-
-    if validated_count > 0 {
-        println!(
-            "cargo:warning=✓ Successfully validated {} configuration file(s)",
-            validated_count
-        );
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            panic!(
+                "\n\n❌ CONFIG VALIDATION FAILED ❌\n{stdout}{stderr}\n\
+                 Fix the errors above, then rebuild.\n"
+            );
+        }
+        Err(e) => {
+            println!("cargo:warning=Could not run validation script ({e}); skipping.");
+        }
     }
 }
 

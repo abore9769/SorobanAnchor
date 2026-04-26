@@ -1,68 +1,100 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# validate_all.sh — Validate all AnchorKit config files against config_schema.json.
+# Supports JSON natively; converts TOML to JSON via yq/dasel (falls back to Python).
+# Validates with ajv-cli if available, otherwise falls back to validate_config_strict.py.
+set -euo pipefail
 
-echo "🔍 AnchorKit Pre-Deployment Validation"
-echo "========================================"
-echo ""
-
-# Check if Python is available
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python3 is required but not installed"
-    exit 1
-fi
-
-# Check if required Python packages are installed
-echo "📦 Checking Python dependencies..."
-python3 -c "import jsonschema, toml" 2>/dev/null || {
-    echo "❌ Missing Python dependencies. Installing..."
-    pip3 install jsonschema toml --quiet
-}
-echo "✅ Python dependencies OK"
-echo ""
-
-# Validate all configuration files
-echo "📋 Validating configuration files..."
-CONFIG_DIR="configs"
-SCHEMA_FILE="config_schema.json"
+SCHEMA="config_schema.json"
+CONFIGS_DIR="configs"
+VALIDATOR_PY="validate_config_strict.py"
 FAILED=0
 
-if [ ! -f "$SCHEMA_FILE" ]; then
-    echo "❌ Schema file not found: $SCHEMA_FILE"
-    exit 1
-fi
+# ── helpers ────────────────────────────────────────────────────────────────────
 
-for config_file in "$CONFIG_DIR"/*.json "$CONFIG_DIR"/*.toml; do
-    if [ -f "$config_file" ]; then
-        echo -n "  Validating $(basename "$config_file")... "
-        if python3 validate_config_strict.py "$config_file" "$SCHEMA_FILE" > /dev/null 2>&1; then
-            echo "✅"
-        else
-            echo "❌"
-            python3 validate_config_strict.py "$config_file" "$SCHEMA_FILE"
-            FAILED=1
-        fi
-    fi
+die() { echo "❌ $*" >&2; exit 1; }
+
+require_schema() {
+  [ -f "$SCHEMA" ] || die "Schema not found: $SCHEMA"
+}
+
+# Convert a TOML file to a temp JSON file; print the temp path.
+toml_to_json() {
+  local toml_file="$1"
+  local tmp
+  tmp="$(mktemp /tmp/anchorkit_XXXXXX.json)"
+
+  if command -v yq &>/dev/null; then
+    yq -o=json '.' "$toml_file" > "$tmp"
+  elif command -v dasel &>/dev/null; then
+    dasel -f "$toml_file" -r toml -w json '.' > "$tmp"
+  elif command -v python3 &>/dev/null; then
+    python3 - "$toml_file" "$tmp" <<'PYEOF'
+import sys, json, pathlib
+p = pathlib.Path(sys.argv[1])
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        import toml as tomllib
+        json.dump(tomllib.loads(p.read_text()), open(sys.argv[2], "w"), indent=2)
+        sys.exit(0)
+json.dump(tomllib.loads(p.read_bytes()), open(sys.argv[2], "w"), indent=2)
+PYEOF
+  else
+    die "No TOML converter found. Install yq, dasel, or python3+toml."
+  fi
+
+  echo "$tmp"
+}
+
+# Validate a single JSON file against the schema.
+validate_json() {
+  local json_file="$1"
+  local label="$2"
+
+  if command -v ajv &>/dev/null; then
+    ajv validate -s "$SCHEMA" -d "$json_file" --spec=draft7 --errors=text 2>&1 \
+      || { echo "  ❌ $label"; return 1; }
+  elif [ -f "$VALIDATOR_PY" ] && command -v python3 &>/dev/null; then
+    python3 "$VALIDATOR_PY" "$json_file" "$SCHEMA" \
+      || { echo "  ❌ $label"; return 1; }
+  else
+    die "No validator found. Install ajv-cli (npm i -g ajv-cli) or python3+jsonschema."
+  fi
+
+  echo "  ✅ $label"
+}
+
+# ── main ───────────────────────────────────────────────────────────────────────
+
+require_schema
+
+echo "🔍 AnchorKit Config Validation"
+echo "Schema: $SCHEMA"
+echo ""
+
+TMPFILES=()
+cleanup() { rm -f "${TMPFILES[@]}"; }
+trap cleanup EXIT
+
+for file in "$CONFIGS_DIR"/*.json "$CONFIGS_DIR"/*.toml; do
+  [ -f "$file" ] || continue
+  label="$(basename "$file")"
+
+  if [[ "$file" == *.toml ]]; then
+    tmp="$(toml_to_json "$file")"
+    TMPFILES+=("$tmp")
+    validate_json "$tmp" "$label (converted from TOML)" || FAILED=1
+  else
+    validate_json "$file" "$label" || FAILED=1
+  fi
 done
 
-if [ $FAILED -eq 1 ]; then
-    echo ""
-    echo "❌ Configuration validation failed"
-    exit 1
+echo ""
+if [ "$FAILED" -ne 0 ]; then
+  echo "❌ One or more configs failed validation."
+  exit 1
 fi
-
-echo ""
-echo "✅ All configurations valid"
-echo ""
-
-# Run Rust tests
-echo "🧪 Running Rust validation tests..."
-if cargo test --quiet config 2>&1 | grep -q "test result: ok"; then
-    echo "✅ Rust tests passed"
-else
-    echo "❌ Rust tests failed"
-    cargo test config
-    exit 1
-fi
-
-echo ""
-echo "🎉 All validations passed! Ready for deployment."
+echo "✅ All configs valid."
