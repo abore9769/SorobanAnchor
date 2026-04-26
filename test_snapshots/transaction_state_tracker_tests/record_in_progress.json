@@ -1,0 +1,9 @@
+{
+  "transaction_id": 1,
+  "state": "InProgress",
+  "state_u32": 2,
+  "initiator": "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
+  "timestamp": 0,
+  "last_updated": 0,
+  "error_message": null
+}

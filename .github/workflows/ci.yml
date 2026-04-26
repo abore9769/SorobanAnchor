@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM_TARGET: wasm32-unknown-unknown
+  WASM_OUT: target/wasm32-unknown-unknown/release/anchorkit.wasm
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo check (native)
+        run: cargo check
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build WASM
+        run: cargo build --release --target ${{ env.WASM_TARGET }} --no-default-features --features wasm
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get install -y binaryen
+
+      - name: wasm-opt and report size
+        run: |
+          WASM_IN="${{ env.WASM_OUT }}"
+          WASM_OPT="${{ env.WASM_OUT }}.opt.wasm"
+          echo "=== Raw WASM size ==="
+          ls -lh "$WASM_IN"
+          wasm-opt -Oz --strip-debug "$WASM_IN" -o "$WASM_OPT"
+          echo "=== Optimized WASM size ==="
+          ls -lh "$WASM_OPT"

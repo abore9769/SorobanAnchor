@@ -1,10 +1,4 @@
-//! Transaction state machine for on-chain and off-chain transaction tracking.
-//!
-//! Enforces legal state transitions (`Pending → InProgress → Completed | Failed`)
-//! and persists records either in Soroban persistent storage (production) or an
-//! in-memory cache (dev/test mode).
-
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
 
 use crate::errors::AnchorKitError;
 
@@ -131,6 +125,18 @@ pub struct TransactionStateRecord {
     pub timestamp: u64,
     pub last_updated: u64,
     pub error_message: Option<String>,
+    /// Full state progression: (state, timestamp) pairs in chronological order.
+    pub state_history: Vec<(TransactionState, u64)>,
+}
+
+/// Audit entry for a single transition attempt (success or failure).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionAuditEntry {
+    pub transaction_id: u64,
+    pub from_state: TransactionState,
+    pub to_state: TransactionState,
+    pub timestamp: u64,
+    pub success: bool,
 }
 
 /// State-machine tracker for on-chain transactions.
@@ -157,6 +163,7 @@ pub struct TransactionStateRecord {
 #[derive(Clone)]
 pub struct TransactionStateTracker {
     cache: alloc::vec::Vec<TransactionStateRecord>,
+    pub audit_log: alloc::vec::Vec<TransitionAuditEntry>,
     is_dev_mode: bool,
 }
 
@@ -183,6 +190,7 @@ impl TransactionStateTracker {
     pub fn new(is_dev_mode: bool) -> Self {
         TransactionStateTracker {
             cache: alloc::vec::Vec::new(),
+            audit_log: alloc::vec::Vec::new(),
             is_dev_mode,
         }
     }
@@ -223,6 +231,8 @@ impl TransactionStateTracker {
         env: &Env,
     ) -> Result<TransactionStateRecord, String> {
         let current_time = env.ledger().timestamp();
+        let mut history = Vec::new(env);
+        history.push_back((TransactionState::Pending, current_time));
 
         let record = TransactionStateRecord {
             transaction_id,
@@ -231,6 +241,7 @@ impl TransactionStateTracker {
             timestamp: current_time,
             last_updated: current_time,
             error_message: None,
+            state_history: history,
         };
 
         if self.is_dev_mode {
@@ -385,14 +396,22 @@ impl TransactionStateTracker {
         let current_time = env.ledger().timestamp();
 
         if self.is_dev_mode {
-            // Search and update in cache
             for record in self.cache.iter_mut() {
                 if record.transaction_id == transaction_id {
-                    if !record.state.is_valid_transition(new_state) {
+                    let from_state = record.state;
+                    let valid = from_state.is_valid_transition(new_state);
+                    self.audit_log.push(TransitionAuditEntry {
+                        transaction_id,
+                        from_state,
+                        to_state: new_state,
+                        timestamp: current_time,
+                        success: valid,
+                    });
+                    if !valid {
                         return Err(String::from_str(
                             env,
                             AnchorKitError::illegal_transition(
-                                record.state.as_str(),
+                                from_state.as_str(),
                                 new_state.as_str(),
                             )
                             .message
@@ -402,13 +421,11 @@ impl TransactionStateTracker {
                     record.state = new_state;
                     record.last_updated = current_time;
                     record.error_message = error_message;
+                    record.state_history.push_back((new_state, current_time));
                     return Ok(record.clone());
                 }
             }
-            return Err(String::from_str(
-                env,
-                "Transaction not found in cache",
-            ));
+            return Err(String::from_str(env, "Transaction not found in cache"));
         } else {
             let key = (symbol_short!("TXSTATE"), transaction_id);
             let mut record: TransactionStateRecord = env
@@ -417,11 +434,36 @@ impl TransactionStateTracker {
                 .get(&key)
                 .ok_or_else(|| String::from_str(env, "Transaction not found"))?;
 
-            if !record.state.is_valid_transition(new_state) {
+            let from_state = record.state;
+            let valid = from_state.is_valid_transition(new_state);
+
+            // Write audit entry to persistent storage
+            let audit_cnt_key = (symbol_short!("TXAUDIT"), transaction_id);
+            let audit_idx: u64 = env
+                .storage()
+                .persistent()
+                .get(&audit_cnt_key)
+                .unwrap_or(0u64);
+            let audit_entry_key = (symbol_short!("TXAUDITK"), transaction_id, audit_idx);
+            env.storage().persistent().set(
+                &audit_entry_key,
+                &(from_state as u32, new_state as u32, current_time, valid),
+            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&audit_entry_key, TXSTATE_TTL, TXSTATE_TTL);
+            env.storage()
+                .persistent()
+                .set(&audit_cnt_key, &(audit_idx + 1));
+            env.storage()
+                .persistent()
+                .extend_ttl(&audit_cnt_key, TXSTATE_TTL, TXSTATE_TTL);
+
+            if !valid {
                 return Err(String::from_str(
                     env,
                     AnchorKitError::illegal_transition(
-                        record.state.as_str(),
+                        from_state.as_str(),
                         new_state.as_str(),
                     )
                     .message
@@ -432,9 +474,12 @@ impl TransactionStateTracker {
             record.state = new_state;
             record.last_updated = current_time;
             record.error_message = error_message;
+            record.state_history.push_back((new_state, current_time));
 
             env.storage().persistent().set(&key, &record);
-            env.storage().persistent().extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
 
             Ok(record)
         }
@@ -584,7 +629,6 @@ impl TransactionStateTracker {
             }
             Ok(result)
         } else {
-            // In production, this would query the DB
             Ok(alloc::vec::Vec::new())
         }
     }
@@ -620,7 +664,6 @@ impl TransactionStateTracker {
         if self.is_dev_mode {
             Ok(self.cache.clone())
         } else {
-            // In production, this would query the DB
             Ok(alloc::vec::Vec::new())
         }
     }
@@ -652,7 +695,7 @@ impl TransactionStateTracker {
             self.cache = alloc::vec::Vec::new();
             Ok(())
         } else {
-            Err(String::from_str(&Env::default(), "Cannot clear cache in production mode"))
+            Err("Cannot clear cache in production mode".into())
         }
     }
 
@@ -696,6 +739,9 @@ mod tests {
         assert_eq!(record.transaction_id, 1);
         assert_eq!(record.state, TransactionState::Pending);
         assert_eq!(record.initiator, initiator);
+        // state_history initialized with Pending
+        assert_eq!(record.state_history.len(), 1);
+        assert_eq!(record.state_history.get(0).unwrap().0, TransactionState::Pending);
     }
 
     #[test]
@@ -710,6 +756,7 @@ mod tests {
         assert!(result.is_ok());
         let record = result.unwrap();
         assert_eq!(record.state, TransactionState::InProgress);
+        assert_eq!(record.state_history.len(), 2);
     }
 
     #[test]
@@ -725,6 +772,7 @@ mod tests {
         assert!(result.is_ok());
         let record = result.unwrap();
         assert_eq!(record.state, TransactionState::Completed);
+        assert_eq!(record.state_history.len(), 3);
     }
 
     #[test]
@@ -857,5 +905,157 @@ mod tests {
         // Completed → InProgress must be rejected
         let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
         assert!(r.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Backward / same-state transition guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_backward_transition_completed_to_pending_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_backward_transition_failed_to_in_progress_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_same_state_transition_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        // Pending → Pending is not a valid transition
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_pending_to_completed_directly_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::Completed, &env);
+        assert!(r.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log entries for success and failure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_audit_log_entry_on_successful_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        assert_eq!(tracker.audit_log.len(), 1);
+        let entry = &tracker.audit_log[0];
+        assert_eq!(entry.transaction_id, 1);
+        assert_eq!(entry.from_state, TransactionState::Pending);
+        assert_eq!(entry.to_state, TransactionState::InProgress);
+        assert!(entry.success);
+    }
+
+    #[test]
+    fn test_audit_log_entry_on_failed_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        // Illegal: Completed → Pending
+        let _ = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+
+        // 2 successful + 1 failed
+        assert_eq!(tracker.audit_log.len(), 3);
+        let failed_entry = &tracker.audit_log[2];
+        assert_eq!(failed_entry.from_state, TransactionState::Completed);
+        assert_eq!(failed_entry.to_state, TransactionState::Pending);
+        assert!(!failed_entry.success);
+    }
+
+    #[test]
+    fn test_audit_log_records_all_transitions() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        assert_eq!(tracker.audit_log.len(), 2);
+        assert!(tracker.audit_log[0].success);
+        assert!(tracker.audit_log[1].success);
+    }
+
+    // -----------------------------------------------------------------------
+    // state_history accuracy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_state_history_reflects_full_progression() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let record = tracker.get_transaction_state(1, &env).unwrap().unwrap();
+        assert_eq!(record.state_history.len(), 3);
+        assert_eq!(record.state_history.get(0).unwrap().0, TransactionState::Pending);
+        assert_eq!(record.state_history.get(1).unwrap().0, TransactionState::InProgress);
+        assert_eq!(record.state_history.get(2).unwrap().0, TransactionState::Completed);
+    }
+
+    #[test]
+    fn test_state_history_not_updated_on_illegal_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        // Illegal: InProgress → Pending
+        let _ = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+
+        let record = tracker.get_transaction_state(1, &env).unwrap().unwrap();
+        // Only Pending + InProgress — illegal attempt must not append
+        assert_eq!(record.state_history.len(), 2);
+        assert_eq!(record.state.as_str(), "in_progress");
     }
 }

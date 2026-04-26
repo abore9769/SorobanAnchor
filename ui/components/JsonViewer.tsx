@@ -18,6 +18,8 @@ export interface JsonViewerProps {
   theme?: ViewerTheme;
   defaultMode?: ViewerMode;
   defaultExpandDepth?: number;
+  /** Alias for defaultExpandDepth — limits the initial expansion depth. */
+  maxDepth?: number;
   searchable?: boolean;
   className?: string;
 }
@@ -562,15 +564,18 @@ export function JsonViewer({
   theme: themeName = "ember",
   defaultMode = "tree",
   defaultExpandDepth = 2,
+  maxDepth,
   searchable = true,
 }: JsonViewerProps) {
+  // maxDepth takes precedence over defaultExpandDepth when provided
+  const expandDepth = maxDepth !== undefined ? maxDepth : defaultExpandDepth;
   const t = THEMES[themeName];
   const [mode, setMode] = useState<ViewerMode>(defaultMode);
   const [search, setSearch] = useState("");
   const [copied, setCopied] = useState(false);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
     const acc = new Set<string>();
-    collectPaths(data, "root", 0, defaultExpandDepth, acc);
+    collectPaths(data, "root", 0, expandDepth, acc);
     return acc;
   });
 
@@ -870,7 +875,7 @@ export function JsonViewer({
               depth={0}
               isLast={true}
               theme={t}
-              defaultExpandDepth={defaultExpandDepth}
+              defaultExpandDepth={expandDepth}
               search={search}
               path="root"
               expandedPaths={expandedPaths}

@@ -37,7 +37,7 @@ fn main() {
     // Create mock SEP-10 token for demo
     let sep10_token = String::from_str(&env, "mock.jwt.token");
 
-    client.register_attestor(&anchor, &sep10_token, &sep10_issuer);
+    client.register_attestor(&anchor, &sep10_token, &sep10_issuer, &sep10_key);
     println!("   ✅ Anchor registered\n");
 
     // Step 3: Configure Services

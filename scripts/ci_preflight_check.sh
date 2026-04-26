@@ -263,7 +263,34 @@ fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "10. SUMMARY"
+echo "10. WASM BUILD CHECK"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+WASM_TARGET="wasm32-unknown-unknown"
+WASM_OUT="target/${WASM_TARGET}/release/anchorkit.wasm"
+
+if rustup target list --installed | grep -q "$WASM_TARGET"; then
+    check_pass "WASM target ${WASM_TARGET} is installed"
+else
+    check_warn "WASM target not installed — running: rustup target add ${WASM_TARGET}"
+    rustup target add "$WASM_TARGET" 2>/dev/null || true
+fi
+
+echo "  Building WASM artifact..."
+if cargo build --release --target "$WASM_TARGET" --no-default-features --features wasm 2>&1; then
+    if [ -f "$WASM_OUT" ]; then
+        WASM_SIZE=$(du -sh "$WASM_OUT" | cut -f1)
+        check_pass "WASM artifact produced: ${WASM_OUT} (${WASM_SIZE})"
+    else
+        check_fail "WASM build succeeded but artifact not found at ${WASM_OUT}"
+    fi
+else
+    check_fail "WASM build failed (cargo build --target ${WASM_TARGET} --features wasm)"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "11. SUMMARY"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

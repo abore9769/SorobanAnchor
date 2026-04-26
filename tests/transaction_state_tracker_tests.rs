@@ -199,4 +199,165 @@ mod transaction_state_tracker_tests {
         assert_eq!(record2.timestamp, initial_timestamp);
         assert!(record2.last_updated >= initial_timestamp);
     }
+
+    // -----------------------------------------------------------------------
+    // Backward / same-state transition guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_illegal_backward_transition_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        // Completed → Pending is illegal
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+
+        // Completed → InProgress is illegal
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_illegal_same_state_transition_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        // Pending → Pending is not a valid transition
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_valid_forward_transition_accepted() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().state, TransactionState::InProgress);
+
+        let r = tracker.advance_transaction_state(1, TransactionState::Completed, &env);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().state, TransactionState::Completed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log entries for success and failure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_audit_log_entry_created_on_successful_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        assert_eq!(tracker.audit_log.len(), 1);
+        let entry = &tracker.audit_log[0];
+        assert_eq!(entry.from_state, TransactionState::Pending);
+        assert_eq!(entry.to_state, TransactionState::InProgress);
+        assert!(entry.success);
+    }
+
+    #[test]
+    fn test_audit_log_entry_created_on_failed_transition() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        // Illegal: Pending → Completed
+        let _ = tracker.advance_transaction_state(1, TransactionState::Completed, &env);
+
+        assert_eq!(tracker.audit_log.len(), 1);
+        let entry = &tracker.audit_log[0];
+        assert_eq!(entry.from_state, TransactionState::Pending);
+        assert_eq!(entry.to_state, TransactionState::Completed);
+        assert!(!entry.success);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use std::collections::HashMap;
+
+    /// Minimal snapshot representation matching the JSON fixtures.
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct RecordSnapshot {
+        transaction_id: u64,
+        state: String,
+        state_u32: u32,
+        initiator: String,
+        timestamp: u64,
+        last_updated: u64,
+        error_message: Option<String>,
+    }
+
+    fn load_snapshot(name: &str) -> RecordSnapshot {
+        let path = format!(
+            "{}/test_snapshots/transaction_state_tracker_tests/{}.json",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        let data = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing snapshot: {path}"));
+        serde_json::from_str(&data).unwrap_or_else(|e| panic!("bad snapshot {name}: {e}"))
+    }
+
+    #[test]
+    fn snapshot_state_discriminants() {
+        let cases: HashMap<&str, (&str, u32)> = [
+            ("record_pending",     ("Pending",    1)),
+            ("record_in_progress", ("InProgress", 2)),
+            ("record_completed",   ("Completed",  3)),
+            ("record_failed",      ("Failed",     4)),
+        ]
+        .into();
+
+        for (file, (expected_state, expected_u32)) in &cases {
+            let snap = load_snapshot(file);
+            assert_eq!(
+                snap.state, *expected_state,
+                "{file}: state name changed — on-chain encoding regression"
+            );
+            assert_eq!(
+                snap.state_u32, *expected_u32,
+                "{file}: state discriminant changed — on-chain encoding regression"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_failed_has_error_message() {
+        let snap = load_snapshot("record_failed");
+        assert!(
+            snap.error_message.is_some(),
+            "record_failed snapshot must have an error_message"
+        );
+    }
+
+    #[test]
+    fn snapshot_non_failed_no_error_message() {
+        for name in &["record_pending", "record_in_progress", "record_completed"] {
+            let snap = load_snapshot(name);
+            assert!(
+                snap.error_message.is_none(),
+                "{name} snapshot must not have an error_message"
+            );
+        }
+    }
 }

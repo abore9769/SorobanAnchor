@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { signTransaction } from "@stellar/freighter-api";
+import { AnchorErrorBoundary } from "./AnchorErrorBoundary";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Step =
@@ -14,14 +16,50 @@ interface WalletInfo {
   network: string;
 }
 
-// ─── Mock Helpers ─────────────────────────────────────────────────────────────
-const mockAddress = () => {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let addr = "G";
-  for (let i = 0; i < 55; i++)
-    addr += chars[Math.floor(Math.random() * chars.length)];
-  return addr;
-};
+// ─── Wallet Helpers ───────────────────────────────────────────────────────────
+
+/** Freighter browser extension API (injected at window.freighter) */
+interface FreighterAPI {
+  getPublicKey(): Promise<string>;
+  signTransaction(xdr: string, opts?: { network?: string }): Promise<string>;
+  isConnected(): Promise<boolean>;
+}
+
+declare global {
+  interface Window {
+    freighter?: FreighterAPI;
+  }
+}
+
+/** Albedo intent API */
+interface AlbedoResult {
+  pubkey: string;
+  signed_envelope_xdr?: string;
+}
+
+async function getWalletPublicKey(): Promise<{ address: string; wallet: "freighter" | "albedo" }> {
+  // Try Freighter first
+  if (window.freighter) {
+    const connected = await window.freighter.isConnected();
+    if (connected) {
+      const address = await window.freighter.getPublicKey();
+      return { address, wallet: "freighter" };
+    }
+  }
+  // Fallback to Albedo
+  const albedo = await import("@albedo-link/intent");
+  const result: AlbedoResult = await albedo.default.publicKey({ require_existing: false });
+  return { address: result.pubkey, wallet: "albedo" };
+}
+
+async function signWithWallet(xdr: string, network: string): Promise<string> {
+  if (window.freighter) {
+    return window.freighter.signTransaction(xdr, { network });
+  }
+  const albedo = await import("@albedo-link/intent");
+  const result: AlbedoResult = await albedo.default.tx({ xdr, network: network.toLowerCase(), submit: false });
+  return result.signed_envelope_xdr!;
+}
 
 const mockXDR = () => {
   const chars =
@@ -32,20 +70,6 @@ const mockXDR = () => {
     xdr += chars[Math.floor(Math.random() * chars.length)];
   }
   return xdr + "==";
-};
-
-const mockJWT = () => {
-  const b64 = (obj: object) => btoa(JSON.stringify(obj)).replace(/=/g, "");
-  const header = b64({ alg: "HS256", typ: "JWT" });
-  const payload = b64({
-    iss: "testanchor.stellar.org",
-    sub: mockAddress(),
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 86400,
-    jti: crypto.randomUUID(),
-  });
-  const sig = btoa(Math.random().toString(36).slice(2, 34)).replace(/=/g, "");
-  return `${header}.${payload}.${sig}`;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -435,15 +459,48 @@ function AuthStatusBadge({ wallet }: { wallet: WalletInfo }) {
   );
 }
 
+// ─── Loading Skeleton ─────────────────────────────────────────────────────────
+
+function LoadingSkeleton() {
+  return (
+    <div
+      data-testid="loading-skeleton"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: "14px 0",
+      }}
+    >
+      {[80, 60, 90].map((w, i) => (
+        <div
+          key={i}
+          style={{
+            height: 12,
+            borderRadius: 4,
+            width: `${w}%`,
+            background: "linear-gradient(90deg,#0d1628 25%,#1e2d45 50%,#0d1628 75%)",
+            backgroundSize: "200% 100%",
+            animation: "sep10-shimmer 1.4s infinite",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export default function SEP10AuthFlow() {
+function SEP10AuthFlowInner() {
   const [step, setStep] = useState<Step>("idle");
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [challenge, setChallenge] = useState<string | null>(null);
+  const [networkPassphrase, setNetworkPassphrase] = useState<string>("Test SDF Network ; September 2015");
+  const [webAuthEndpoint, setWebAuthEndpoint] = useState<string | null>(null);
   const [signedXdr, setSignedXdr] = useState<string | null>(null);
   const [jwt, setJwt] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorStep, setErrorStep] = useState<Step | null>(null);
   const [domain, setDomain] = useState("testanchor.stellar.org");
   const [log, setLog] = useState<string[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
@@ -483,73 +540,162 @@ export default function SEP10AuthFlow() {
   const connectWallet = async () => {
     setLoading(true);
     setError(null);
+    setErrorStep(null);
     addLog("Requesting wallet connection...");
-    await sleep(900);
-    addLog("Scanning for available wallets...");
-    await sleep(700);
-    const addr = mockAddress();
-    addLog(`Wallet found: ${addr.slice(0, 8)}...`);
-    await sleep(400);
-    addLog("Connection approved ✓");
-    setWallet({ address: addr, network: "Testnet" });
-    setStep("challenge");
-    setLoading(false);
+    try {
+      addLog("Scanning for available wallets (Freighter, Albedo)...");
+      const { address, wallet: walletName } = await getWalletPublicKey();
+      addLog(`${walletName} wallet found: ${address.slice(0, 8)}...`);
+      addLog("Connection approved ✓");
+      setWallet({ address, network: "Testnet" });
+      setStep("challenge");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Wallet connection failed";
+      setError(msg);
+      addLog(`Error: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const fetchChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog(
-      `GET https://${domain}/auth?account=${wallet?.address.slice(0, 8)}...`,
-    );
-    await sleep(600);
-    addLog("Response: 200 OK");
-    await sleep(300);
-    const xdr = mockXDR();
-    addLog(`Challenge XDR received (${xdr.length} chars)`);
-    setChallenge(xdr);
-    setStep("sign");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      addLog(`GET https://${domain}/.well-known/stellar.toml`);
+      const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+      if (!tomlRes.ok) throw new Error(`stellar.toml fetch failed: ${tomlRes.status}`);
+      const toml = await tomlRes.text();
+      const match = toml.match(/WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/);
+      if (!match) throw new Error("WEB_AUTH_ENDPOINT not found in stellar.toml");
+      const endpoint = match[1];
+      addLog(`web_auth_endpoint: ${endpoint}`);
+      setWebAuthEndpoint(endpoint);
+
+      const url = `${endpoint}?account=${wallet!.address}`;
+      addLog(`GET ${url}`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Challenge fetch failed: ${res.status}`);
+      const data = await res.json();
+      if (!data.transaction) throw new Error("No transaction field in challenge response");
+      addLog(`Response: 200 OK`);
+      addLog(`Challenge XDR received (${data.transaction.length} chars)`);
+      setChallenge(data.transaction);
+      if (data.network_passphrase) setNetworkPassphrase(data.network_passphrase);
+      setStep("sign");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("challenge");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const signChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog("Sending challenge XDR to wallet for signing...");
-    await sleep(800);
-    addLog("User approved signature request");
-    await sleep(600);
-    const signed = mockXDR();
-    addLog("Transaction signed with ED25519 key ✓");
-    setSignedXdr(signed);
-    setStep("token");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      addLog("Sending challenge XDR to Freighter for signing...");
+      const result = await signTransaction(challenge!, { networkPassphrase });
+      if (result.error) throw new Error(String(result.error));
+      addLog("User approved signature request");
+      addLog("Transaction signed with ED25519 key ✓");
+      setSignedXdr(result.signedTxXdr);
+      setStep("token");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("sign");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const submitChallenge = async () => {
     setLoading(true);
     setError(null);
-    addLog(`POST https://${domain}/auth`);
-    addLog("Sending signed XDR...");
-    await sleep(700);
-    addLog("Response: 200 OK");
-    await sleep(300);
-    const token = mockJWT();
-    addLog("JWT received ✓");
-    addLog("Auth session established — expires in 24h");
-    setJwt(token);
-    setStep("authenticated");
-    setLoading(false);
+    setErrorStep(null);
+    try {
+      const endpoint = webAuthEndpoint ?? `https://${domain}/auth`;
+      addLog(`POST ${endpoint}`);
+      addLog("Sending signed XDR...");
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transaction: signedXdr }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `POST /auth failed: ${res.status}`);
+      if (!data.token) throw new Error("No token in auth response");
+      addLog("Response: 200 OK");
+      addLog("JWT received ✓");
+      addLog("Auth session established — expires in 24h");
+      setJwt(data.token);
+      setStep("authenticated");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Error: ${msg}`);
+      setError(msg);
+      setErrorStep("token");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const reset = () => {
     setStep("idle");
     setWallet(null);
     setChallenge(null);
+    setNetworkPassphrase("Test SDF Network ; September 2015");
+    setWebAuthEndpoint(null);
     setSignedXdr(null);
     setJwt(null);
     setError(null);
+    setErrorStep(null);
     addLog("─── Session reset ───");
+  };
+
+  const logout = () => {
+    setJwt(null);
+    setStep("token");
+    addLog("─── Token cleared — logged out ───");
+  };
+
+  // Auto-refresh token when < 60 seconds remaining
+  useEffect(() => {
+    if (!jwt) return;
+    try {
+      const parts = jwt.split(".");
+      const payload = JSON.parse(atob(parts[1]));
+      if (!payload.exp) return;
+      const msUntilRefresh = (payload.exp * 1000) - Date.now() - 60_000;
+      if (msUntilRefresh <= 0) {
+        logout();
+        return;
+      }
+      const timer = setTimeout(() => {
+        addLog("Token expiring soon — refreshing...");
+        logout();
+      }, msUntilRefresh);
+      return () => clearTimeout(timer);
+    } catch {
+      // non-standard JWT — skip refresh
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jwt]);
+
+  const retryFromStep = () => {
+    setError(null);
+    if (errorStep === "challenge") { setChallenge(null); setStep("challenge"); }
+    else if (errorStep === "sign") { setSignedXdr(null); setStep("sign"); }
+    else if (errorStep === "token") { setSignedXdr(null); setStep("token"); }
+    else reset();
+    setErrorStep(null);
   };
 
   // ─ Step cards config ─
@@ -703,6 +849,7 @@ export default function SEP10AuthFlow() {
             The anchor generates a unique challenge transaction. This XDR must
             be signed by your wallet to prove key ownership.
           </p>
+          {loading && step === "challenge" ? <LoadingSkeleton /> : (
           <button
             onClick={fetchChallenge}
             disabled={loading || !wallet}
@@ -710,6 +857,7 @@ export default function SEP10AuthFlow() {
           >
             {loading ? <Spinner /> : <>{fetchIcon} Fetch Challenge</>}
           </button>
+          )}
         </div>
       ),
     },
@@ -839,6 +987,7 @@ export default function SEP10AuthFlow() {
         @keyframes sep10-spin { to{transform:rotate(360deg)} }
         @keyframes sep10-slide-in { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
         @keyframes sep10-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+        @keyframes sep10-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
         ::-webkit-scrollbar{width:4px;height:4px}
         ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:#1e2d4580;border-radius:2px}
@@ -1116,6 +1265,49 @@ export default function SEP10AuthFlow() {
           })}
         </div>
 
+        {/* ── Error Banner ── */}
+        {error && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 16,
+              padding: "14px 16px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,80,80,0.4)",
+              background: "rgba(255,80,80,0.07)",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 12,
+              animation: "sep10-slide-in 0.3s ease",
+            }}
+          >
+            <span style={{ fontSize: 16, flexShrink: 0, color: "#ff5050" }}>⚠</span>
+            <div style={{ flex: 1, fontSize: 11, color: "#ff9090", lineHeight: 1.5 }}>
+              {error}
+            </div>
+            <button
+              onClick={retryFromStep}
+              style={{
+                flexShrink: 0,
+                padding: "5px 12px",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.15em",
+                textTransform: "uppercase",
+                fontFamily: "inherit",
+                cursor: "pointer",
+                borderRadius: 5,
+                border: "1px solid rgba(255,80,80,0.5)",
+                background: "rgba(255,80,80,0.12)",
+                color: "#ff7070",
+                transition: "all 0.2s",
+              }}
+            >
+              ↺ Try Again
+            </button>
+          </div>
+        )}
+
         {/* ── Step Cards Grid ── */}
         <div
           style={{
@@ -1323,6 +1515,27 @@ export default function SEP10AuthFlow() {
               </div>
             </div>
             <AuthStatusBadge wallet={wallet} />
+            <button
+              data-testid="logout-btn"
+              onClick={logout}
+              style={{
+                marginTop: 12,
+                padding: "7px 16px",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.15em",
+                textTransform: "uppercase",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                borderRadius: 5,
+                border: "1px solid rgba(255,80,80,0.4)",
+                background: "transparent",
+                color: "#ff7070",
+                transition: "all 0.2s",
+              }}
+            >
+              ✕ LOGOUT
+            </button>
           </div>
         )}
 
@@ -1533,3 +1746,12 @@ const submitIcon = (
     />
   </svg>
 );
+
+// ─── Wrapped export with AnchorErrorBoundary ─────────────────────────────────
+export default function SEP10AuthFlow() {
+  return (
+    <AnchorErrorBoundary componentLabel="SEP-10 Auth Flow">
+      <SEP10AuthFlowInner />
+    </AnchorErrorBoundary>
+  );
+}

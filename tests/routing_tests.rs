@@ -335,4 +335,124 @@ mod routing_tests {
         assert_eq!(best.anchor, anchor2);
         assert_eq!(best.fee_percentage, 25);
     }
+
+    // -----------------------------------------------------------------------
+    // Weighted scoring and fallback chain tests (#168)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_weighted_equal_weights_balanced_ranking() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+        // anchor1: high fee, fast, high reputation
+        client.set_anchor_metadata(&anchor1, &9000u32, &100u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor1, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &80u32, &100u64, &100000u64, &1_003_600u64);
+        // anchor2: low fee, slow, low reputation
+        client.set_anchor_metadata(&anchor2, &2000u32, &900u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor2, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &10u32, &100u64, &100000u64, &1_003_600u64);
+
+        // Equal weights (333+333+334 = 1000)
+        let results = client.route_anchors(&333u32, &333u32, &334u32, &2u32, &0u32);
+        // Both anchors returned
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_weighted_fee_heavy_favors_low_fee_anchor() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+        // anchor1: high fee
+        client.set_anchor_metadata(&anchor1, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor1, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &90u32, &100u64, &100000u64, &1_003_600u64);
+        // anchor2: low fee
+        client.set_anchor_metadata(&anchor2, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor2, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &5u32, &100u64, &100000u64, &1_003_600u64);
+
+        // Fee-heavy: 80% fee, 10% speed, 10% reputation (800+100+100=1000)
+        let results = client.route_anchors(&800u32, &100u32, &100u32, &2u32, &0u32);
+        assert_eq!(results.len(), 2);
+        // anchor2 (low fee) must be ranked first
+        assert_eq!(results.get(0).unwrap().anchor, anchor2);
+    }
+
+    #[test]
+    fn test_weighted_reputation_heavy_filters_low_reputation() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+        // anchor1: low reputation
+        client.set_anchor_metadata(&anchor1, &1000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor1, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &10u32, &100u64, &100000u64, &1_003_600u64);
+        // anchor2: high reputation
+        client.set_anchor_metadata(&anchor2, &9500u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(&anchor2, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+            &10000u64, &10u32, &100u64, &100000u64, &1_003_600u64);
+
+        // Reputation-heavy: 10% fee, 10% speed, 80% reputation
+        let results = client.route_anchors(&100u32, &100u32, &800u32, &2u32, &0u32);
+        assert_eq!(results.len(), 2);
+        // anchor2 (high reputation) must be ranked first
+        assert_eq!(results.get(0).unwrap().anchor, anchor2);
+    }
+
+    #[test]
+    fn test_fallback_chain_length_respects_max_results() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        let anchor3 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+        register_anchor(&env, &client, &anchor3);
+        for anchor in [&anchor1, &anchor2, &anchor3] {
+            client.set_anchor_metadata(anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+            client.submit_quote(anchor, &String::from_str(&env, "USD"), &String::from_str(&env, "USDC"),
+                &10000u64, &25u32, &100u64, &100000u64, &1_003_600u64);
+        }
+
+        // max_results=2 → only 2 anchors in fallback chain
+        let results = client.route_anchors(&333u32, &333u32, &334u32, &2u32, &0u32);
+        assert_eq!(results.len(), 2);
+
+        // max_results=3 → all 3 anchors
+        let results3 = client.route_anchors(&333u32, &333u32, &334u32, &3u32, &0u32);
+        assert_eq!(results3.len(), 3);
+    }
+
+    #[test]
+    fn test_invalid_weights_rejected() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        // weights sum to 1100 (not 1000) → should panic
+        let result = client.try_route_anchors(&500u32, &400u32, &200u32, &3u32, &0u32);
+        assert!(result.is_err());
+    }
 }
+

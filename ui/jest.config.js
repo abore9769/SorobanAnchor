@@ -1,17 +1,27 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'jsdom',
-  roots: ['<rootDir>/components'],
+  roots: ['<rootDir>/components', '<rootDir>/hooks'],
   testMatch: ['**/__tests__/**/*.ts?(x)', '**/?(*.)+(spec|test).ts?(x)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   collectCoverageFrom: [
     'components/**/*.{ts,tsx}',
+    'hooks/**/*.{ts,tsx}',
     '!components/**/*.test.{ts,tsx}',
     '!components/**/*.example.{ts,tsx}',
     '!components/**/index.ts',
+    '!hooks/**/*.test.{ts,tsx}',
+    '!hooks/**/*.example.{ts,tsx}',
+    '!hooks/**/index.ts',
   ],
   coverageThreshold: {
     global: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
+    './components/Sep10AuthFlow.tsx': {
       branches: 80,
       functions: 80,
       lines: 80,
