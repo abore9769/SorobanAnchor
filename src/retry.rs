@@ -1,3 +1,5 @@
+use Vec;
+
 /// Retry configuration for off-chain anchor requests.
 #[derive(Clone, Debug)]
 pub struct RetryConfig {
@@ -57,18 +59,90 @@ impl RetryConfig {
         }
     }
 
-    /// Compute the delay (ms) for a given attempt index (0-based), with jitter.
+    /// Compute the delay (ms) for a given attempt index (0-based), drawing
+    /// jitter from `jitter_source`.
     ///
     /// delay = min(base * multiplier^attempt, max) + jitter(0..base/2)
-    pub fn delay_for_attempt(&self, attempt: u32, jitter_seed: u64) -> u64 {
+    pub fn delay_for_attempt(&self, attempt: u32, jitter_source: &mut impl JitterSource) -> u64 {
         let exp = (self.backoff_multiplier as u64).saturating_pow(attempt);
         let raw = self.base_delay_ms.saturating_mul(exp);
         let capped = raw.min(self.max_delay_ms);
-        // Simple deterministic jitter: seed % (base_delay_ms / 2 + 1)
-        let jitter = jitter_seed % (self.base_delay_ms / 2 + 1);
+        let jitter = jitter_source.next_seed() % (self.base_delay_ms / 2 + 1);
         capped.saturating_add(jitter)
     }
 }
+
+// ---------------------------------------------------------------------------
+// JitterSource trait
+// ---------------------------------------------------------------------------
+
+/// Provides a seed value for jitter computation on each retry attempt.
+///
+/// Implementations must produce values that differ across consecutive calls
+/// to avoid the thundering-herd problem when multiple clients retry together.
+pub trait JitterSource {
+    fn next_seed(&mut self) -> u64;
+}
+
+// ---------------------------------------------------------------------------
+// LedgerJitterSource
+// ---------------------------------------------------------------------------
+
+/// Derives jitter seeds from Soroban ledger state.
+///
+/// XORs `sequence ^ timestamp ^ counter` so that consecutive calls within
+/// the same ledger still produce different seeds.
+pub struct LedgerJitterSource {
+    sequence: u32,
+    timestamp: u64,
+    counter: u64,
+}
+
+impl LedgerJitterSource {
+    pub fn new(sequence: u32, timestamp: u64) -> Self {
+        LedgerJitterSource { sequence, timestamp, counter: 0 }
+    }
+}
+
+impl JitterSource for LedgerJitterSource {
+    fn next_seed(&mut self) -> u64 {
+        let seed = (self.sequence as u64) ^ self.timestamp ^ self.counter;
+        self.counter = self.counter.wrapping_add(1);
+        seed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockJitterSource
+// ---------------------------------------------------------------------------
+
+/// Produces a pre-configured sequence of seeds for deterministic testing.
+/// Cycles back to the start when the sequence is exhausted.
+pub struct MockJitterSource {
+    seeds: Vec<u64>,
+    index: usize,
+}
+
+impl MockJitterSource {
+    pub fn new(seeds: Vec<u64>) -> Self {
+        MockJitterSource { seeds, index: 0 }
+    }
+}
+
+impl JitterSource for MockJitterSource {
+    fn next_seed(&mut self) -> u64 {
+        if self.seeds.is_empty() {
+            return 0;
+        }
+        let seed = self.seeds[self.index % self.seeds.len()];
+        self.index += 1;
+        seed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Classify whether an error code is retryable.
+// ---------------------------------------------------------------------------
 
 /// Classify whether an error code is retryable.
 ///
@@ -94,17 +168,19 @@ pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
 /// success or `Err(E)` on failure.  `retryable` classifies whether an error
 /// warrants another attempt.
 ///
-/// A `sleep_fn` callback is provided so callers can inject real or mock sleep
-/// (avoids pulling in `std::thread::sleep` or async runtimes).
-pub fn retry_with_backoff<T, E, F, S>(
+/// A `sleep_fn` callback is provided so callers can inject real or mock sleep.
+/// `jitter_source` provides per-attempt seeds to spread retry timing.
+pub fn retry_with_backoff<T, E, F, S, J>(
     config: &RetryConfig,
     mut f: F,
     retryable: impl Fn(&E) -> bool,
     mut sleep_fn: S,
+    jitter_source: &mut J,
 ) -> Result<T, E>
 where
     F: FnMut(u32) -> Result<T, E>,
     S: FnMut(u64),
+    J: JitterSource,
 {
     let mut last_err: Option<E> = None;
 
@@ -115,7 +191,7 @@ where
                 if !retryable(&e) || attempt + 1 >= config.max_attempts {
                     return Err(e);
                 }
-                let delay = config.delay_for_attempt(attempt, attempt as u64 * 17 + 3);
+                let delay = config.delay_for_attempt(attempt, jitter_source);
                 sleep_fn(delay);
                 last_err = Some(e);
             }
@@ -143,6 +219,7 @@ mod retry_tests {
     fn test_success_on_first_try() {
         let config = RetryConfig::default();
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let result = retry_with_backoff(
             &config,
             |_| {
@@ -151,6 +228,7 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(result, Ok(42));
         assert_eq!(calls, 1);
@@ -160,6 +238,7 @@ mod retry_tests {
     fn test_success_after_retry() {
         let config = RetryConfig::default();
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0, 0, 0]);
         let result = retry_with_backoff(
             &config,
             |attempt| {
@@ -172,6 +251,7 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(result, Ok(99));
         assert_eq!(calls, 3);
@@ -181,6 +261,7 @@ mod retry_tests {
     fn test_exhausted_retries() {
         let config = RetryConfig::new(3, 10, 1000, 2);
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let result = retry_with_backoff(
             &config,
             |_| {
@@ -189,6 +270,7 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(result, Err(TestError::Transient));
         assert_eq!(calls, 3);
@@ -198,6 +280,7 @@ mod retry_tests {
     fn test_non_retryable_error_stops_immediately() {
         let config = RetryConfig::new(5, 10, 1000, 2);
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let result = retry_with_backoff(
             &config,
             |_| {
@@ -206,6 +289,7 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(result, Err(TestError::Permanent));
         assert_eq!(calls, 1);
@@ -214,83 +298,32 @@ mod retry_tests {
     #[test]
     fn test_delay_increases_exponentially() {
         let config = RetryConfig::new(4, 100, 10_000, 2);
-        // attempt 0: 100 * 2^0 = 100, attempt 1: 200, attempt 2: 400
-        assert!(config.delay_for_attempt(0, 0) >= 100);
-        assert!(config.delay_for_attempt(1, 0) >= 200);
-        assert!(config.delay_for_attempt(2, 0) >= 400);
+        let mut js = MockJitterSource::new(vec![0]);
+        assert!(config.delay_for_attempt(0, &mut js) >= 100);
+        assert!(config.delay_for_attempt(1, &mut js) >= 200);
+        assert!(config.delay_for_attempt(2, &mut js) >= 400);
     }
 
     #[test]
     fn test_delay_capped_at_max() {
         let config = RetryConfig::new(10, 1000, 3_000, 2);
-        // attempt 5: 1000 * 2^5 = 32000, capped at 3000
-        assert!(config.delay_for_attempt(5, 0) <= 3_000 + config.base_delay_ms / 2 + 1);
+        let mut js = MockJitterSource::new(vec![0]);
+        assert!(config.delay_for_attempt(5, &mut js) <= 3_000 + config.base_delay_ms / 2 + 1);
     }
 
     #[test]
     fn test_sleep_called_between_retries() {
         let config = RetryConfig::new(3, 50, 5000, 2);
         let mut sleep_calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let _ = retry_with_backoff(
             &config,
             |_| Err::<i32, _>(TestError::Transient),
             is_retryable_test,
             |_| sleep_calls += 1,
+            &mut js,
         );
-        // 3 attempts → 2 sleeps (no sleep after last attempt)
         assert_eq!(sleep_calls, 2);
-    }
-
-    /// Verify that the delay values passed to sleep_fn match the expected
-    /// exponential sequence.  Uses a mock clock (a Vec accumulator) instead of
-    /// a no-op so we can inspect every value.
-    #[test]
-    fn test_mock_clock_delay_sequence() {
-        // 4 attempts, 100 ms base, 10 s cap, multiplier 2 → delays for
-        // attempts 0, 1, 2 (no sleep after the last attempt):
-        //   attempt 0: 100 * 2^0 = 100  + jitter(seed=3  % 51) = 100 + 3  = 103
-        //   attempt 1: 100 * 2^1 = 200  + jitter(seed=20 % 51) = 200 + 20 = 220
-        //   attempt 2: 100 * 2^2 = 400  + jitter(seed=37 % 51) = 400 + 37 = 437
-        // (jitter_seed = attempt * 17 + 3, jitter = seed % (base/2 + 1) = seed % 51)
-        let config = RetryConfig::new(4, 100, 10_000, 2);
-        let mut recorded: Vec<u64> = Vec::new();
-
-        let _ = retry_with_backoff(
-            &config,
-            |_| Err::<i32, _>(TestError::Transient),
-            is_retryable_test,
-            |ms| recorded.push(ms),
-        );
-
-        // Three sleeps for four attempts.
-        assert_eq!(recorded.len(), 3, "expected 3 sleeps for 4 attempts");
-
-        // Each recorded delay must be >= the pure exponential value (jitter only adds).
-        let base = config.base_delay_ms;
-        let mult = config.backoff_multiplier as u64;
-        for (i, &actual) in recorded.iter().enumerate() {
-            let expected_min = base.saturating_mul(mult.saturating_pow(i as u32));
-            assert!(
-                actual >= expected_min,
-                "attempt {i}: delay {actual} < expected minimum {expected_min}"
-            );
-        }
-
-        // Each delay must be strictly greater than the previous (exponential growth).
-        for window in recorded.windows(2) {
-            assert!(
-                window[1] > window[0],
-                "delays are not strictly increasing: {:?}",
-                recorded
-            );
-        }
-
-        // Verify exact values match the deterministic jitter formula used in
-        // retry_with_backoff (jitter_seed = attempt * 17 + 3).
-        let expected: Vec<u64> = (0..3u32)
-            .map(|a| config.delay_for_attempt(a, a as u64 * 17 + 3))
-            .collect();
-        assert_eq!(recorded, expected, "recorded delays don't match expected sequence");
     }
 
     #[test]
@@ -315,6 +348,7 @@ mod retry_tests {
     fn test_aggressive_retries_up_to_five_attempts() {
         let config = RetryConfig::aggressive();
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let _ = retry_with_backoff(
             &config,
             |_| {
@@ -323,6 +357,7 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(calls, 5);
     }
@@ -331,6 +366,7 @@ mod retry_tests {
     fn test_conservative_stops_after_two_attempts() {
         let config = RetryConfig::conservative();
         let mut calls = 0u32;
+        let mut js = MockJitterSource::new(vec![0]);
         let _ = retry_with_backoff(
             &config,
             |_| {
@@ -339,7 +375,90 @@ mod retry_tests {
             },
             is_retryable_test,
             |_| {},
+            &mut js,
         );
         assert_eq!(calls, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests for JitterSource
+    // -----------------------------------------------------------------------
+
+    /// Two retries with different seeds produce different delays.
+    #[test]
+    fn test_different_seeds_produce_different_delays() {
+        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let mut js_a = MockJitterSource::new(vec![0]);
+        let mut js_b = MockJitterSource::new(vec![49]); // max jitter for base=100
+        let delay_a = config.delay_for_attempt(0, &mut js_a);
+        let delay_b = config.delay_for_attempt(0, &mut js_b);
+        assert_ne!(delay_a, delay_b);
+    }
+
+    /// Delay is always within configured bounds (base..=max + max_jitter).
+    #[test]
+    fn test_delay_within_bounds() {
+        let config = RetryConfig::new(6, 100, 3_000, 2);
+        let max_jitter = config.base_delay_ms / 2; // 50
+        for seed in [0u64, 1, 25, 49, 50, 99, 1000] {
+            for attempt in 0..6u32 {
+                let mut js = MockJitterSource::new(vec![seed]);
+                let delay = config.delay_for_attempt(attempt, &mut js);
+                assert!(delay >= config.base_delay_ms, "delay {delay} < base");
+                assert!(
+                    delay <= config.max_delay_ms + max_jitter,
+                    "delay {delay} > max+jitter"
+                );
+            }
+        }
+    }
+
+    /// MockJitterSource produces deterministic results in the specified order.
+    #[test]
+    fn test_mock_source_deterministic() {
+        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let seeds = vec![10u64, 20, 30];
+        let mut js = MockJitterSource::new(seeds.clone());
+
+        let d0 = config.delay_for_attempt(0, &mut js); // seed=10, jitter=10%51=10
+        let d1 = config.delay_for_attempt(1, &mut js); // seed=20, jitter=20%51=20
+        let d2 = config.delay_for_attempt(2, &mut js); // seed=30, jitter=30%51=30
+
+        assert_eq!(d0, 100 + 10); // 100 * 2^0 + 10
+        assert_eq!(d1, 200 + 20); // 100 * 2^1 + 20
+        assert_eq!(d2, 400 + 30); // 100 * 2^2 + 30
+    }
+
+    /// LedgerJitterSource produces different seeds on consecutive calls.
+    #[test]
+    fn test_ledger_jitter_source_consecutive_differ() {
+        let mut js = LedgerJitterSource::new(42, 1_000_000);
+        let s0 = js.next_seed();
+        let s1 = js.next_seed();
+        let s2 = js.next_seed();
+        assert_ne!(s0, s1);
+        assert_ne!(s1, s2);
+    }
+
+    /// retry_with_backoff passes jitter_source through to delay_for_attempt.
+    #[test]
+    fn test_mock_clock_delay_sequence() {
+        let config = RetryConfig::new(4, 100, 10_000, 2);
+        // seeds: 3, 20, 37 → jitter: 3%51=3, 20%51=20, 37%51=37
+        let mut js = MockJitterSource::new(vec![3, 20, 37]);
+        let mut recorded: Vec<u64> = Vec::new();
+
+        let _ = retry_with_backoff(
+            &config,
+            |_| Err::<i32, _>(TestError::Transient),
+            is_retryable_test,
+            |ms| recorded.push(ms),
+            &mut js,
+        );
+
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0], 100 + 3);  // attempt 0: 100*2^0 + 3
+        assert_eq!(recorded[1], 200 + 20); // attempt 1: 100*2^1 + 20
+        assert_eq!(recorded[2], 400 + 37); // attempt 2: 100*2^2 + 37
     }
 }

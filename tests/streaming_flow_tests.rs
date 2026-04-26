@@ -10,7 +10,7 @@ mod streaming_flow_tests {
     use rand::rngs::OsRng;
 
     use crate::contract::{AnchorKitContract, AnchorKitContractClient};
-    use crate::sep10_test_util::register_attestor_with_sep10;
+    use crate::sep10_test_util::{register_attestor_with_sep10, sign_payload};
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -100,8 +100,7 @@ mod streaming_flow_tests {
 
         let mut payload = Bytes::new(&env);
         for _ in 0..32 { payload.push_back(0x01); }
-        let mut sig = Bytes::new(&env);
-        sig.push_back(0x0a); sig.push_back(0x0b); sig.push_back(0x0c);
+        let real_sig = sign_payload(&env, &sk, &payload);
 
         let attest_id = client.submit_attestation_with_session(
             &session_id,
@@ -109,7 +108,7 @@ mod streaming_flow_tests {
             &subject,
             &1_000_001u64,
             &payload,
-            &sig,
+            &real_sig,
         );
         assert_eq!(attest_id, 0);
 

@@ -40,10 +40,12 @@ fn main() {
     println!("   ✓ Session created with ID: {}\n", session_id);
 
     println!("4. Registering attestors within session...");
-    client.register_attestor_with_session(&session_id, &attestor1);
+    let pk1 = BytesN::from_array(&env, &[1u8; 32]);
+    let pk2 = BytesN::from_array(&env, &[2u8; 32]);
+    client.register_attestor_with_session(&session_id, &attestor1, &pk1);
     println!("   ✓ Attestor 1 registered");
 
-    client.register_attestor_with_session(&session_id, &attestor2);
+    client.register_attestor_with_session(&session_id, &attestor2, &pk2);
     println!("   ✓ Attestor 2 registered\n");
 
     println!("5. Submitting attestations with request ID tracking...");

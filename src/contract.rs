@@ -171,9 +171,11 @@ pub struct RoutingOptions {
 #[derive(Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum KycStatus {
-    Pending = 0,
-    Approved = 1,
-    Rejected = 2,
+    NotSubmitted = 0,
+    Pending = 1,
+    Approved = 2,
+    Rejected = 3,
+    Expired = 4,
 }
 
 #[contracttype]
@@ -190,7 +192,9 @@ pub struct ComplianceCheck {
 pub struct KycRecord {
     pub subject: Address,
     pub status: u32,
-    pub timestamp: u64,
+    pub submitted_at: u64,
+    pub reviewed_at: Option<u64>,
+    pub expiry: Option<u64>,
     pub rejection_reason_hash: Option<Bytes>,
 }
 
@@ -541,7 +545,7 @@ impl AnchorKitContract {
         }
     }
 
-    pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address) {
+    pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
@@ -552,6 +556,11 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().set(&pk_key, &public_key);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("added"), attestor),
             (),
@@ -565,6 +574,8 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
         }
         env.storage().persistent().remove(&key);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().remove(&pk_key);
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("removed"), attestor),
             (),
@@ -708,6 +719,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -765,22 +777,22 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::check_timestamp(&env, timestamp);
 
         // Check KYC if required
         if require_kyc {
-            let key = kyc_record_key(&subject);
-            let kyc_record: KycRecord = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-
-            match kyc_record.status {
-                1 => {}, // Approved - continue
-                0 => panic_with_error!(&env, ErrorCode::KycPending),
-                2 => panic_with_error!(&env, ErrorCode::KycRejected),
-                _ => panic_with_error!(&env, ErrorCode::KycNotFound),
+            let kyc_status = Self::get_kyc_status(env.clone(), subject.clone());
+            
+            // Only Approved status allows attestation
+            if kyc_status != KycStatus::Approved {
+                match kyc_status {
+                    KycStatus::Pending => panic_with_error!(&env, ErrorCode::KycPending),
+                    KycStatus::Rejected => panic_with_error!(&env, ErrorCode::KycRejected),
+                    KycStatus::Expired => panic_with_error!(&env, ErrorCode::ComplianceNotMet),
+                    KycStatus::NotSubmitted => panic_with_error!(&env, ErrorCode::KycNotFound),
+                    _ => panic_with_error!(&env, ErrorCode::ComplianceNotMet),
+                }
             }
         }
 
@@ -843,6 +855,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     ) -> u64 {
         issuer.require_auth();
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -999,22 +1012,42 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     // -----------------------------------------------------------------------
 
     /// Submit KYC data for a subject. Stores SHA-256 hash of KYC payload.
-    /// Never stores raw PII, only the hash.
-    pub fn submit_kyc_data(
+    /// Never stores raw PII, only the hash. Creates a KycRecord with Pending status.
+    /// Requires attestor authorization.
+    pub fn submit_kyc(
         env: Env,
         subject: Address,
-        kyc_hash: Bytes,
+        data_hash: Bytes,
         attestor: Address,
     ) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
 
-        let key = (symbol_short!("KYC"), subject.clone());
         let now = env.ledger().timestamp();
+        let key = kyc_record_key(&subject);
 
-        // Store KYC status as Pending initially
-        env.storage().persistent().set(&key, &(kyc_hash.clone(), now));
+        // Check if KYC already submitted
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+        }
+
+        // Create new KYC record with Pending status
+        let record = KycRecord {
+            subject: subject.clone(),
+            status: KycStatus::Pending as u32,
+            submitted_at: now,
+            reviewed_at: None,
+            expiry: None,
+            rejection_reason_hash: None,
+        };
+
+        env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        // Store the data hash separately for reference
+        let data_key = (symbol_short!("KYCDATA"), subject.clone());
+        env.storage().persistent().set(&data_key, &data_hash);
+        env.storage().persistent().extend_ttl(&data_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         env.events().publish(
             (symbol_short!("kyc"), symbol_short!("submitted"), subject),
@@ -1022,33 +1055,112 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
                 event_type: String::from_str(&env, "kyc_submitted"),
                 transaction_id: 0,
                 timestamp: now,
-                payload_hash: kyc_hash,
+                payload_hash: data_hash,
+            },
+        );
+    }
+
+    /// Approve KYC for a subject. Requires admin authorization.
+    /// Transitions status from Pending to Approved and sets reviewed_at timestamp.
+    pub fn approve_kyc(env: Env, subject: Address) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let key = kyc_record_key(&subject);
+
+        let mut record: KycRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
+
+        // Only allow approval from Pending state
+        if record.status != KycStatus::Pending as u32 {
+            panic_with_error!(&env, ErrorCode::IllegalTransition);
+        }
+
+        record.status = KycStatus::Approved as u32;
+        record.reviewed_at = Some(now);
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("kyc"), symbol_short!("approved"), subject),
+            WebhookEvent {
+                event_type: String::from_str(&env, "kyc_approved"),
+                transaction_id: 0,
+                timestamp: now,
+                payload_hash: Bytes::new(&env),
+            },
+        );
+    }
+
+    /// Reject KYC for a subject. Requires admin authorization.
+    /// Transitions status from Pending to Rejected and stores rejection reason hash.
+    pub fn reject_kyc(env: Env, subject: Address, reason_hash: Bytes) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let key = kyc_record_key(&subject);
+
+        let mut record: KycRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
+
+        // Only allow rejection from Pending state
+        if record.status != KycStatus::Pending as u32 {
+            panic_with_error!(&env, ErrorCode::IllegalTransition);
+        }
+
+        record.status = KycStatus::Rejected as u32;
+        record.reviewed_at = Some(now);
+        record.rejection_reason_hash = Some(reason_hash.clone());
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("kyc"), symbol_short!("rejected"), subject),
+            WebhookEvent {
+                event_type: String::from_str(&env, "kyc_rejected"),
+                transaction_id: 0,
+                timestamp: now,
+                payload_hash: reason_hash,
             },
         );
     }
 
     /// Get the KYC status for a subject.
-    /// Returns KycStatus (Pending, Approved, Rejected).
-    /// Panics with AttestationNotFound if no KYC record exists.
+    /// Returns KycStatus enum value. Returns NotSubmitted if no record exists.
     pub fn get_kyc_status(env: Env, subject: Address) -> KycStatus {
-        let key = (symbol_short!("KYC"), subject.clone());
-        let status_key = (symbol_short!("KYCSTATUS"), subject);
+        let key = kyc_record_key(&subject);
 
-        // Check if KYC record exists
+        // Return NotSubmitted if no KYC record exists
         if !env.storage().persistent().has(&key) {
-            panic_with_error!(&env, ErrorCode::AttestationNotFound);
+            return KycStatus::NotSubmitted;
         }
 
-        // Get the status, default to Pending if not set
-        let status: u32 = env.storage().persistent()
-            .get(&status_key)
-            .unwrap_or(0u32);
+        let record: KycRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
 
-        match status {
-            0 => KycStatus::Pending,
-            1 => KycStatus::Approved,
-            2 => KycStatus::Rejected,
-            _ => KycStatus::Pending,
+        // Check if KYC has expired
+        if let Some(expiry) = record.expiry {
+            if env.ledger().timestamp() > expiry {
+                return KycStatus::Expired;
+            }
+        }
+
+        match record.status {
+            0 => KycStatus::NotSubmitted,
+            1 => KycStatus::Pending,
+            2 => KycStatus::Approved,
+            3 => KycStatus::Rejected,
+            4 => KycStatus::Expired,
+            _ => KycStatus::NotSubmitted,
         }
     }
 
@@ -1256,6 +1368,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         Self::require_session_open(&env, session_id);
  main
         Self::check_attestor(&env, &issuer);
+        Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
 
@@ -1336,7 +1449,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         id
     }
 
-    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
+    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::require_session_open(&env, session_id);
         let key = (symbol_short!("ATTESTOR"), attestor.clone());
@@ -1345,6 +1458,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         }
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().set(&pk_key, &public_key);
+        env.storage().persistent().extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
         let sopcnt_key = (symbol_short!("SOPCNT"), session_id);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
@@ -1405,6 +1521,8 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
         }
         env.storage().persistent().remove(&key);
+        let pk_key = (symbol_short!("ATPUBKEY"), attestor.clone());
+        env.storage().persistent().remove(&pk_key);
 
         let sopcnt_key = (symbol_short!("SOPCNT"), session_id);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
@@ -1989,6 +2107,20 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             .has(&(symbol_short!("ATTESTOR"), attestor.clone()))
         {
             panic_with_error!(env, ErrorCode::AttestorNotRegistered);
+        }
+    }
+
+    fn verify_attestation_signature(env: &Env, issuer: &Address, payload_hash: &Bytes, signature: &Bytes) {
+        let pk: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&(symbol_short!("ATPUBKEY"), issuer.clone()))
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::UnauthorizedAttestor));
+        if signature.len() != 64 {
+            panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
+        }
+        if !env.crypto().ed25519_verify(&pk, payload_hash, signature) {
+            panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
         }
     }
 
