@@ -79,14 +79,24 @@ impl RateLimiter {
             })
     }
     
-    /// Update the rate limit configuration (admin only)
+    /// Update the rate limit configuration (admin only).
+    ///
+    /// Loads the stored admin from instance storage (key `"ADMIN"`) and calls
+    /// `admin.require_auth()`. Returns `Err(NotInitialized)` if no admin is stored.
     pub fn update_config(
         env: &Env,
-        _admin: &Address,
+        admin: &Address,
         config: &RateLimitConfig,
     ) -> Result<(), AnchorKitError> {
-        // In a real contract, you would check that admin is authorized
-        // For now, we'll just store the config
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&soroban_sdk::vec![env, soroban_sdk::symbol_short!("ADMIN")])
+            .ok_or_else(AnchorKitError::not_initialized)?;
+        if *admin != stored_admin {
+            return Err(AnchorKitError::unauthorized_attestor());
+        }
+        admin.require_auth();
         let config_key = Self::get_config_key(env);
         env.storage().persistent().set(&config_key, config);
         Ok(())
@@ -251,27 +261,71 @@ mod tests {
     #[test]
     fn test_rate_limit_config_update() {
         let env = Env::default();
+        env.mock_all_auths();
         let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         let new_config = RateLimitConfig {
             max_submissions: 20,
             window_length: 200,
         };
-        
-        // Create a dummy contract address for testing
+
         let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
-        
-        // Update config
+
+        // Store admin in instance storage before calling update_config
+        env.as_contract(&contract_address, &|| {
+            env.storage()
+                .instance()
+                .set(&soroban_sdk::vec![&env, soroban_sdk::symbol_short!("ADMIN")], &admin);
+        });
+
         let result = env.as_contract(&contract_address, &|| {
             RateLimiter::update_config(&env, &admin, &new_config)
         });
         assert!(result.is_ok());
-        
-        // Verify config was updated
+
         let config = env.as_contract(&contract_address, &|| {
             RateLimiter::get_config(&env)
         });
         assert_eq!(config.max_submissions, 20);
         assert_eq!(config.window_length, 200);
+    }
+
+    #[test]
+    fn test_update_config_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let new_config = RateLimitConfig { max_submissions: 5, window_length: 50 };
+
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        env.as_contract(&contract_address, &|| {
+            env.storage()
+                .instance()
+                .set(&soroban_sdk::vec![&env, soroban_sdk::symbol_short!("ADMIN")], &admin);
+        });
+
+        let result = env.as_contract(&contract_address, &|| {
+            RateLimiter::update_config(&env, &non_admin, &new_config)
+        });
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::UnauthorizedAttestor);
+    }
+
+    #[test]
+    fn test_update_config_not_initialized() {
+        let env = Env::default();
+        let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let new_config = RateLimitConfig { max_submissions: 5, window_length: 50 };
+
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        // No admin stored — should return NotInitialized
+        let result = env.as_contract(&contract_address, &|| {
+            RateLimiter::update_config(&env, &admin, &new_config)
+        });
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotInitialized);
     }
     
     #[test]
