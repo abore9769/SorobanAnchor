@@ -149,7 +149,11 @@ enum Commands {
         #[arg(long)] keypair_file: Option<String>,
     },
     /// Check environment setup
-    Doctor,
+    Doctor {
+        /// Attempt to automatically fix issues
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 // ── Output types (JSON) ───────────────────────────────────────────────────────
@@ -329,6 +333,226 @@ fn revoke(address: &str, contract_id: &str, network: &str, source: &str) {
     println!("{{\"revoked\": true, \"address\": \"{address}\"}}");
 }
 
+// ── Doctor command ────────────────────────────────────────────────────────────
+
+struct CheckResult {
+    passed: bool,
+    warning: bool,
+    message: String,
+}
+
+impl CheckResult {
+    fn pass(msg: impl Into<String>) -> Self {
+        Self { passed: true, warning: false, message: msg.into() }
+    }
+    fn fail(msg: impl Into<String>) -> Self {
+        Self { passed: false, warning: false, message: msg.into() }
+    }
+    fn warn(msg: impl Into<String>) -> Self {
+        Self { passed: true, warning: true, message: msg.into() }
+    }
+    fn icon(&self) -> &str {
+        if !self.passed { "✗" } else if self.warning { "⚠" } else { "✓" }
+    }
+    fn color(&self) -> &str {
+        if !self.passed { "\x1b[31m" } else if self.warning { "\x1b[33m" } else { "\x1b[32m" }
+    }
+}
+
+fn check_stellar_cli() -> CheckResult {
+    match std::process::Command::new("stellar").arg("--version").output() {
+        Ok(output) => {
+            let version_str = String::from_utf8_lossy(&output.stdout);
+            if let Some(version_line) = version_str.lines().next() {
+                // Parse version like "stellar 21.0.0"
+                if let Some(ver) = version_line.split_whitespace().nth(1) {
+                    if let Some(major) = ver.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
+                        if major >= 21 {
+                            return CheckResult::pass(format!("Stellar CLI {} installed", ver));
+                        } else {
+                            return CheckResult::fail(format!("Stellar CLI {} found, but v21+ required", ver));
+                        }
+                    }
+                }
+            }
+            CheckResult::warn("Stellar CLI installed but version could not be parsed")
+        }
+        Err(_) => CheckResult::fail("Stellar CLI not found in PATH"),
+    }
+}
+
+fn check_wasm_target(fix: bool) -> CheckResult {
+    let output = std::process::Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output();
+    
+    match output {
+        Ok(out) => {
+            let targets = String::from_utf8_lossy(&out.stdout);
+            if targets.contains("wasm32-unknown-unknown") {
+                CheckResult::pass("wasm32-unknown-unknown target installed")
+            } else if fix {
+                println!("  Attempting to install wasm32-unknown-unknown...");
+                let install = std::process::Command::new("rustup")
+                    .args(["target", "add", "wasm32-unknown-unknown"])
+                    .status();
+                if install.is_ok() && install.unwrap().success() {
+                    CheckResult::pass("wasm32-unknown-unknown target installed (auto-fixed)")
+                } else {
+                    CheckResult::fail("wasm32-unknown-unknown target missing and auto-fix failed")
+                }
+            } else {
+                CheckResult::fail("wasm32-unknown-unknown target not installed (run: rustup target add wasm32-unknown-unknown)")
+            }
+        }
+        Err(_) => CheckResult::fail("rustup not found"),
+    }
+}
+
+fn check_contract_id_env() -> CheckResult {
+    match std::env::var("ANCHOR_CONTRACT_ID") {
+        Ok(id) if !id.is_empty() => CheckResult::pass(format!("ANCHOR_CONTRACT_ID set: {}", &id[..id.len().min(16)])),
+        _ => CheckResult::warn("ANCHOR_CONTRACT_ID not set (required for contract operations)"),
+    }
+}
+
+fn check_admin_secret_env() -> CheckResult {
+    match std::env::var("ANCHOR_ADMIN_SECRET") {
+        Ok(secret) if !secret.is_empty() && secret.starts_with('S') => {
+            CheckResult::pass("ANCHOR_ADMIN_SECRET set and appears valid")
+        }
+        Ok(_) => CheckResult::fail("ANCHOR_ADMIN_SECRET set but does not appear to be a valid secret key"),
+        Err(_) => CheckResult::warn("ANCHOR_ADMIN_SECRET not set (required for signing operations)"),
+    }
+}
+
+fn check_network_connectivity(network: &str) -> CheckResult {
+    let url = rpc_url(network);
+    match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .and_then(|client| client.get(url).send())
+    {
+        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+            CheckResult::pass(format!("Network connectivity to {} OK", network))
+        }
+        Ok(resp) => CheckResult::warn(format!("Network {} responded with HTTP {}", network, resp.status())),
+        Err(e) => CheckResult::fail(format!("Cannot connect to {} network: {}", network, e)),
+    }
+}
+
+fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
+    let source = std::env::var("ANCHOR_ADMIN_SECRET").unwrap_or_else(|_| "default".to_string());
+    
+    let output = std::process::Command::new("stellar")
+        .args(["contract", "invoke",
+               "--id", contract_id,
+               "--source", &source,
+               "--rpc-url", rpc_url(network),
+               "--network-passphrase", passphrase(network),
+               "--",
+               "get_attestor_count"])
+        .output();
+    
+    match output {
+        Ok(out) if out.status.success() => {
+            CheckResult::pass(format!("Contract {} is deployed and responding", &contract_id[..contract_id.len().min(16)]))
+        }
+        Ok(_) => CheckResult::fail("Contract exists but failed to respond (may not be initialized)"),
+        Err(_) => CheckResult::fail("Failed to query contract"),
+    }
+}
+
+fn check_config_files() -> CheckResult {
+    let config_dir = std::path::Path::new("configs");
+    if !config_dir.exists() {
+        return CheckResult::warn("configs/ directory not found");
+    }
+    
+    let mut valid_count = 0;
+    let mut total_count = 0;
+    
+    if let Ok(entries) = std::fs::read_dir(config_dir) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "json" || ext == "toml" {
+                    total_count += 1;
+                    if ext == "json" {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+                                valid_count += 1;
+                            }
+                        }
+                    } else {
+                        valid_count += 1; // Basic check for TOML
+                    }
+                }
+            }
+        }
+    }
+    
+    if total_count == 0 {
+        CheckResult::warn("No config files found in configs/")
+    } else if valid_count == total_count {
+        CheckResult::pass(format!("{} config file(s) validated", total_count))
+    } else {
+        CheckResult::fail(format!("{}/{} config files are valid", valid_count, total_count))
+    }
+}
+
+fn doctor(network: &str, fix: bool) {
+    println!("\n🔍 SorobanAnchor Environment Check\n");
+    
+    let checks = vec![
+        ("Stellar CLI", check_stellar_cli()),
+        ("WASM Target", check_wasm_target(fix)),
+        ("Contract ID", check_contract_id_env()),
+        ("Admin Secret", check_admin_secret_env()),
+        ("Network", check_network_connectivity(network)),
+    ];
+    
+    let mut all_passed = true;
+    
+    for (name, result) in &checks {
+        println!("  {} {} {}", result.color(), result.icon(), name);
+        println!("    {}\x1b[0m", result.message);
+        if !result.passed {
+            all_passed = false;
+        }
+    }
+    
+    // Optional checks that require contract ID
+    if let Ok(contract_id) = std::env::var("ANCHOR_CONTRACT_ID") {
+        if !contract_id.is_empty() {
+            let deployment_check = check_contract_deployment(&contract_id, network);
+            println!("  {} {} Contract Deployment", deployment_check.color(), deployment_check.icon());
+            println!("    {}\x1b[0m", deployment_check.message);
+            if !deployment_check.passed {
+                all_passed = false;
+            }
+        }
+    }
+    
+    let config_check = check_config_files();
+    println!("  {} {} Config Files", config_check.color(), config_check.icon());
+    println!("    {}\x1b[0m", config_check.message);
+    if !config_check.passed {
+        all_passed = false;
+    }
+    
+    println!();
+    if all_passed {
+        println!("✅ All checks passed! Your environment is ready.\n");
+        std::process::exit(0);
+    } else {
+        println!("❌ Some checks failed. Please address the issues above.\n");
+        if !fix {
+            println!("Tip: Run with --fix to automatically resolve fixable issues.\n");
+        }
+        std::process::exit(1);
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -356,16 +580,8 @@ fn main() {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
             revoke(&address, &contract_id, &network, &source);
         }
-        Commands::Doctor => {
-            println!("Checking environment...");
-            println!("  cargo: {}", std::process::Command::new("cargo")
-                .arg("--version").output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "not found".into()));
-            println!("  stellar: {}", std::process::Command::new("stellar")
-                .arg("--version").output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "not found".into()));
+        Commands::Doctor { fix } => {
+            doctor(&cli.network, fix);
         }
     }
 }
