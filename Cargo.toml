@@ -43,6 +43,7 @@ soroban-sdk = { version = "21.7.0", features = ["testutils"] }
 base64 = "0.22"
 ed25519-dalek = "2"
 rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 opt-level = "z"
@@ -57,3 +58,7 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+
+[[bench]]
+name = "load_benchmarks"
+harness = false
