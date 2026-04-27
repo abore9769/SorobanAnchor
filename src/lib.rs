@@ -125,8 +125,8 @@ pub use errors::Error;
 pub use rate_limiter::{RateLimiter, RateLimitConfig, RateLimitState};
 pub use response_validator::{
     validate_anchor_info_response, validate_deposit_response, validate_quote_response,
-    validate_withdraw_response, AnchorInfoResponse, DepositResponse as ValidatorDepositResponse,
-    QuoteResponse, WithdrawResponse,
+    validate_withdraw_response, validate_stellar_asset, AnchorInfoResponse,
+    DepositResponse as ValidatorDepositResponse, QuoteResponse, WithdrawResponse,
 };
 pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
@@ -147,6 +147,9 @@ pub use sep24::{
 };
 pub use contract::{AnchorKitContract, EndpointUpdated, get_endpoint, set_endpoint};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord};
+pub use transaction_state_tracker::StorageBudgetMonitor;
+pub mod streaming_monitor;
+pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
 #[cfg(test)]
 mod request_id_tests;

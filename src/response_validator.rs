@@ -75,10 +75,10 @@ pub struct TransactionStatusResponse {
 /// ```rust
 /// use anchorkit::validate_deposit_response;
 ///
-/// let resp = validate_deposit_response("dep_123", "pending", "GDEPOSIT...", 9999).unwrap();
+/// let resp = validate_deposit_response("dep_123", "pending", "GDEPOSIT...", 2_000_000_000).unwrap();
 /// assert_eq!(resp.transaction_id, "dep_123");
 ///
-/// assert!(validate_deposit_response("", "pending", "GDEPOSIT...", 9999).is_err());
+/// assert!(validate_deposit_response("", "pending", "GDEPOSIT...", 2_000_000_000).is_err());
 /// ```
 pub fn validate_deposit_response(
     transaction_id: &str,
@@ -97,6 +97,12 @@ pub fn validate_deposit_response(
     }
     if deposit_address.is_empty() {
         return Err(Error::validation_error("deposit_address is empty"));
+    }
+    // expires_at must be 0 (no expiry) or a future Unix timestamp.
+    // We use a compile-time lower bound of 1_700_000_000 (Nov 2023) as a
+    // proxy for "past" when we cannot call the system clock in no_std.
+    if expires_at != 0 && expires_at < 1_700_000_000 {
+        return Err(Error::validation_error("expires_at is in the past"));
     }
 
     Ok(DepositResponse {
@@ -197,9 +203,16 @@ pub fn validate_quote_response(
     if status.is_empty() {
         return Err(Error::validation_error("status is empty"));
     }
+    if !is_valid_quote_status(status) {
+        return Err(Error::validation_error("invalid quote status"));
+    }
+    if amount == 0 {
+        return Err(Error::validation_error("amount must be greater than zero"));
+    }
     if asset.is_empty() {
         return Err(Error::validation_error("asset is empty"));
     }
+    validate_stellar_asset(asset)?;
 
     Ok(QuoteResponse {
         id: alloc::string::String::from(id),
@@ -249,8 +262,14 @@ pub fn validate_anchor_info_response(
     if name.is_empty() {
         return Err(Error::validation_error("name is empty"));
     }
+    if name.len() > 100 {
+        return Err(Error::validation_error("name must be 100 characters or fewer"));
+    }
     if supported_assets.is_empty() {
         return Err(Error::validation_error("supported_assets is empty"));
+    }
+    for asset in &supported_assets {
+        validate_stellar_asset(asset.as_str())?;
     }
 
     Ok(AnchorInfoResponse {
@@ -317,6 +336,46 @@ fn is_valid_sep6_status(status: &str) -> bool {
     }
 }
 
+/// Validate a Stellar asset identifier.
+///
+/// Accepts:
+/// - `"native"` (XLM)
+/// - `"CODE:ISSUER"` where CODE is 1–12 alphanumeric chars and ISSUER is a
+///   56-character Stellar address starting with `G`.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::validate_stellar_asset;
+///
+/// assert!(validate_stellar_asset("native").is_ok());
+/// assert!(validate_stellar_asset("USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5").is_ok());
+/// assert!(validate_stellar_asset("INVALID").is_err());
+/// assert!(validate_stellar_asset("").is_err());
+/// ```
+pub fn validate_stellar_asset(asset: &str) -> Result<(), Error> {
+    if asset == "native" {
+        return Ok(());
+    }
+    let parts: alloc::vec::Vec<&str> = asset.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(Error::validation_error("asset must be 'native' or 'CODE:ISSUER'"));
+    }
+    let code = parts[0];
+    let issuer = parts[1];
+    if code.is_empty() || code.len() > 12 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Error::validation_error("asset code must be 1-12 alphanumeric characters"));
+    }
+    if issuer.len() != 56 || !issuer.starts_with('G') || !issuer.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Error::validation_error("asset issuer must be a 56-character Stellar address starting with G"));
+    }
+    Ok(())
+}
+
+fn is_valid_quote_status(status: &str) -> bool {
+    matches!(status, "quoted" | "pending" | "expired" | "error")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,39 +384,39 @@ mod tests {
 
     #[test]
     fn test_valid_deposit_response() {
-        let result = validate_deposit_response("dep_123", "pending", "GDEPOSIT...", 9999);
+        let result = validate_deposit_response("dep_123", "pending", "GDEPOSIT...", 2_000_000_000);
         assert!(result.is_ok());
         let r = result.unwrap();
         assert_eq!(r.transaction_id, "dep_123");
         assert_eq!(r.status, "pending");
         assert_eq!(r.deposit_address, "GDEPOSIT...");
-        assert_eq!(r.expires_at, 9999);
+        assert_eq!(r.expires_at, 2_000_000_000);
     }
 
     #[test]
     fn test_deposit_missing_transaction_id() {
-        let result = validate_deposit_response("", "pending", "GDEPOSIT...", 9999);
+        let result = validate_deposit_response("", "pending", "GDEPOSIT...", 2_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
 
     #[test]
     fn test_deposit_missing_status() {
-        let result = validate_deposit_response("dep_123", "", "GDEPOSIT...", 9999);
+        let result = validate_deposit_response("dep_123", "", "GDEPOSIT...", 2_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
 
     #[test]
     fn test_deposit_invalid_status() {
-        let result = validate_deposit_response("dep_123", "garbage_status", "GDEPOSIT...", 9999);
+        let result = validate_deposit_response("dep_123", "garbage_status", "GDEPOSIT...", 2_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
 
     #[test]
     fn test_deposit_missing_deposit_address() {
-        let result = validate_deposit_response("dep_123", "pending", "", 9999);
+        let result = validate_deposit_response("dep_123", "pending", "", 2_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
@@ -399,26 +458,29 @@ mod tests {
 
     #[test]
     fn test_valid_quote_response() {
-        let result = validate_quote_response("quote_789", "quoted", 100_0000000, "USDC", 500000);
+        let result = validate_quote_response(
+            "quote_789", "quoted", 100_0000000,
+            "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+            500000,
+        );
         assert!(result.is_ok());
         let r = result.unwrap();
         assert_eq!(r.id, "quote_789");
         assert_eq!(r.status, "quoted");
         assert_eq!(r.amount, 100_0000000);
-        assert_eq!(r.asset, "USDC");
         assert_eq!(r.fee, 500000);
     }
 
     #[test]
     fn test_quote_missing_id() {
-        let result = validate_quote_response("", "quoted", 100_0000000, "USDC", 500000);
+        let result = validate_quote_response("", "quoted", 100_0000000, "native", 500000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
 
     #[test]
     fn test_quote_missing_status() {
-        let result = validate_quote_response("quote_789", "", 100_0000000, "USDC", 500000);
+        let result = validate_quote_response("quote_789", "", 100_0000000, "native", 500000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
@@ -432,9 +494,9 @@ mod tests {
 
     #[test]
     fn test_quote_zero_amount_is_valid() {
-        // amount = 0 is technically valid (e.g. free transactions)
-        let result = validate_quote_response("quote_789", "quoted", 0, "USDC", 0);
-        assert!(result.is_ok());
+        // amount = 0 is now rejected per #189 requirements
+        let result = validate_quote_response("quote_789", "quoted", 0, "native", 0);
+        assert!(result.is_err());
     }
 
     // --- validate_anchor_info_response ---
@@ -442,8 +504,8 @@ mod tests {
     #[test]
     fn test_valid_anchor_info_response() {
         let assets = alloc::vec![
-            alloc::string::String::from("USDC"),
-            alloc::string::String::from("XLM"),
+            alloc::string::String::from("native"),
+            alloc::string::String::from("USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"),
         ];
         let result = validate_anchor_info_response("MyAnchor", assets);
         assert!(result.is_ok());
@@ -454,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_anchor_info_missing_name() {
-        let assets = alloc::vec![alloc::string::String::from("USDC")];
+        let assets = alloc::vec![alloc::string::String::from("native")];
         let result = validate_anchor_info_response("", assets);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
@@ -496,5 +558,130 @@ mod tests {
             Err(e) if e.code == crate::errors::ErrorCode::ValidationError => { /* handled, no crash */ }
             _ => panic!("Expected ValidationError"),
         }
+    }
+
+    // ── #189 validate_stellar_asset ──────────────────────────────────────────
+
+    #[test]
+    fn test_stellar_asset_native() {
+        assert!(validate_stellar_asset("native").is_ok());
+    }
+
+    #[test]
+    fn test_stellar_asset_valid_issued() {
+        assert!(validate_stellar_asset(
+            "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_ok());
+    }
+
+    #[test]
+    fn test_stellar_asset_empty() {
+        assert!(validate_stellar_asset("").is_err());
+    }
+
+    #[test]
+    fn test_stellar_asset_no_colon() {
+        assert!(validate_stellar_asset("USDC").is_err());
+    }
+
+    #[test]
+    fn test_stellar_asset_code_too_long() {
+        assert!(validate_stellar_asset(
+            "TOOLONGCODE123:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_err());
+    }
+
+    #[test]
+    fn test_stellar_asset_issuer_wrong_length() {
+        assert!(validate_stellar_asset("USDC:GSHORT").is_err());
+    }
+
+    #[test]
+    fn test_stellar_asset_issuer_wrong_prefix() {
+        // 56 chars but starts with 'A' not 'G'
+        assert!(validate_stellar_asset(
+            "USDC:ABBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_err());
+    }
+
+    // ── #189 validate_anchor_info_response extended ──────────────────────────
+
+    #[test]
+    fn test_anchor_info_invalid_asset_identifier() {
+        let assets = alloc::vec![alloc::string::String::from("NOTVALID")];
+        let result = validate_anchor_info_response("MyAnchor", assets);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_anchor_info_valid_native_asset() {
+        let assets = alloc::vec![alloc::string::String::from("native")];
+        let result = validate_anchor_info_response("MyAnchor", assets);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_anchor_info_name_too_long() {
+        let name = "A".repeat(101);
+        let assets = alloc::vec![alloc::string::String::from("native")];
+        let result = validate_anchor_info_response(&name, assets);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_anchor_info_name_max_length_ok() {
+        let name = "A".repeat(100);
+        let assets = alloc::vec![alloc::string::String::from("native")];
+        let result = validate_anchor_info_response(&name, assets);
+        assert!(result.is_ok());
+    }
+
+    // ── #189 validate_quote_response extended ────────────────────────────────
+
+    #[test]
+    fn test_quote_zero_amount_rejected() {
+        let result = validate_quote_response("q1", "quoted", 0, "native", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_invalid_asset_rejected() {
+        let result = validate_quote_response("q1", "quoted", 100, "BADFORMAT", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_invalid_status_rejected() {
+        let result = validate_quote_response("q1", "unknown_status", 100, "native", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_valid_native_asset() {
+        let result = validate_quote_response("q1", "quoted", 100, "native", 0);
+        assert!(result.is_ok());
+    }
+
+    // ── #189 validate_deposit_response expires_at ────────────────────────────
+
+    #[test]
+    fn test_deposit_past_expires_at_rejected() {
+        // 1_000_000 is well before Nov 2023 — treated as past
+        let result = validate_deposit_response("dep_1", "pending", "GADDR...", 1_000_000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deposit_future_expires_at_accepted() {
+        // 2_000_000_000 is year ~2033
+        let result = validate_deposit_response("dep_1", "pending", "GADDR...", 2_000_000_000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_deposit_zero_expires_at_accepted() {
+        // 0 means "no expiry"
+        let result = validate_deposit_response("dep_1", "pending", "GADDR...", 0);
+        assert!(result.is_ok());
     }
 }
