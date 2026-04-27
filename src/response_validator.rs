@@ -43,6 +43,14 @@ pub struct AnchorInfoResponse {
     pub supported_assets: alloc::vec::Vec<alloc::string::String>,
 }
 
+/// A validated transaction status response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionStatusResponse {
+    pub transaction_id: alloc::string::String,
+    pub status: alloc::string::String,
+    pub kind: alloc::string::String,
+}
+
 /// Validates a raw deposit response map, returning a typed [`DepositResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
 ///
@@ -248,6 +256,44 @@ pub fn validate_anchor_info_response(
     })
 }
 
+/// Validates a raw transaction status response, returning a typed [`TransactionStatusResponse`]
+/// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `transaction_id` - Unique transaction ID (must be non-empty).
+/// * `status` - Current transaction status string (must be non-empty).
+/// * `kind` - The type of transaction (e.g., "deposit", "withdrawal"; must be non-empty).
+///
+/// # Returns
+///
+/// A validated [`TransactionStatusResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any field is empty.
+pub fn validate_transaction_status_response(
+    transaction_id: &str,
+    status: &str,
+    kind: &str,
+) -> Result<TransactionStatusResponse, Error> {
+    if transaction_id.is_empty() {
+        return Err(Error::validation_error("transaction_id is empty"));
+    }
+    if status.is_empty() {
+        return Err(Error::validation_error("status is empty"));
+    }
+    if kind.is_empty() {
+        return Err(Error::validation_error("kind is empty"));
+    }
+
+    Ok(TransactionStatusResponse {
+        transaction_id: alloc::string::String::from(transaction_id),
+        status: alloc::string::String::from(status),
+        kind: alloc::string::String::from(kind),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +435,25 @@ mod tests {
         let result = validate_anchor_info_response("MyAnchor", alloc::vec![]);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    // --- validate_transaction_status_response ---
+
+    #[test]
+    fn test_valid_transaction_status_response() {
+        let result = validate_transaction_status_response("tx_123", "completed", "deposit");
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.transaction_id, "tx_123");
+        assert_eq!(r.status, "completed");
+        assert_eq!(r.kind, "deposit");
+    }
+
+    #[test]
+    fn test_transaction_status_missing_fields() {
+        assert!(validate_transaction_status_response("", "completed", "deposit").is_err());
+        assert!(validate_transaction_status_response("tx_123", "", "deposit").is_err());
+        assert!(validate_transaction_status_response("tx_123", "completed", "").is_err());
     }
 
     // --- SDK does not crash on validation error ---
