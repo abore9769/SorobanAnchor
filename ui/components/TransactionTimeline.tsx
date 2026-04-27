@@ -14,6 +14,15 @@ export interface TxEvent {
   detail?: string;            // any extra note
 }
 
+// ── TransactionStatusUpdate ──────────────────────────────────────────────────
+// Mirrors the Rust enum from streaming_monitor.rs.
+
+export type TransactionStatusUpdate =
+  | { type: "StateChanged"; from: TxStatus; to: TxStatus; timestamp: number }
+  | { type: "MoreInfoAvailable"; url: string }
+  | { type: "Completed"; stellar_tx_id: string }
+  | { type: "Failed"; reason: string };
+
 export interface TransactionTimelineProps {
   type: TxType;
   amount: string;
@@ -21,6 +30,9 @@ export interface TransactionTimelineProps {
   id?: string;
   events: TxEvent[];
   currentStatus: TxStatus;
+  /** Optional stream of server-sent updates. When provided the component
+   *  applies each update and re-renders in real time. */
+  statusUpdates?: TransactionStatusUpdate[];
   onRetry?: () => void;
   onClose?: () => void;
   className?: string;
@@ -164,27 +176,74 @@ function ProgressBar({
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function TransactionTimeline({
-  type, amount, asset, id, events, currentStatus, onRetry, onClose,
+  type, amount, asset, id, events, currentStatus, statusUpdates, onRetry, onClose,
 }: TransactionTimelineProps) {
-  const failed = isFailed(currentStatus);
-  const completed = isCompleted(currentStatus);
-  const currentIndex = getOrderIndex(currentStatus);
+  // Apply incoming TransactionStatusUpdate events to local state
+  const [liveStatus, setLiveStatus] = useState<TxStatus>(currentStatus);
+  const [liveEvents, setLiveEvents] = useState<TxEvent[]>(events);
+
+  useEffect(() => {
+    setLiveStatus(currentStatus);
+    setLiveEvents(events);
+  }, [currentStatus, events]);
+
+  useEffect(() => {
+    if (!statusUpdates || statusUpdates.length === 0) return;
+    const latest = statusUpdates[statusUpdates.length - 1];
+    switch (latest.type) {
+      case "StateChanged":
+        setLiveStatus(latest.to);
+        setLiveEvents(prev => {
+          if (prev.some(e => e.status === latest.to)) return prev;
+          return [...prev, { status: latest.to, timestamp: new Date(latest.timestamp * 1000).toISOString() }];
+        });
+        break;
+      case "Completed":
+        setLiveStatus("completed");
+        setLiveEvents(prev => {
+          if (prev.some(e => e.status === "completed")) return prev;
+          return [...prev, {
+            status: "completed",
+            timestamp: new Date().toISOString(),
+            txHash: latest.stellar_tx_id || undefined,
+          }];
+        });
+        break;
+      case "Failed":
+        setLiveStatus("failed");
+        setLiveEvents(prev => {
+          if (prev.some(e => e.status === "failed")) return prev;
+          return [...prev, { status: "failed", timestamp: new Date().toISOString(), description: latest.reason }];
+        });
+        break;
+      case "MoreInfoAvailable":
+        // Surface as a detail on the current active event
+        setLiveEvents(prev => prev.map((e, i) =>
+          i === prev.length - 1 ? { ...e, detail: `More info: ${latest.url}` } : e
+        ));
+        break;
+    }
+  }, [statusUpdates]);
+
+  const failed = isFailed(liveStatus);
+  const completed = isCompleted(liveStatus);
+  const currentIndex = getOrderIndex(liveStatus);
 
   // Build display steps — always show the 4 standard steps,
   // replace "completed" with "failed" node if tx failed
   const steps = STATUS_ORDER.map((s) => {
-    const event = events.find(e => e.status === s);
+    const event = liveEvents.find(e => e.status === s);
     const stepIndex = getOrderIndex(s);
     const isDone = failed
       ? stepIndex < currentIndex
       : stepIndex <= currentIndex;
-    const isActive = s === currentStatus && !failed;
+    const isActive = s === liveStatus && !failed;
     const m = STATUS_META[s];
 
     return { status: s, event, isDone, isActive, m, stepIndex };
   });
 
-  const statusMeta = STATUS_META[currentStatus];
+  const statusMeta = STATUS_META[liveStatus];
 
   return (
     <div style={{
@@ -352,14 +411,14 @@ export function TransactionTimeline({
               </div>
               <div style={{ flex: 1, paddingTop: 8 }}>
                 <div style={{ ...sans, fontSize: 13, fontWeight: 600, color: "#b91c1c", marginBottom: 4 }}>
-                  {events.find(e => e.status === "failed")?.label ?? "Transaction Failed"}
+                  {liveEvents.find(e => e.status === "failed")?.label ?? "Transaction Failed"}
                 </div>
                 <p style={{ ...sans, fontSize: 12, color: "#ef4444", lineHeight: 1.55, margin: 0 }}>
-                  {events.find(e => e.status === "failed")?.description ?? DEFAULT_DESCRIPTIONS.failed[type]}
+                  {liveEvents.find(e => e.status === "failed")?.description ?? DEFAULT_DESCRIPTIONS.failed[type]}
                 </p>
-                {events.find(e => e.status === "failed")?.timestamp && (
+                {liveEvents.find(e => e.status === "failed")?.timestamp && (
                   <span style={{ ...mono, fontSize: 10, color: "#f87171", marginTop: 4, display: "block" }}>
-                    {formatTs(events.find(e => e.status === "failed")!.timestamp)}
+                    {formatTs(liveEvents.find(e => e.status === "failed")!.timestamp)}
                   </span>
                 )}
               </div>
