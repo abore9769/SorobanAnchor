@@ -97,6 +97,15 @@ enum Commands {
         network: String,
         #[arg(long, default_value = "default")]
         source: String,
+        /// Admin address for post-deployment initialization
+        #[arg(long)]
+        admin: Option<String>,
+        /// Validate without deploying
+        #[arg(long)]
+        dry_run: bool,
+        /// List deployment history
+        #[arg(long)]
+        list: bool,
     },
     /// Register an attestor
     Register {
@@ -184,8 +193,96 @@ struct StatusOutput {
 
 // ── Command implementations ───────────────────────────────────────────────────
 
-fn deploy(network: &str, source: &str) {
-    println!("Building WASM for {network}...");
+// ── Deployments record ────────────────────────────────────────────────────────
+
+#[derive(Serialize, serde::Deserialize, Clone)]
+struct DeploymentRecord {
+    contract_id: String,
+    network: String,
+    timestamp: u64,
+    initialized: bool,
+}
+
+fn deployments_path() -> std::path::PathBuf {
+    let dir = std::path::Path::new(".anchorkit");
+    std::fs::create_dir_all(dir).ok();
+    dir.join("deployments.json")
+}
+
+fn load_deployments() -> Vec<DeploymentRecord> {
+    let path = deployments_path();
+    if !path.exists() { return Vec::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_deployments(records: &[DeploymentRecord]) {
+    let path = deployments_path();
+    let json = serde_json::to_string_pretty(records).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+// ── Pre-deployment validation ─────────────────────────────────────────────────
+
+fn pre_deploy_validate(network: &str) -> bool {
+    let mut ok = true;
+
+    // 1. WASM artifact exists
+    let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
+    if std::path::Path::new(wasm).exists() {
+        println!("  ✓ WASM artifact found");
+    } else {
+        eprintln!("  ✗ WASM not found at {wasm} — run: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm");
+        ok = false;
+    }
+
+    // 2. Config files valid
+    let config_check = check_config_files();
+    if config_check.passed {
+        println!("  ✓ Config files valid");
+    } else {
+        eprintln!("  ✗ {}", config_check.message);
+        ok = false;
+    }
+
+    // 3. Network reachable
+    let net_check = check_network_connectivity(network);
+    if net_check.passed {
+        println!("  ✓ Network reachable");
+    } else {
+        eprintln!("  ✗ {}", net_check.message);
+        ok = false;
+    }
+
+    ok
+}
+
+fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list: bool) {
+    // --list: print deployment history and exit
+    if list {
+        let records = load_deployments();
+        if records.is_empty() {
+            println!("No deployments recorded.");
+        } else {
+            println!("{}", serde_json::to_string_pretty(&records).unwrap_or_default());
+        }
+        return;
+    }
+
+    println!("\n🔍 Pre-deployment validation ({network})...");
+    if !pre_deploy_validate(network) {
+        eprintln!("\n❌ Pre-deployment validation failed. Aborting.");
+        std::process::exit(1);
+    }
+    println!("✅ Validation passed.\n");
+
+    if dry_run {
+        println!("--dry-run: skipping actual deployment.");
+        return;
+    }
+
+    // Build WASM
+    println!("Building WASM...");
     let build = std::process::Command::new("cargo")
         .args(["build", "--release", "--target", "wasm32-unknown-unknown",
                "--no-default-features", "--features", "wasm"])
@@ -203,12 +300,58 @@ fn deploy(network: &str, source: &str) {
         .output()
         .expect("failed to run stellar contract deploy — is the Stellar CLI installed?");
 
-    if output.status.success() {
-        println!("Contract ID: {}", String::from_utf8_lossy(&output.stdout).trim());
-    } else {
+    if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
         std::process::exit(1);
     }
+
+    let contract_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    println!("Contract ID: {contract_id}");
+
+    // Save to deployments.json
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut records = load_deployments();
+    let mut record = DeploymentRecord {
+        contract_id: contract_id.clone(),
+        network: network.to_string(),
+        timestamp,
+        initialized: false,
+    };
+
+    // Post-deployment initialization
+    let admin_addr = admin.unwrap_or(source);
+    println!("Initializing contract with admin {admin_addr}...");
+    let init_result = std::process::Command::new("stellar")
+        .args(["contract", "invoke",
+               "--id", &contract_id,
+               "--source", source,
+               "--rpc-url", rpc_url(network),
+               "--network-passphrase", passphrase(network),
+               "--", "initialize",
+               "--admin", admin_addr])
+        .output();
+
+    match init_result {
+        Ok(out) if out.status.success() => {
+            println!("✅ Contract initialized.");
+            record.initialized = true;
+        }
+        Ok(out) => {
+            eprintln!("⚠️  Post-deployment initialization failed:");
+            eprintln!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            eprintln!("\nContract ID: {contract_id}");
+            eprintln!("To initialize manually: stellar contract invoke --id {contract_id} --source <ADMIN> -- initialize --admin <ADMIN_ADDRESS>");
+        }
+        Err(e) => {
+            eprintln!("⚠️  Could not run initialization: {e}");
+            eprintln!("Contract ID: {contract_id}");
+        }
+    }
+
+    records.push(record);
+    save_deployments(&records);
+    println!("Deployment saved to .anchorkit/deployments.json");
 }
 
 fn parse_services(services: &[String]) -> Vec<u32> {
@@ -559,8 +702,8 @@ fn doctor(network: &str, fix: bool) {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Deploy { source } => {
-            deploy(&cli.network, &source);
+        Commands::Deploy { source, admin, dry_run, list } => {
+            deploy(&cli.network, &source, admin.as_deref(), dry_run, list);
         }
         Commands::Register { address, services, contract_id, network, secret_key, keypair_file, sep10_token, sep10_issuer } => {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
