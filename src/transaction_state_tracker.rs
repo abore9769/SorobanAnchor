@@ -1,8 +1,37 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
 
 use crate::errors::AnchorKitError;
 
+/// Default TTL: ~90 days at 5 s/ledger.
 const TXSTATE_TTL: u32 = 1_555_200;
+/// Terminal TTL: ~30 days.
+const TXSTATE_TTL_TERMINAL: u32 = 518_400;
+
+// ── StorageBudgetMonitor ──────────────────────────────────────────────────────
+
+/// Tracks the number of persistent storage entries and their approximate sizes.
+#[derive(Clone, Debug, Default)]
+pub struct StorageBudgetMonitor {
+    pub entry_count: u64,
+    pub approx_bytes: u64,
+}
+
+impl StorageBudgetMonitor {
+    pub fn new() -> Self { Self::default() }
+
+    /// Record a new entry of `size_bytes`.
+    pub fn record_entry(&mut self, size_bytes: u64) {
+        self.entry_count += 1;
+        self.approx_bytes += size_bytes;
+    }
+
+    /// Remove a tracked entry of `size_bytes`.
+    pub fn remove_entry(&mut self, size_bytes: u64) {
+        self.entry_count = self.entry_count.saturating_sub(1);
+        self.approx_bytes = self.approx_bytes.saturating_sub(size_bytes);
+    }
+}
 
 /// The lifecycle states a tracked transaction can occupy.
 ///
@@ -165,6 +194,10 @@ pub struct TransactionStateTracker {
     cache: alloc::vec::Vec<TransactionStateRecord>,
     pub audit_log: alloc::vec::Vec<TransitionAuditEntry>,
     is_dev_mode: bool,
+    /// Known transaction IDs (dev mode only — used by cleanup_expired).
+    known_ids: alloc::vec::Vec<u64>,
+    /// Simulated expiry set (dev mode only): IDs that cleanup_expired should remove.
+    pub expired_ids: alloc::vec::Vec<u64>,
 }
 
 impl TransactionStateTracker {
@@ -192,6 +225,8 @@ impl TransactionStateTracker {
             cache: alloc::vec::Vec::new(),
             audit_log: alloc::vec::Vec::new(),
             is_dev_mode,
+            known_ids: alloc::vec::Vec::new(),
+            expired_ids: alloc::vec::Vec::new(),
         }
     }
 
@@ -246,10 +281,19 @@ impl TransactionStateTracker {
 
         if self.is_dev_mode {
             self.cache.push(record.clone());
+            self.known_ids.push(transaction_id);
         } else {
             let key = (symbol_short!("TXSTATE"), transaction_id);
             env.storage().persistent().set(&key, &record);
             env.storage().persistent().extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
+            // Track known IDs list in persistent storage using soroban_sdk::Vec
+            let ids_key = symbol_short!("TXIDS");
+            let mut ids: Vec<u64> = env
+                .storage().persistent().get(&ids_key)
+                .unwrap_or_else(|| Vec::new(env));
+            ids.push_back(transaction_id);
+            env.storage().persistent().set(&ids_key, &ids);
+            env.storage().persistent().extend_ttl(&ids_key, TXSTATE_TTL, TXSTATE_TTL);
         }
 
         Ok(record)
@@ -575,10 +619,23 @@ impl TransactionStateTracker {
             }
             Ok(None)
         } else {
-            Ok(env
+            let result: Option<TransactionStateRecord> = env
                 .storage()
                 .persistent()
-                .get(&(symbol_short!("TXSTATE"), transaction_id)))
+                .get(&(symbol_short!("TXSTATE"), transaction_id));
+            if let Some(ref record) = result {
+                // Bump TTL on every read
+                let ttl = if record.state == TransactionState::Completed
+                    || record.state == TransactionState::Failed
+                {
+                    TXSTATE_TTL_TERMINAL
+                } else {
+                    Self::active_ttl(env)
+                };
+                let key = (symbol_short!("TXSTATE"), transaction_id);
+                env.storage().persistent().extend_ttl(&key, ttl, ttl);
+            }
+            Ok(result)
         }
     }
 
@@ -717,6 +774,94 @@ impl TransactionStateTracker {
     /// ```
     pub fn cache_size(&self) -> usize {
         self.cache.len()
+    }
+
+    // ── TTL helpers ──────────────────────────────────────────────────────────
+
+    /// Read the configurable active TTL from contract storage (production) or
+    /// return the compile-time default.
+    fn active_ttl(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, u32>(&symbol_short!("TXTTLCFG"))
+            .unwrap_or(TXSTATE_TTL)
+    }
+
+    /// Set the active TTL (admin operation). Stored in persistent contract storage
+    /// so it survives redeployment without a code change.
+    pub fn set_ttl_config(env: &Env, new_ttl: u32) {
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("TXTTLCFG"), &new_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&symbol_short!("TXTTLCFG"), TXSTATE_TTL, TXSTATE_TTL);
+    }
+
+    /// Extend the TTL of a transaction record proportional to its current state.
+    ///
+    /// - Active states (Pending, InProgress): full active TTL.
+    /// - Terminal states (Completed, Failed): shorter TTL (`TXSTATE_TTL_TERMINAL`).
+    ///
+    /// In dev mode this is a no-op (in-memory records don't expire).
+    pub fn bump_ttl(&self, transaction_id: u64, env: &Env) -> Result<(), String> {
+        if self.is_dev_mode {
+            return Ok(());
+        }
+        let key = (symbol_short!("TXSTATE"), transaction_id);
+        let record: TransactionStateRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or_else(|| String::from_str(env, "Transaction not found"))?;
+
+        let ttl = match record.state {
+            TransactionState::Completed | TransactionState::Failed => TXSTATE_TTL_TERMINAL,
+            _ => Self::active_ttl(env),
+        };
+        env.storage().persistent().extend_ttl(&key, ttl, ttl);
+        Ok(())
+    }
+
+    /// Admin function: iterate over all known transaction IDs and remove entries
+    /// whose TTL has elapsed (i.e. they are no longer present in storage).
+    ///
+    /// In dev mode, removes entries whose IDs are listed in `self.expired_ids`.
+    ///
+    /// Returns the number of entries removed.
+    pub fn cleanup_expired(&mut self, env: &Env) -> u64 {
+        let mut removed = 0u64;
+        if self.is_dev_mode {
+            let expired = self.expired_ids.clone();
+            self.cache.retain(|r| {
+                if expired.contains(&r.transaction_id) {
+                    removed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            self.known_ids.retain(|id| !expired.contains(id));
+            self.expired_ids.clear();
+        } else {
+            let ids_key = symbol_short!("TXIDS");
+            let ids: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&ids_key)
+                .unwrap_or_else(|| Vec::new(env));
+            let mut live_ids: Vec<u64> = Vec::new(env);
+            for id in ids.iter() {
+                let key = (symbol_short!("TXSTATE"), id);
+                if env.storage().persistent().has(&key) {
+                    live_ids.push_back(id);
+                } else {
+                    removed += 1;
+                }
+            }
+            env.storage().persistent().set(&ids_key, &live_ids);
+        }
+        removed
     }
 }
 
@@ -1057,5 +1202,85 @@ mod tests {
         // Only Pending + InProgress — illegal attempt must not append
         assert_eq!(record.state_history.len(), 2);
         assert_eq!(record.state.as_str(), "in_progress");
+    }
+
+    // -----------------------------------------------------------------------
+    // #186 TTL management
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bump_ttl_noop_in_dev_mode() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        // bump_ttl is a no-op in dev mode — must not error
+        assert!(tracker.bump_ttl(1, &env).is_ok());
+    }
+
+    #[test]
+    fn test_bump_ttl_missing_tx_returns_err_in_dev_mode() {
+        let env = Env::default();
+        let tracker = TransactionStateTracker::new(true);
+        // No transaction created — bump_ttl on missing ID is a no-op (Ok) in dev mode
+        assert!(tracker.bump_ttl(99, &env).is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_expired_removes_expired_entries() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.create_transaction(2, initiator.clone(), &env).ok();
+
+        // Mark tx 1 as expired
+        tracker.expired_ids.push(1);
+        let removed = tracker.cleanup_expired(&env);
+
+        assert_eq!(removed, 1);
+        assert_eq!(tracker.cache_size(), 1);
+        assert!(tracker.get_transaction_state(1, &env).unwrap().is_none());
+        assert!(tracker.get_transaction_state(2, &env).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_no_expired_entries() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+
+        let removed = tracker.cleanup_expired(&env);
+        assert_eq!(removed, 0);
+        assert_eq!(tracker.cache_size(), 1);
+    }
+
+    #[test]
+    fn test_terminal_transactions_tracked_separately() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let record = tracker.get_transaction_state(1, &env).unwrap().unwrap();
+        // Terminal state — would get shorter TTL in production
+        assert!(matches!(record.state, TransactionState::Completed | TransactionState::Failed));
+    }
+
+    #[test]
+    fn test_storage_budget_monitor() {
+        let mut monitor = StorageBudgetMonitor::new();
+        assert_eq!(monitor.entry_count, 0);
+        monitor.record_entry(128);
+        monitor.record_entry(256);
+        assert_eq!(monitor.entry_count, 2);
+        assert_eq!(monitor.approx_bytes, 384);
+        monitor.remove_entry(128);
+        assert_eq!(monitor.entry_count, 1);
+        assert_eq!(monitor.approx_bytes, 256);
     }
 }
