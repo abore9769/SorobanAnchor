@@ -36,6 +36,17 @@ pub struct QuoteResponse {
     pub fee: u64,
 }
 
+/// A validated SEP-38 quote response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sep38QuoteResponse {
+    pub id: alloc::string::String,
+    pub expires_at: alloc::string::String,
+    pub price: alloc::string::String,
+    pub sell_amount: alloc::string::String,
+    pub buy_amount: alloc::string::String,
+    pub fee: alloc::string::String,
+}
+
 /// A validated anchor info response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnchorInfoResponse {
@@ -220,6 +231,63 @@ pub fn validate_quote_response(
         amount,
         asset: alloc::string::String::from(asset),
         fee,
+    })
+}
+
+/// Validates a raw SEP-38 quote response, returning a typed [`Sep38QuoteResponse`]
+/// or [`Error::validation_error`] if any required field is missing or empty.
+///
+/// # Arguments
+///
+/// * `id` - Unique quote ID (must be non-empty).
+/// * `expires_at` - Expiration timestamp as string (must be non-empty).
+/// * `price` - Exchange price (must be non-empty).
+/// * `sell_amount` - Amount to sell (must be non-empty).
+/// * `buy_amount` - Amount to buy (must be non-empty).
+/// * `fee` - Fee amount (must be non-empty).
+///
+/// # Returns
+///
+/// A validated [`Sep38QuoteResponse`] on success.
+///
+/// # Errors
+///
+/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any string
+/// field is empty.
+pub fn validate_sep38_quote_response(
+    id: &str,
+    expires_at: &str,
+    price: &str,
+    sell_amount: &str,
+    buy_amount: &str,
+    fee: &str,
+) -> Result<Sep38QuoteResponse, Error> {
+    if id.is_empty() {
+        return Err(Error::validation_error("id is empty"));
+    }
+    if expires_at.is_empty() {
+        return Err(Error::validation_error("expires_at is empty"));
+    }
+    if price.is_empty() {
+        return Err(Error::validation_error("price is empty"));
+    }
+    if sell_amount.is_empty() {
+        return Err(Error::validation_error("sell_amount is empty"));
+    }
+    if buy_amount.is_empty() {
+        return Err(Error::validation_error("buy_amount is empty"));
+    }
+    if fee.is_empty() {
+        return Err(Error::validation_error("fee is empty"));
+    }
+
+    Ok(Sep38QuoteResponse {
+        id: alloc::string::String::from(id),
+        expires_at: alloc::string::String::from(expires_at),
+        price: alloc::string::String::from(price),
+        sell_amount: alloc::string::String::from(sell_amount),
+        buy_amount: alloc::string::String::from(buy_amount),
+        fee: alloc::string::String::from(fee),
     })
 }
 
@@ -497,6 +565,82 @@ mod tests {
         // amount = 0 is now rejected per #189 requirements
         let result = validate_quote_response("quote_789", "quoted", 0, "native", 0);
         assert!(result.is_err());
+    }
+
+    // --- validate_sep38_quote_response ---
+
+    #[test]
+    fn test_valid_sep38_quote_response() {
+        let result = validate_sep38_quote_response(
+            "quote_123",
+            "2023-11-01T00:00:00Z",
+            "1.05",
+            "100.00",
+            "105.00",
+            "1.00",
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.id, "quote_123");
+        assert_eq!(r.expires_at, "2023-11-01T00:00:00Z");
+        assert_eq!(r.price, "1.05");
+        assert_eq!(r.sell_amount, "100.00");
+        assert_eq!(r.buy_amount, "105.00");
+        assert_eq!(r.fee, "1.00");
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_id() {
+        let result = validate_sep38_quote_response(
+            "", "2023-11-01T00:00:00Z", "1.05", "100.00", "105.00", "1.00",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_expires_at() {
+        let result = validate_sep38_quote_response(
+            "quote_123", "", "1.05", "100.00", "105.00", "1.00",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_price() {
+        let result = validate_sep38_quote_response(
+            "quote_123", "2023-11-01T00:00:00Z", "", "100.00", "105.00", "1.00",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_sell_amount() {
+        let result = validate_sep38_quote_response(
+            "quote_123", "2023-11-01T00:00:00Z", "1.05", "", "105.00", "1.00",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_buy_amount() {
+        let result = validate_sep38_quote_response(
+            "quote_123", "2023-11-01T00:00:00Z", "1.05", "100.00", "", "1.00",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_sep38_quote_missing_fee() {
+        let result = validate_sep38_quote_response(
+            "quote_123", "2023-11-01T00:00:00Z", "1.05", "100.00", "105.00", "",
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, crate::errors::ErrorCode::ValidationError);
     }
 
     // --- validate_anchor_info_response ---
