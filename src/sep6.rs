@@ -505,6 +505,99 @@ pub fn list_transactions(
         .collect()
 }
 
+// ── Polling ───────────────────────────────────────────────────────────────────
+
+/// Configuration for [`poll_transaction_status`].
+#[derive(Clone, Debug)]
+pub struct PollConfig {
+    /// Interval between polls in milliseconds.
+    pub interval_ms: u64,
+    /// Maximum total polling duration in milliseconds before timing out.
+    pub max_duration_ms: u64,
+    /// Status values that stop polling (transaction reached a terminal state).
+    pub terminal_states: alloc::vec::Vec<TransactionStatus>,
+}
+
+impl Default for PollConfig {
+    fn default() -> Self {
+        PollConfig {
+            interval_ms: 2_000,
+            max_duration_ms: 60_000,
+            terminal_states: alloc::vec![
+                TransactionStatus::Completed,
+                TransactionStatus::Refunded,
+                TransactionStatus::Expired,
+                TransactionStatus::Error,
+                TransactionStatus::NoMarket,
+                TransactionStatus::TooSmall,
+                TransactionStatus::TooLarge,
+            ],
+        }
+    }
+}
+
+/// Result of a [`poll_transaction_status`] call.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PollResult {
+    /// Transaction reached a terminal state.
+    Completed(TransactionStatusResponse),
+    /// Maximum duration elapsed before a terminal state was reached.
+    TimedOut,
+    /// A non-transient error occurred.
+    Failed(crate::errors::Error),
+}
+
+/// Poll a transaction until it reaches a terminal state or the timeout expires.
+///
+/// `fetch_fn` is called at most once per `config.interval_ms`. Transient errors
+/// are retried via `retry_with_backoff`. `sleep_fn` is injected so callers can
+/// use real or mock sleep.
+///
+/// # Errors (via `PollResult::Failed`)
+/// Non-retryable errors returned by `fetch_fn` stop polling immediately.
+pub fn poll_transaction_status<F, S>(
+    tx_id: &str,
+    config: &PollConfig,
+    mut fetch_fn: F,
+    mut sleep_fn: S,
+) -> PollResult
+where
+    F: FnMut(&str) -> Result<TransactionStatusResponse, crate::errors::Error>,
+    S: FnMut(u64),
+{
+    use crate::retry::{retry_with_backoff, RetryConfig, MockJitterSource};
+
+    let retry_cfg = RetryConfig::new(3, 100, 1_000, 2);
+    let mut elapsed_ms: u64 = 0;
+
+    loop {
+        let mut js = MockJitterSource::new(alloc::vec![0]);
+        let result = retry_with_backoff(
+            &retry_cfg,
+            |_| fetch_fn(tx_id),
+            |e| crate::retry::is_retryable(e.code),
+            |_| {},
+            &mut js,
+        );
+
+        match result {
+            Err(e) => return PollResult::Failed(e),
+            Ok(resp) => {
+                if config.terminal_states.contains(&resp.status) {
+                    return PollResult::Completed(resp);
+                }
+            }
+        }
+
+        if elapsed_ms + config.interval_ms >= config.max_duration_ms {
+            return PollResult::TimedOut;
+        }
+
+        sleep_fn(config.interval_ms);
+        elapsed_ms += config.interval_ms;
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -689,5 +782,109 @@ mod tests {
     fn test_list_transactions_empty_input() {
         let result = list_transactions(vec![]);
         assert!(result.is_empty());
+    }
+
+    // ── Polling tests ─────────────────────────────────────────────────────────
+
+    fn make_response(status: TransactionStatus) -> TransactionStatusResponse {
+        TransactionStatusResponse {
+            transaction_id: "txn-poll".to_string(),
+            kind: TransactionKind::Deposit,
+            status,
+            amount_in: None,
+            amount_out: None,
+            amount_fee: None,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn test_poll_completes_before_timeout() {
+        let config = PollConfig {
+            interval_ms: 100,
+            max_duration_ms: 10_000,
+            terminal_states: vec![TransactionStatus::Completed],
+        };
+        let mut call_count = 0u32;
+        let result = poll_transaction_status(
+            "txn-poll",
+            &config,
+            |_| {
+                call_count += 1;
+                Ok(make_response(TransactionStatus::Completed))
+            },
+            |_| {},
+        );
+        assert_eq!(result, PollResult::Completed(make_response(TransactionStatus::Completed)));
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_poll_times_out() {
+        let config = PollConfig {
+            interval_ms: 1_000,
+            max_duration_ms: 2_000,
+            terminal_states: vec![TransactionStatus::Completed],
+        };
+        let result = poll_transaction_status(
+            "txn-poll",
+            &config,
+            |_| Ok(make_response(TransactionStatus::Pending)),
+            |_| {},
+        );
+        assert_eq!(result, PollResult::TimedOut);
+    }
+
+    #[test]
+    fn test_poll_retries_transient_error_then_succeeds() {
+        use crate::errors::{Error, ErrorCode};
+        let config = PollConfig {
+            interval_ms: 100,
+            max_duration_ms: 10_000,
+            terminal_states: vec![TransactionStatus::Completed],
+        };
+        let mut call_count = 0u32;
+        let result = poll_transaction_status(
+            "txn-poll",
+            &config,
+            |_| {
+                call_count += 1;
+                if call_count < 3 {
+                    Err(Error::from_code(ErrorCode::ServicesNotConfigured))
+                } else {
+                    Ok(make_response(TransactionStatus::Completed))
+                }
+            },
+            |_| {},
+        );
+        assert_eq!(result, PollResult::Completed(make_response(TransactionStatus::Completed)));
+        assert_eq!(call_count, 3);
+    }
+
+    #[test]
+    fn test_poll_terminal_state_detection_all_variants() {
+        let terminals = vec![
+            TransactionStatus::Completed,
+            TransactionStatus::Refunded,
+            TransactionStatus::Expired,
+            TransactionStatus::Error,
+            TransactionStatus::NoMarket,
+            TransactionStatus::TooSmall,
+            TransactionStatus::TooLarge,
+        ];
+        for status in terminals {
+            let config = PollConfig {
+                interval_ms: 100,
+                max_duration_ms: 10_000,
+                terminal_states: vec![status.clone()],
+            };
+            let result = poll_transaction_status(
+                "txn-poll",
+                &config,
+                |_| Ok(make_response(status.clone())),
+                |_| {},
+            );
+            assert!(matches!(result, PollResult::Completed(_)), "expected Completed for {:?}", status);
+        }
     }
 }

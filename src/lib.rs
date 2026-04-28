@@ -138,6 +138,7 @@ pub use sep6::{
     fetch_transaction_status, initiate_deposit, initiate_withdrawal, DepositResponse,
     RawDepositResponse, RawTransactionResponse, RawWithdrawalResponse, TransactionKind,
     TransactionStatus, TransactionStatusResponse, WithdrawalResponse,
+    poll_transaction_status, PollConfig, PollResult,
 };
 pub use sep24::{
     initiate_interactive_deposit, initiate_interactive_withdrawal, fetch_sep24_transaction_status,
