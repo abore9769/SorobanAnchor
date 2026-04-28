@@ -1,11 +1,139 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+// ── Keystore (AES-256-GCM + Argon2id) ────────────────────────────────────────
+
+mod keystore {
+    use aes_gcm::{
+        aead::{Aead, KeyInit, OsRng as AeadOsRng},
+        Aes256Gcm, Nonce,
+    };
+    use argon2::{Argon2, Params, Version};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use rand::RngCore;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+
+    /// A single encrypted credential entry.
+    #[derive(Serialize, Deserialize, Clone)]
+    pub struct EncryptedEntry {
+        /// Base64-encoded 12-byte nonce.
+        pub nonce: String,
+        /// Base64-encoded AES-256-GCM ciphertext (includes 16-byte auth tag).
+        pub ciphertext: String,
+        /// Base64-encoded 16-byte Argon2id salt used to derive the key for this entry.
+        pub salt: String,
+    }
+
+    /// The on-disk keystore format stored at `~/.anchorkit/keystore.json`.
+    #[derive(Serialize, Deserialize, Default)]
+    pub struct Keystore {
+        /// Map of credential name → encrypted entry.
+        pub credentials: HashMap<String, EncryptedEntry>,
+    }
+
+    /// Path to the keystore file.
+    pub fn keystore_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let dir = std::path::Path::new(&home).join(".anchorkit");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join("keystore.json")
+    }
+
+    /// Load the keystore from disk, returning an empty one if the file does not exist.
+    pub fn load() -> Keystore {
+        let path = keystore_path();
+        if !path.exists() {
+            return Keystore::default();
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    }
+
+    /// Persist the keystore to disk with restricted permissions (0600 on Unix).
+    pub fn save(ks: &Keystore) -> std::io::Result<()> {
+        let path = keystore_path();
+        let json = serde_json::to_string_pretty(ks)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&path, &json)?;
+        // Restrict file permissions to owner-only on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    /// Derive a 32-byte AES key from `password` and `salt` using Argon2id.
+    fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+        // Argon2id with recommended parameters: m=65536 KiB, t=3, p=4
+        let params = Params::new(65536, 3, 4, Some(32))
+            .map_err(|e| format!("argon2 params error: {e}"))?;
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
+        let mut key = [0u8; 32];
+        argon2
+            .hash_password_into(password.as_bytes(), salt, &mut key)
+            .map_err(|e| format!("argon2 hash error: {e}"))?;
+        Ok(key)
+    }
+
+    /// Encrypt `plaintext` with AES-256-GCM using a key derived from `password`.
+    /// Returns an [`EncryptedEntry`] containing the nonce, ciphertext, and salt.
+    pub fn encrypt(password: &str, plaintext: &str) -> Result<EncryptedEntry, String> {
+        // Generate a fresh 16-byte salt and 12-byte nonce
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut salt);
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
+        let key_bytes = derive_key(password, &salt)?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|e| format!("cipher init error: {e}"))?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
+            .map_err(|e| format!("encryption error: {e}"))?;
+
+        Ok(EncryptedEntry {
+            nonce: STANDARD.encode(nonce_bytes),
+            ciphertext: STANDARD.encode(ciphertext),
+            salt: STANDARD.encode(salt),
+        })
+    }
+
+    /// Decrypt an [`EncryptedEntry`] using `password`.
+    /// Returns `Err` if the password is wrong or the ciphertext is tampered.
+    pub fn decrypt(password: &str, entry: &EncryptedEntry) -> Result<String, String> {
+        let salt = STANDARD
+            .decode(&entry.salt)
+            .map_err(|e| format!("base64 salt decode error: {e}"))?;
+        let nonce_bytes = STANDARD
+            .decode(&entry.nonce)
+            .map_err(|e| format!("base64 nonce decode error: {e}"))?;
+        let ciphertext = STANDARD
+            .decode(&entry.ciphertext)
+            .map_err(|e| format!("base64 ciphertext decode error: {e}"))?;
+
+        let key_bytes = derive_key(password, &salt)?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|e| format!("cipher init error: {e}"))?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext.as_slice())
+            .map_err(|_| "wrong password or corrupted credential".to_string())?;
+
+        String::from_utf8(plaintext).map_err(|e| format!("utf8 decode error: {e}"))
+    }
+}
+
 // ── Key resolution ────────────────────────────────────────────────────────────
 
 /// Resolve the signing source from flags or environment.
-/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> String {
+/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
     if let Some(sk) = secret_key {
         return sk.to_string();
     }
@@ -25,7 +153,16 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> Strin
         }
         return raw.trim().to_string();
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, or use --keypair-file");
+    if let Some(name) = credential_name {
+        let password = rpassword::prompt_password("Keystore password: ")
+            .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+        let ks = keystore::load();
+        let entry = ks.credentials.get(name)
+            .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
+        return keystore::decrypt(&password, entry)
+            .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); });
+    }
+    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
 }
 
@@ -115,6 +252,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] sep10_token: String,
         #[arg(long)] sep10_issuer: String,
     },
@@ -126,6 +265,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] issuer: String,
         #[arg(long)] session_id: Option<u64>,
     },
@@ -141,6 +282,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
     },
     /// Fetch SEP-6 transaction status from an anchor URL
     Status {
@@ -156,12 +299,38 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
     },
     /// Check environment setup
     Doctor {
         /// Attempt to automatically fix issues
         #[arg(long)]
         fix: bool,
+    },
+    /// Manage encrypted credentials
+    Credentials {
+        #[command(subcommand)]
+        action: CredentialsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredentialsAction {
+    /// Store an encrypted credential
+    Add {
+        #[arg(long)] name: String,
+        #[arg(long)] value: Option<String>,
+    },
+    /// Retrieve a credential (prompts for keystore password)
+    Get {
+        #[arg(long)] name: String,
+    },
+    /// List stored credential names (not values)
+    List,
+    /// Delete a credential
+    Remove {
+        #[arg(long)] name: String,
     },
 }
 
@@ -697,6 +866,77 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
+// ── Credentials command ───────────────────────────────────────────────────────
+
+fn credentials_add(name: &str, value: Option<&str>) {
+    // Read value from stdin if not provided on command line (avoids shell history exposure)
+    let plaintext = if let Some(v) = value {
+        v.to_string()
+    } else {
+        rpassword::prompt_password(&format!("Value for '{}': ", name))
+            .unwrap_or_else(|e| { eprintln!("error: failed to read value: {e}"); std::process::exit(1); })
+    };
+
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+    let confirm = rpassword::prompt_password("Confirm password: ")
+        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+
+    if password != confirm {
+        eprintln!("error: passwords do not match");
+        std::process::exit(1);
+    }
+
+    let entry = keystore::encrypt(&password, &plaintext)
+        .unwrap_or_else(|e| { eprintln!("error: encryption failed: {e}"); std::process::exit(1); });
+
+    let mut ks = keystore::load();
+    ks.credentials.insert(name.to_string(), entry);
+    keystore::save(&ks)
+        .unwrap_or_else(|e| { eprintln!("error: failed to save keystore: {e}"); std::process::exit(1); });
+
+    println!("Credential '{}' stored at {}", name, keystore::keystore_path().display());
+}
+
+fn credentials_get(name: &str) {
+    let ks = keystore::load();
+    let entry = ks.credentials.get(name)
+        .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
+
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+
+    let value = keystore::decrypt(&password, entry)
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+
+    println!("{}", value);
+}
+
+fn credentials_list() {
+    let ks = keystore::load();
+    if ks.credentials.is_empty() {
+        println!("No credentials stored.");
+        return;
+    }
+    let mut names: Vec<&String> = ks.credentials.keys().collect();
+    names.sort();
+    println!("Stored credentials ({}):", names.len());
+    for name in names {
+        println!("  - {}", name);
+    }
+}
+
+fn credentials_remove(name: &str) {
+    let mut ks = keystore::load();
+    if ks.credentials.remove(name).is_none() {
+        eprintln!("error: credential '{}' not found", name);
+        std::process::exit(1);
+    }
+    keystore::save(&ks)
+        .unwrap_or_else(|e| { eprintln!("error: failed to save keystore: {e}"); std::process::exit(1); });
+    println!("Credential '{}' removed.", name);
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -705,27 +945,43 @@ fn main() {
         Commands::Deploy { source, admin, dry_run, list } => {
             deploy(&cli.network, &source, admin.as_deref(), dry_run, list);
         }
-        Commands::Register { address, services, contract_id, network, secret_key, keypair_file, sep10_token, sep10_issuer } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Register { address, services, contract_id, network, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             register(&address, &services, &contract_id, &network, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network, secret_key, keypair_file, issuer, session_id } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Attest { subject, payload_hash, contract_id, network, secret_key, keypair_file, credential_name, issuer, session_id } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             attest(&subject, &payload_hash, &contract_id, &network, &source, &issuer, session_id);
         }
-        Commands::Quote { from, to, amount, contract_id, network, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Quote { from, to, amount, contract_id, network, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             quote(&from, &to, amount, &contract_id, &network, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
-        Commands::Revoke { address, contract_id, network, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Revoke { address, contract_id, network, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             revoke(&address, &contract_id, &network, &source);
         }
         Commands::Doctor { fix } => {
             doctor(&cli.network, fix);
+        }
+        Commands::Credentials { action } => {
+            match action {
+                CredentialsAction::Add { name, value } => {
+                    credentials_add(&name, value.as_deref());
+                }
+                CredentialsAction::Get { name } => {
+                    credentials_get(&name);
+                }
+                CredentialsAction::List => {
+                    credentials_list();
+                }
+                CredentialsAction::Remove { name } => {
+                    credentials_remove(&name);
+                }
+            }
         }
     }
 }
