@@ -75,6 +75,16 @@
             box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
         }
 
+        input.invalid {
+            border-color: #e53e3e !important;
+            box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.1) !important;
+        }
+
+        input.valid {
+            border-color: #38a169 !important;
+            box-shadow: 0 0 0 3px rgba(56, 161, 105, 0.1) !important;
+        }
+
         .help-text {
             font-size: 12px;
             color: #718096;
@@ -190,45 +200,99 @@
         <h1>SDK Configuration</h1>
         <p class="subtitle">Configure your AnchorKit SDK connection settings</p>
 
-        <form id="sdkConfigForm">
+        <form id="sdkConfigForm" novalidate>
+            <!-- Contract Name -->
+            <div class="form-group">
+                <label for="contractName">Contract Name <span class="required">*</span></label>
+                <input
+                    type="text"
+                    id="contractName"
+                    name="contractName"
+                    placeholder="my-anchor-contract"
+                    required
+                    minlength="1"
+                    maxlength="64"
+                />
+                <div class="help-text">Lowercase letters, numbers, and hyphens only (1–64 chars)</div>
+                <div class="error" id="contractNameError"></div>
+            </div>
+
+            <!-- Contract Version -->
+            <div class="form-group">
+                <label for="contractVersion">Contract Version <span class="required">*</span></label>
+                <input
+                    type="text"
+                    id="contractVersion"
+                    name="contractVersion"
+                    placeholder="0.1.0"
+                    required
+                    maxlength="16"
+                />
+                <div class="help-text">Semantic version: MAJOR.MINOR.PATCH</div>
+                <div class="error" id="contractVersionError"></div>
+            </div>
+
+            <!-- Network -->
             <div class="form-group">
                 <label for="network">Network <span class="required">*</span></label>
                 <select id="network" name="network" required>
-                    <option value="testnet">Testnet</option>
-                    <option value="mainnet">Mainnet</option>
+                    <option value="">— select —</option>
+                    <option value="stellar-testnet">Stellar Testnet</option>
+                    <option value="stellar-mainnet">Stellar Mainnet</option>
+                    <option value="stellar-futurenet">Stellar Futurenet</option>
+                    <option value="stellar-public">Stellar Public</option>
                 </select>
                 <div class="help-text">Select the Stellar network to connect to</div>
+                <div class="error" id="networkError"></div>
             </div>
 
+            <!-- Admin Address -->
+            <div class="form-group">
+                <label for="adminAddress">Admin Address</label>
+                <input
+                    type="text"
+                    id="adminAddress"
+                    name="adminAddress"
+                    placeholder="GABC...XYZ"
+                    maxlength="56"
+                />
+                <div class="help-text">Stellar G-address (56 chars, starts with G)</div>
+                <div class="error" id="adminAddressError"></div>
+            </div>
+
+            <!-- Anchor Domain -->
             <div class="form-group">
                 <label for="anchorDomain">Anchor Domain <span class="required">*</span></label>
-                <input 
-                    type="text" 
-                    id="anchorDomain" 
-                    name="anchorDomain" 
-                    placeholder="example.com"
+                <input
+                    type="text"
+                    id="anchorDomain"
+                    name="anchorDomain"
+                    placeholder="anchor.example.com"
                     required
                     minlength="3"
                     maxlength="253"
                 />
-                <div class="help-text">Domain of the anchor service (3-253 characters)</div>
-                <div class="error" id="domainError">Invalid domain format</div>
+                <div class="help-text">Domain of the anchor service — HTTPS only (3–253 chars)</div>
+                <div class="error" id="domainError"></div>
             </div>
 
+            <!-- Timeout -->
             <div class="form-group">
                 <label for="timeout">Timeout (seconds) <span class="required">*</span></label>
-                <input 
-                    type="number" 
-                    id="timeout" 
-                    name="timeout" 
+                <input
+                    type="number"
+                    id="timeout"
+                    name="timeout"
                     value="30"
                     min="1"
                     max="300"
                     required
                 />
-                <div class="help-text">Request timeout in seconds (1-300)</div>
+                <div class="help-text">Request timeout in seconds (1–300)</div>
+                <div class="error" id="timeoutError"></div>
             </div>
 
+            <!-- Custom Headers -->
             <div class="form-group">
                 <label>Custom Headers</label>
                 <div class="headers-section">
@@ -248,6 +312,208 @@
     </div>
 
     <script>
+        // ── Schema-driven validation rules ────────────────────────────────────
+        // Each entry mirrors the constraints in config_schema.json so that the
+        // same rules govern both the form UI and the exported validateConfig().
+
+        const SCHEMA = {
+            contractName: {
+                required: true,
+                minLength: 1,
+                maxLength: 64,
+                pattern: /^[a-z0-9-]+$/,
+                label: 'Contract Name',
+                patternMessage: 'Only lowercase letters, numbers, and hyphens are allowed',
+            },
+            contractVersion: {
+                required: true,
+                minLength: 1,
+                maxLength: 16,
+                pattern: /^\d+\.\d+\.\d+$/,
+                label: 'Contract Version',
+                patternMessage: 'Must be a semantic version like 1.0.0',
+            },
+            network: {
+                required: true,
+                enum: ['stellar-testnet', 'stellar-mainnet', 'stellar-futurenet', 'stellar-public'],
+                label: 'Network',
+                enumMessage: 'Please select a valid network',
+            },
+            adminAddress: {
+                required: false,
+                minLength: 54,
+                maxLength: 56,
+                pattern: /^G[A-Z0-9]{53,55}$/,
+                label: 'Admin Address',
+                patternMessage: 'Must be a valid Stellar G-address (56 chars starting with G)',
+            },
+            anchorDomain: {
+                required: true,
+                minLength: 3,
+                maxLength: 253,
+                // Validates that the value is a valid hostname (no scheme).
+                // The form prepends https:// when building the config output.
+                pattern: /^[a-zA-Z0-9][a-zA-Z0-9\-_.]*[a-zA-Z0-9]$/,
+                label: 'Anchor Domain',
+                patternMessage: 'Must be a valid domain name (e.g. anchor.example.com). HTTP URLs are not accepted — HTTPS is enforced.',
+            },
+            timeout: {
+                required: true,
+                min: 1,
+                max: 300,
+                label: 'Timeout',
+            },
+        };
+
+        // ── Core validation engine ────────────────────────────────────────────
+
+        /**
+         * Validate a single field value against its schema rule.
+         * Returns null on success or an error message string on failure.
+         *
+         * @param {string} fieldName  - Key in SCHEMA
+         * @param {string|number} value
+         * @returns {string|null}
+         */
+        function validateField(fieldName, value) {
+            const rule = SCHEMA[fieldName];
+            if (!rule) return null;
+
+            const strVal = String(value).trim();
+
+            if (rule.required && strVal === '') {
+                return `${rule.label} is required`;
+            }
+
+            // Skip further checks for optional empty fields.
+            if (!rule.required && strVal === '') return null;
+
+            if (rule.minLength !== undefined && strVal.length < rule.minLength) {
+                return `${rule.label} must be at least ${rule.minLength} character(s)`;
+            }
+            if (rule.maxLength !== undefined && strVal.length > rule.maxLength) {
+                return `${rule.label} must be at most ${rule.maxLength} character(s)`;
+            }
+            if (rule.pattern && !rule.pattern.test(strVal)) {
+                return rule.patternMessage || `${rule.label} format is invalid`;
+            }
+            if (rule.enum && !rule.enum.includes(strVal)) {
+                return rule.enumMessage || `${rule.label} must be one of: ${rule.enum.join(', ')}`;
+            }
+            if (rule.min !== undefined) {
+                const num = Number(value);
+                if (isNaN(num) || num < rule.min) {
+                    return `${rule.label} must be at least ${rule.min}`;
+                }
+            }
+            if (rule.max !== undefined) {
+                const num = Number(value);
+                if (isNaN(num) || num > rule.max) {
+                    return `${rule.label} must be at most ${rule.max}`;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Validate a complete config object against the schema.
+         * Returns an array of { field, message } objects (empty = valid).
+         *
+         * @param {Object} config
+         * @returns {{ field: string, message: string }[]}
+         */
+        function validateConfig(config) {
+            const errors = [];
+            const fieldMap = {
+                contractName:    config.contract?.name,
+                contractVersion: config.contract?.version,
+                network:         config.contract?.network,
+                adminAddress:    config.contract?.admin_address,
+                anchorDomain:    config.anchor_domain,
+                timeout:         config.timeout_seconds,
+            };
+
+            for (const [field, value] of Object.entries(fieldMap)) {
+                const msg = validateField(field, value ?? '');
+                if (msg) errors.push({ field, message: msg });
+            }
+
+            return errors;
+        }
+
+        // ── DOM helpers ───────────────────────────────────────────────────────
+
+        function showError(errorElementId, message) {
+            const el = document.getElementById(errorElementId);
+            if (!el) return;
+            el.textContent = message;
+            el.classList.add('show');
+        }
+
+        function clearError(errorElementId) {
+            const el = document.getElementById(errorElementId);
+            if (!el) return;
+            el.textContent = '';
+            el.classList.remove('show');
+        }
+
+        function markInput(inputEl, isValid) {
+            if (isValid) {
+                inputEl.classList.remove('invalid');
+                inputEl.classList.add('valid');
+            } else {
+                inputEl.classList.remove('valid');
+                inputEl.classList.add('invalid');
+            }
+        }
+
+        /**
+         * Attach real-time (input + blur) validation to a form field.
+         *
+         * @param {string} inputId       - id of the <input> or <select>
+         * @param {string} schemaKey     - key in SCHEMA
+         * @param {string} errorId       - id of the error <div>
+         * @param {Function} [getValue]  - optional custom value extractor
+         */
+        function attachValidation(inputId, schemaKey, errorId, getValue) {
+            const el = document.getElementById(inputId);
+            if (!el) return;
+
+            function run() {
+                const val = getValue ? getValue() : el.value;
+                const msg = validateField(schemaKey, val);
+                if (msg) {
+                    showError(errorId, msg);
+                    markInput(el, false);
+                } else {
+                    clearError(errorId);
+                    // Only mark valid when the field has a value (avoid green on empty optional).
+                    const rule = SCHEMA[schemaKey];
+                    if (rule && (rule.required || String(val).trim() !== '')) {
+                        markInput(el, true);
+                    } else {
+                        el.classList.remove('valid', 'invalid');
+                    }
+                }
+            }
+
+            el.addEventListener('input', run);
+            el.addEventListener('blur', run);
+            el.addEventListener('change', run);  // for <select>
+        }
+
+        // ── Wire up real-time validation ──────────────────────────────────────
+
+        attachValidation('contractName',    'contractName',    'contractNameError');
+        attachValidation('contractVersion', 'contractVersion', 'contractVersionError');
+        attachValidation('network',         'network',         'networkError');
+        attachValidation('adminAddress',    'adminAddress',    'adminAddressError');
+        attachValidation('anchorDomain',    'anchorDomain',    'domainError');
+        attachValidation('timeout',         'timeout',         'timeoutError');
+
+        // ── Header management ─────────────────────────────────────────────────
+
         let headerCount = 0;
 
         function addHeader() {
@@ -260,102 +526,106 @@
             const headerItem = document.createElement('div');
             headerItem.className = 'header-item';
             headerItem.id = `header-${headerCount}`;
-            
+
             headerItem.innerHTML = `
-                <input 
-                    type="text" 
-                    name="headerKey[]" 
+                <input
+                    type="text"
+                    name="headerKey[]"
                     placeholder="Header name"
                     maxlength="64"
+                    aria-label="Header name"
                 />
-                <input 
-                    type="text" 
-                    name="headerValue[]" 
+                <input
+                    type="text"
+                    name="headerValue[]"
                     placeholder="Header value"
                     maxlength="1024"
+                    aria-label="Header value"
                 />
                 <button type="button" class="btn btn-remove" onclick="removeHeader(${headerCount})">Remove</button>
             `;
-            
+
             container.appendChild(headerItem);
             headerCount++;
         }
 
         function removeHeader(id) {
             const element = document.getElementById(`header-${id}`);
-            if (element) {
-                element.remove();
-            }
+            if (element) element.remove();
         }
 
-        function validateDomain(domain) {
-            // Basic domain validation
-            const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-_.]*[a-zA-Z0-9]$/;
-            return domainRegex.test(domain) && domain.length >= 3 && domain.length <= 253;
-        }
+        // ── Form submission ───────────────────────────────────────────────────
 
-        document.getElementById('anchorDomain').addEventListener('blur', function() {
-            const domain = this.value;
-            const errorElement = document.getElementById('domainError');
-            
-            if (domain && !validateDomain(domain)) {
-                errorElement.classList.add('show');
-                this.style.borderColor = '#e53e3e';
-            } else {
-                errorElement.classList.remove('show');
-                this.style.borderColor = '#cbd5e0';
-            }
-        });
-
-        document.getElementById('sdkConfigForm').addEventListener('submit', function(e) {
+        document.getElementById('sdkConfigForm').addEventListener('submit', function (e) {
             e.preventDefault();
 
-            const network = document.getElementById('network').value;
-            const anchorDomain = document.getElementById('anchorDomain').value;
-            const timeout = parseInt(document.getElementById('timeout').value);
+            // Collect raw values.
+            const contractName    = document.getElementById('contractName').value.trim();
+            const contractVersion = document.getElementById('contractVersion').value.trim();
+            const network         = document.getElementById('network').value;
+            const adminAddress    = document.getElementById('adminAddress').value.trim();
+            const anchorDomain    = document.getElementById('anchorDomain').value.trim();
+            const timeout         = parseInt(document.getElementById('timeout').value, 10);
 
-            // Validate domain
-            if (!validateDomain(anchorDomain)) {
-                document.getElementById('domainError').classList.add('show');
+            // Build a config object that mirrors config_schema.json.
+            const config = {
+                contract: {
+                    name:    contractName,
+                    version: contractVersion,
+                    network: network,
+                    ...(adminAddress ? { admin_address: adminAddress } : {}),
+                },
+                anchor_domain:   anchorDomain,
+                anchor_url:      `https://${anchorDomain}`,
+                timeout_seconds: timeout,
+                custom_headers:  [],
+            };
+
+            // Collect headers.
+            const headerKeys   = document.getElementsByName('headerKey[]');
+            const headerValues = document.getElementsByName('headerValue[]');
+            for (let i = 0; i < headerKeys.length; i++) {
+                const key = headerKeys[i].value.trim();
+                const val = headerValues[i].value.trim();
+                if (key) config.custom_headers.push({ key, value: val });
+            }
+
+            // Run full schema validation.
+            const errors = validateConfig(config);
+            if (errors.length > 0) {
+                // Surface each error in its corresponding error div.
+                const errorIdMap = {
+                    contractName:    'contractNameError',
+                    contractVersion: 'contractVersionError',
+                    network:         'networkError',
+                    adminAddress:    'adminAddressError',
+                    anchorDomain:    'domainError',
+                    timeout:         'timeoutError',
+                };
+                errors.forEach(({ field, message }) => {
+                    const errId = errorIdMap[field];
+                    if (errId) showError(errId, message);
+                    const inputEl = document.getElementById(field === 'anchorDomain' ? 'anchorDomain' : field);
+                    if (inputEl) markInput(inputEl, false);
+                });
+                // Scroll to the first error.
+                const firstErrId = errorIdMap[errors[0].field];
+                if (firstErrId) {
+                    document.getElementById(firstErrId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
                 return;
             }
 
-            // Collect headers
-            const headerKeys = document.getElementsByName('headerKey[]');
-            const headerValues = document.getElementsByName('headerValue[]');
-            const headers = [];
-
-            for (let i = 0; i < headerKeys.length; i++) {
-                const key = headerKeys[i].value.trim();
-                const value = headerValues[i].value.trim();
-                
-                if (key) {
-                    headers.push({
-                        key: key,
-                        value: value
-                    });
-                }
-            }
-
-            // Create config object
-            const config = {
-                network: network === 'testnet' ? 'Testnet' : 'Mainnet',
-                anchor_domain: anchorDomain,
-                timeout_seconds: timeout,
-                custom_headers: headers
-            };
-
-            // Display output
-            const outputElement = document.getElementById('configOutput');
-            outputElement.textContent = JSON.stringify(config, null, 2);
-            document.getElementById('output').classList.add('show');
-
-            // Scroll to output
-            document.getElementById('output').scrollIntoView({ behavior: 'smooth' });
+            // Display output.
+            document.getElementById('configOutput').textContent = JSON.stringify(config, null, 2);
+            const outputEl = document.getElementById('output');
+            outputEl.classList.add('show');
+            outputEl.scrollIntoView({ behavior: 'smooth' });
         });
 
-        // Add one header by default
+        // Add one header by default.
         addHeader();
     </script>
 </body>
 </html>
+
