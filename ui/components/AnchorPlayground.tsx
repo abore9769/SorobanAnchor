@@ -4,8 +4,9 @@ import { AnchorPlaygroundHeader } from "./AnchorPlaygroundHeader";
 import { AnchorPlaygroundOperationSelector } from "./AnchorPlaygroundOperationSelector";
 import { AnchorPlaygroundRequestBuilder } from "./AnchorPlaygroundRequestBuilder";
 import { AnchorPlaygroundResponseViewer } from "./AnchorPlaygroundResponseViewer";
+import { AnchorErrorBoundary } from "./AnchorErrorBoundary";
 
-export default function AnchorPlayground() {
+function AnchorPlaygroundInner() {
   const [dark, setDark] = useState(true);
   const pg = useAnchorPlayground();
 
@@ -56,5 +57,13 @@ export default function AnchorPlayground() {
         />
       </div>
     </div>
+  );
+}
+
+export default function AnchorPlayground() {
+  return (
+    <AnchorErrorBoundary componentLabel="Anchor Playground">
+      <AnchorPlaygroundInner />
+    </AnchorErrorBoundary>
   );
 }

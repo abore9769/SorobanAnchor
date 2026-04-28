@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { AnchorErrorBoundary } from "./AnchorErrorBoundary";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -545,6 +546,14 @@ const DEMO_SCENARIOS: Array<{
 ];
 
 export default function TransactionTimelineDemo() {
+  return (
+    <AnchorErrorBoundary componentLabel="Transaction Timeline">
+      <TransactionTimelineDemoInner />
+    </AnchorErrorBoundary>
+  );
+}
+
+function TransactionTimelineDemoInner() {
   const [activeScenario, setActiveScenario] = useState(0);
   const [simulatedStatus, setSimulatedStatus] = useState<TxStatus | null>(null);
   const [simEvents, setSimEvents] = useState<TxEvent[]>([]);

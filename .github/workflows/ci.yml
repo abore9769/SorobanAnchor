@@ -36,6 +36,9 @@ jobs:
       - name: cargo check (native)
         run: cargo check
 
+      - name: no_std compliance check (WASM)
+        run: cargo check --target ${{ env.WASM_TARGET }} --no-default-features --features wasm
+
       - name: cargo test
         run: cargo test
 

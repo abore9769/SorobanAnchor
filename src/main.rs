@@ -1,7 +1,72 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-// ── Key resolution ────────────────────────────────────────────────────────────
+// ── Network profile management ────────────────────────────────────────────────
+
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
+struct NetworkProfile {
+    name: String,
+    rpc_url: String,
+    network_passphrase: String,
+    horizon_url: Option<String>,
+    #[serde(default)]
+    is_default: bool,
+}
+
+fn networks_path() -> std::path::PathBuf {
+    let dir = dirs_home().join(".anchorkit");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("networks.json")
+}
+
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn load_network_profiles() -> Vec<NetworkProfile> {
+    let path = networks_path();
+    if !path.exists() { return Vec::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_network_profiles(profiles: &[NetworkProfile]) {
+    let path = networks_path();
+    let json = serde_json::to_string_pretty(profiles).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+fn find_profile<'a>(profiles: &'a [NetworkProfile], name: &str) -> Option<&'a NetworkProfile> {
+    profiles.iter().find(|p| p.name == name)
+}
+
+fn rpc_url_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.rpc_url.clone();
+    }
+    rpc_url(network).to_string()
+}
+
+fn passphrase_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.network_passphrase.clone();
+    }
+    passphrase(network).to_string()
+}
+
+fn default_network() -> String {
+    let profiles = load_network_profiles();
+    profiles.iter()
+        .find(|p| p.is_default)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "testnet".to_string())
+}
+
+
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file
@@ -53,12 +118,14 @@ fn stellar_invoke(
     network: &str,
     fn_args: &[&str],
 ) -> String {
+    let url = rpc_url_for(network);
+    let phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &url,
+               "--network-passphrase", &phrase,
                "--"])
         .args(fn_args)
         .output()
@@ -81,9 +148,9 @@ struct Cli {
     #[arg(long, global = true, env = "ANCHOR_CONTRACT_ID")]
     contract_id: Option<String>,
 
-    /// Stellar network: testnet | mainnet | futurenet (or set STELLAR_NETWORK)
-    #[arg(long, global = true, env = "STELLAR_NETWORK", default_value = "testnet")]
-    network: String,
+    /// Stellar network: testnet | mainnet | futurenet | <custom> (or set STELLAR_NETWORK)
+    #[arg(long, global = true, env = "STELLAR_NETWORK")]
+    network: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -162,6 +229,32 @@ enum Commands {
         /// Attempt to automatically fix issues
         #[arg(long)]
         fix: bool,
+    },
+    /// Manage custom network profiles
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkAction {
+    /// Add a custom network profile
+    Add {
+        #[arg(long)] name: String,
+        #[arg(long)] rpc_url: String,
+        #[arg(long)] passphrase: String,
+        #[arg(long)] horizon_url: Option<String>,
+    },
+    /// List all configured network profiles
+    List,
+    /// Remove a custom network profile
+    Remove {
+        #[arg(long)] name: String,
+    },
+    /// Set the default network
+    SetDefault {
+        #[arg(long)] name: String,
     },
 }
 
@@ -292,11 +385,13 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
 
     let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
     println!("Deploying {wasm} to {network}...");
+    let net_url = rpc_url_for(network);
+    let net_phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "deploy", "--wasm", wasm,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network)])
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase])
         .output()
         .expect("failed to run stellar contract deploy — is the Stellar CLI installed?");
 
@@ -326,8 +421,8 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
         .args(["contract", "invoke",
                "--id", &contract_id,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase,
                "--", "initialize",
                "--admin", admin_addr])
         .output();
@@ -571,18 +666,8 @@ fn check_admin_secret_env() -> CheckResult {
 }
 
 fn check_network_connectivity(network: &str) -> CheckResult {
-    let url = rpc_url(network);
-    match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .and_then(|client| client.get(url).send())
-    {
-        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
-            CheckResult::pass(format!("Network connectivity to {} OK", network))
-        }
-        Ok(resp) => CheckResult::warn(format!("Network {} responded with HTTP {}", network, resp.status())),
-        Err(e) => CheckResult::fail(format!("Cannot connect to {} network: {}", network, e)),
-    }
+    let url = rpc_url_for(network);
+    check_network_connectivity_url(&url)
 }
 
 fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
@@ -592,8 +677,8 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
         .args(["contract", "invoke",
                "--id", contract_id,
                "--source", &source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &rpc_url_for(network),
+               "--network-passphrase", &passphrase_for(network),
                "--",
                "get_attestor_count"])
         .output();
@@ -697,35 +782,129 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
+// ── Network command ───────────────────────────────────────────────────────────
+
+fn network_cmd(action: NetworkAction) {
+    match action {
+        NetworkAction::Add { name, rpc_url, passphrase, horizon_url } => {
+            // Validate RPC URL connectivity before saving
+            let check = check_network_connectivity_url(&rpc_url);
+            if !check.passed {
+                eprintln!("error: RPC URL validation failed: {}", check.message);
+                std::process::exit(1);
+            }
+            let mut profiles = load_network_profiles();
+            if find_profile(&profiles, &name).is_some() {
+                eprintln!("error: network '{}' already exists. Remove it first.", name);
+                std::process::exit(1);
+            }
+            profiles.push(NetworkProfile {
+                name: name.clone(),
+                rpc_url,
+                network_passphrase: passphrase,
+                horizon_url,
+                is_default: false,
+            });
+            save_network_profiles(&profiles);
+            println!("Network '{}' added.", name);
+        }
+        NetworkAction::List => {
+            let profiles = load_network_profiles();
+            // Always show built-ins
+            let builtins = [
+                ("testnet",   "https://soroban-testnet.stellar.org",  "Test SDF Network ; September 2015"),
+                ("mainnet",   "https://horizon.stellar.org",           "Public Global Stellar Network ; September 2015"),
+                ("futurenet", "https://rpc-futurenet.stellar.org",     "Test SDF Future Network ; October 2022"),
+            ];
+            println!("{:<16} {:<45} {}", "NAME", "RPC URL", "PASSPHRASE");
+            for (name, url, phrase) in &builtins {
+                println!("{:<16} {:<45} {} (built-in)", name, url, phrase);
+            }
+            for p in &profiles {
+                let default_marker = if p.is_default { " (default)" } else { "" };
+                println!("{:<16} {:<45} {}{}", p.name, p.rpc_url, p.network_passphrase, default_marker);
+            }
+        }
+        NetworkAction::Remove { name } => {
+            let mut profiles = load_network_profiles();
+            let before = profiles.len();
+            profiles.retain(|p| p.name != name);
+            if profiles.len() == before {
+                eprintln!("error: network '{}' not found.", name);
+                std::process::exit(1);
+            }
+            save_network_profiles(&profiles);
+            println!("Network '{}' removed.", name);
+        }
+        NetworkAction::SetDefault { name } => {
+            let mut profiles = load_network_profiles();
+            // Allow setting built-in names as default (stored as a marker profile)
+            let found = profiles.iter().any(|p| p.name == name);
+            if !found {
+                // Check if it's a built-in
+                let builtins = ["testnet", "mainnet", "futurenet"];
+                if !builtins.contains(&name.as_str()) {
+                    eprintln!("error: network '{}' not found.", name);
+                    std::process::exit(1);
+                }
+            }
+            for p in &mut profiles {
+                p.is_default = p.name == name;
+            }
+            save_network_profiles(&profiles);
+            println!("Default network set to '{}'.", name);
+        }
+    }
+}
+
+fn check_network_connectivity_url(url: &str) -> CheckResult {
+    match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .and_then(|client| client.get(url).send())
+    {
+        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+            CheckResult::pass(format!("RPC URL {} reachable", url))
+        }
+        Ok(resp) => CheckResult::warn(format!("RPC URL {} responded with HTTP {}", url, resp.status())),
+        Err(e) => CheckResult::fail(format!("Cannot connect to {}: {}", url, e)),
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
+    let network = cli.network.unwrap_or_else(default_network);
     match cli.command {
         Commands::Deploy { source, admin, dry_run, list } => {
-            deploy(&cli.network, &source, admin.as_deref(), dry_run, list);
+            deploy(&network, &source, admin.as_deref(), dry_run, list);
         }
-        Commands::Register { address, services, contract_id, network, secret_key, keypair_file, sep10_token, sep10_issuer } => {
+        Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, sep10_token, sep10_issuer } => {
+            let net = cmd_net;
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            register(&address, &services, &contract_id, &network, &source, &sep10_token, &sep10_issuer);
+            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network, secret_key, keypair_file, issuer, session_id } => {
+        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, issuer, session_id } => {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            attest(&subject, &payload_hash, &contract_id, &network, &source, &issuer, session_id);
+            attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
         }
-        Commands::Quote { from, to, amount, contract_id, network, secret_key, keypair_file } => {
+        Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file } => {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            quote(&from, &to, amount, &contract_id, &network, &source);
+            quote(&from, &to, amount, &contract_id, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
-        Commands::Revoke { address, contract_id, network, secret_key, keypair_file } => {
+        Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file } => {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            revoke(&address, &contract_id, &network, &source);
+            revoke(&address, &contract_id, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
-            doctor(&cli.network, fix);
+            doctor(&network, fix);
+        }
+        Commands::Network { action } => {
+            network_cmd(action);
         }
     }
 }
