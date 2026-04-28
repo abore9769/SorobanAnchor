@@ -414,6 +414,7 @@ struct TxStateChangedEvent {
 
 // ---------------------------------------------------------------------------
 // Contract upgrade types (#200)
+// Provides admin-controlled WASM upgrade with version tracking and audit events.
 // ---------------------------------------------------------------------------
 
 /// Semantic version stored in persistent contract storage after each upgrade.
