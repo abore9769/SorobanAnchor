@@ -151,6 +151,18 @@ pub use transaction_state_tracker::StorageBudgetMonitor;
 pub mod streaming_monitor;
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
+// ── Issue #304: contract-backed product verification read model ──────────────
+pub mod product_read_model;
+
+// ── Issue #305: secure file upload hardening ────────────────────────────────
+pub mod upload_guard;
+
+// ── Issue #306: ratings anti-spam / replay-proof protocol ───────────────────
+pub mod ratings_protocol;
+
+// ── Issue #307: API versioning policy ───────────────────────────────────────
+pub mod api_versioning;
+
 #[cfg(test)]
 mod request_id_tests;
 
