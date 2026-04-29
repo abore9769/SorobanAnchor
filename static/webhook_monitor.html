@@ -408,6 +408,209 @@
             font-size: 14px;
             color: #a0aec0;
         }
+
+        /* Export buttons */
+        .export-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-export {
+            padding: 8px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            background: white;
+            color: #4a5568;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-export:hover {
+            background: #edf2f7;
+            border-color: #a0aec0;
+        }
+
+        /* Search box */
+        .search-box {
+            padding: 8px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 200px;
+        }
+
+        .search-box:focus {
+            outline: none;
+            border-color: #4299e1;
+            box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
+        }
+
+        /* Date range picker */
+        .date-range {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .date-range input {
+            padding: 6px 10px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .date-range input:focus {
+            outline: none;
+            border-color: #4299e1;
+        }
+
+        /* Status filter */
+        .status-filter {
+            padding: 6px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+        }
+
+        /* Real-time counter */
+        .live-counter {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: #c6f6d5;
+            border-radius: 6px;
+            color: #22543d;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .live-counter .dot {
+            width: 8px;
+            height: 8px;
+            background: #38a169;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* Filter panel */
+        .filter-panel {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            padding: 16px 24px;
+            margin-bottom: 20px;
+        }
+
+        .filter-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .filter-panel-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a202c;
+        }
+
+        .filter-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .filter-group label {
+            font-size: 13px;
+            color: #4a5568;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .filter-group select,
+        .filter-group input {
+            padding: 6px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+        }
+
+        .filter-group select:focus,
+        .filter-group input:focus {
+            outline: none;
+            border-color: #4299e1;
+            box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
+        }
+
+        .filter-actions {
+            display: flex;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        .btn-clear-filters {
+            padding: 6px 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+            background: white;
+            color: #4a5568;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-clear-filters:hover {
+            background: #edf2f7;
+        }
+
+        /* Event status badges */
+        .event-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .event-status.success {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .event-status.failed {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        .event-status.pending {
+            background: #feebc8;
+            color: #7c2d12;
+        }
     </style>
 </head>
 <body>
@@ -427,19 +630,67 @@
             </div>
         </div>
 
-        <div class="filters">
-            <div class="filter-group">
-                <label for="eventTypeFilter">Event Type:</label>
-                <select id="eventTypeFilter" onchange="filterEvents()">
-                    <option value="all">All Events</option>
-                    <option value="deposit">Deposits</option>
-                    <option value="withdrawal">Withdrawals</option>
-                    <option value="kyc">KYC Updates</option>
-                    <option value="quote">Quotes</option>
-                    <option value="transfer">Transfers</option>
-                    <option value="session">Sessions</option>
-                    <option value="attestation">Attestations</option>
-                </select>
+        <div class="filter-panel">
+            <div class="filter-panel-header">
+                <span class="filter-panel-title">🔍 Filter Events</span>
+                <div class="live-counter" id="liveCounter" style="display: none;">
+                    <span class="dot"></span>
+                    <span id="filteredCount">0</span> events
+                </div>
+            </div>
+            <div class="filter-row">
+                <div class="filter-group">
+                    <label for="eventTypeFilter">Event Type:</label>
+                    <select id="eventTypeFilter" onchange="applyFilters()">
+                        <option value="all">All Events</option>
+                        <option value="deposit">Deposits</option>
+                        <option value="withdrawal">Withdrawals</option>
+                        <option value="kyc">KYC Updates</option>
+                        <option value="attestation">Attestations</option>
+                        <option value="quote">Quotes</option>
+                        <option value="transfer">Transfers</option>
+                        <option value="session">Sessions</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="anchorFilter">Anchor:</label>
+                    <select id="anchorFilter" onchange="applyFilters()">
+                        <option value="all">All Anchors</option>
+                        <option value="example-anchor">Example Anchor</option>
+                        <option value="stablecoin">Stablecoin Issuer</option>
+                        <option value="fiat-ramp">Fiat On/Off Ramp</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="statusFilter">Status:</label>
+                    <select id="statusFilter" onchange="applyFilters()">
+                        <option value="all">All Statuses</option>
+                        <option value="success">Success</option>
+                        <option value="failed">Failed</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Date Range:</label>
+                    <div class="date-range">
+                        <input type="date" id="dateFrom" onchange="applyFilters()" title="From date">
+                        <span>to</span>
+                        <input type="date" id="dateTo" onchange="applyFilters()" title="To date">
+                    </div>
+                </div>
+                <div class="filter-group">
+                    <label for="searchBox">Search:</label>
+                    <input type="text" id="searchBox" class="search-box" placeholder="Transaction ID or Request ID" oninput="applyFilters()">
+                </div>
+                <div class="filter-actions">
+                    <button class="btn-export" onclick="exportJSON()">
+                        <span>📥</span> JSON
+                    </button>
+                    <button class="btn-export" onclick="exportCSV()">
+                        <span>📊</span> CSV
+                    </button>
+                    <button class="btn-clear-filters" onclick="clearFilters()">Clear Filters</button>
+                </div>
             </div>
         </div>
 
@@ -479,18 +730,48 @@
         let eventCounter = 0;
         let recentEvents = [];
 
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadFiltersFromURL();
+            // Simulate loading some initial events
+            simulateInitialEvents();
+        });
+
+        // Simulate initial events for demo
+        function simulateInitialEvents() {
+            const sampleEvents = [
+                { type: 'deposit', data: { amount: 1000, asset: 'USDC', user: 'GABC123XYZ', anchor: 'example-anchor', status: 'success', transaction_id: 'tx_001' } },
+                { type: 'withdrawal', data: { amount: 500, asset: 'USDC', user: 'GDEF456ABC', anchor: 'stablecoin', status: 'success', transaction_id: 'tx_002' } },
+                { type: 'kyc', data: { user: 'GHIJ789DEF', status: 'approved', level: 2, anchor: 'fiat-ramp', request_id: 'req_001', status: 'success' } },
+                { type: 'quote', data: { pair: 'USDC/USD', rate: 1.0, quote_id: 42, anchor: 'example-anchor', status: 'pending' } },
+                { type: 'attestation', data: { attestation_id: 456, subject: 'GDEFABC', issuer: 'GHIJDEF', anchor: 'stablecoin', status: 'success' } }
+            ];
+
+            sampleEvents.forEach((eventData, index) => {
+                setTimeout(() => {
+                    const event = {
+                        id: ++eventCounter,
+                        type: eventData.type,
+                        timestamp: new Date(Date.now() - (sampleEvents.length - index) * 60000).toISOString(),
+                        payload: eventData.data
+                    };
+                    addEvent(event);
+                }, index * 200);
+            });
+        }
+
         // Simulate webhook events for demo (replace with actual WebSocket/SSE in production)
         function simulateWebhookEvent() {
             if (!isMonitoring) return;
 
             const eventTypes = [
-                { type: 'deposit', data: { amount: 1000, asset: 'USDC', user: 'GABC...XYZ' } },
-                { type: 'withdrawal', data: { amount: 500, asset: 'USDC', user: 'GDEF...ABC', destination: '0x123...789' } },
-                { type: 'kyc', data: { user: 'GHIJ...DEF', status: 'approved', level: 2 } },
-                { type: 'quote', data: { pair: 'USDC/USD', rate: 1.0, quote_id: 42 } },
-                { type: 'transfer', data: { transfer_id: 123, from: 'GABC...XYZ', to: 'GDEF...ABC', amount: 250 } },
-                { type: 'session', data: { session_id: 789, initiator: 'GABC...XYZ' } },
-                { type: 'attestation', data: { attestation_id: 456, subject: 'GDEF...ABC', issuer: 'GHIJ...DEF' } }
+                { type: 'deposit', data: { amount: 1000, asset: 'USDC', user: 'GABC...XYZ', anchor: 'example-anchor', status: 'success', transaction_id: 'tx_' + Date.now() } },
+                { type: 'withdrawal', data: { amount: 500, asset: 'USDC', user: 'GDEF...ABC', anchor: 'stablecoin', status: 'success', destination: '0x123...789', transaction_id: 'tx_' + Date.now() } },
+                { type: 'kyc', data: { user: 'GHIJ...DEF', status: 'approved', level: 2, anchor: 'fiat-ramp', request_id: 'req_' + Date.now(), status: 'success' } },
+                { type: 'quote', data: { pair: 'USDC/USD', rate: 1.0, quote_id: Math.floor(Math.random() * 100), anchor: 'example-anchor', status: 'pending' } },
+                { type: 'transfer', data: { transfer_id: 123, from: 'GABC...XYZ', to: 'GDEF...ABC', amount: 250, anchor: 'stablecoin', status: 'success' } },
+                { type: 'session', data: { session_id: 789, initiator: 'GABC...XYZ', anchor: 'example-anchor', status: 'success' } },
+                { type: 'attestation', data: { attestation_id: 456, subject: 'GDEF...ABC', issuer: 'GHIJ...DEF', anchor: 'fiat-ramp', status: 'success' } }
             ];
 
             const randomEvent = eventTypes[Math.floor(Math.random() * eventTypes.length)];
@@ -520,22 +801,82 @@
 
             updateStats();
             renderEvents();
+            updateURL();
+        }
+
+        function getFilteredEvents() {
+            const eventType = document.getElementById('eventTypeFilter').value;
+            const anchor = document.getElementById('anchorFilter').value;
+            const status = document.getElementById('statusFilter').value;
+            const dateFrom = document.getElementById('dateFrom').value;
+            const dateTo = document.getElementById('dateTo').value;
+            const search = document.getElementById('searchBox').value.toLowerCase();
+
+            return events.filter(event => {
+                // Event type filter
+                if (eventType !== 'all' && event.type !== eventType) {
+                    return false;
+                }
+
+                // Anchor filter
+                if (anchor !== 'all' && event.payload.anchor !== anchor) {
+                    return false;
+                }
+
+                // Status filter
+                if (status !== 'all' && event.payload.status !== status) {
+                    return false;
+                }
+
+                // Date range filter
+                if (dateFrom) {
+                    const eventDate = new Date(event.timestamp).toISOString().split('T')[0];
+                    if (eventDate < dateFrom) {
+                        return false;
+                    }
+                }
+                if (dateTo) {
+                    const eventDate = new Date(event.timestamp).toISOString().split('T')[0];
+                    if (eventDate > dateTo) {
+                        return false;
+                    }
+                }
+
+                // Search filter (transaction ID or request ID)
+                if (search) {
+                    const transactionId = event.payload.transaction_id || '';
+                    const requestId = event.payload.request_id || '';
+                    const user = event.payload.user || '';
+                    
+                    if (!transactionId.toLowerCase().includes(search) &&
+                        !requestId.toLowerCase().includes(search) &&
+                        !user.toLowerCase().includes(search)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
         }
 
         function renderEvents() {
             const eventsList = document.getElementById('eventsList');
-            const filter = document.getElementById('eventTypeFilter').value;
+            const filteredEvents = getFilteredEvents();
             
-            const filteredEvents = filter === 'all' 
-                ? events 
-                : events.filter(e => e.type === filter);
+            // Update live counter
+            const liveCounter = document.getElementById('liveCounter');
+            const filteredCount = document.getElementById('filteredCount');
+            if (events.length > 0) {
+                liveCounter.style.display = 'flex';
+                filteredCount.textContent = filteredEvents.length;
+            }
 
             if (filteredEvents.length === 0) {
                 eventsList.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">📡</div>
                         <div class="empty-state-text">No events to display</div>
-                        <div class="empty-state-subtext">${filter === 'all' ? 'Waiting for webhook events...' : 'No ' + filter + ' events yet'}</div>
+                        <div class="empty-state-subtext">Try adjusting your filters</div>
                     </div>
                 `;
                 return;
@@ -549,6 +890,7 @@
                                 <span class="event-icon"></span>
                                 ${formatEventType(event.type)}
                             </span>
+                            ${event.payload.status ? `<span class="event-status ${event.payload.status}">${event.payload.status}</span>` : ''}
                             <div class="event-id">Event #${event.id}</div>
                         </div>
                         <div class="event-time">${formatTime(event.timestamp)}</div>
@@ -573,6 +915,21 @@
 
         function renderEventDetails(event) {
             const details = [];
+            
+            // Add anchor if present
+            if (event.payload.anchor) {
+                details.push(['Anchor', event.payload.anchor]);
+            }
+            
+            // Add transaction ID if present
+            if (event.payload.transaction_id) {
+                details.push(['Transaction ID', event.payload.transaction_id]);
+            }
+            
+            // Add request ID if present
+            if (event.payload.request_id) {
+                details.push(['Request ID', event.payload.request_id]);
+            }
             
             switch(event.type) {
                 case 'deposit':
@@ -681,11 +1038,131 @@
                 recentEvents = [];
                 updateStats();
                 renderEvents();
+                updateURL();
             }
         }
 
-        function filterEvents() {
+        function applyFilters() {
             renderEvents();
+            updateURL();
+        }
+
+        function clearFilters() {
+            document.getElementById('eventTypeFilter').value = 'all';
+            document.getElementById('anchorFilter').value = 'all';
+            document.getElementById('statusFilter').value = 'all';
+            document.getElementById('dateFrom').value = '';
+            document.getElementById('dateTo').value = '';
+            document.getElementById('searchBox').value = '';
+            applyFilters();
+        }
+
+        // Export to JSON
+        function exportJSON() {
+            const filteredEvents = getFilteredEvents();
+            const exportData = filteredEvents.map(event => ({
+                id: event.id,
+                type: event.type,
+                timestamp: event.timestamp,
+                anchor: event.payload.anchor || null,
+                status: event.payload.status || null,
+                transaction_id: event.payload.transaction_id || null,
+                request_id: event.payload.request_id || null,
+                payload: event.payload
+            }));
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `webhook-events-${new Date().toISOString().split('T')[0]}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Export to CSV
+        function exportCSV() {
+            const filteredEvents = getFilteredEvents();
+            
+            // Flatten event data for CSV
+            const csvRows = [];
+            
+            // Header row
+            csvRows.push(['ID', 'Type', 'Timestamp', 'Anchor', 'Status', 'Transaction ID', 'Request ID', 'Details'].join(','));
+            
+            // Data rows
+            filteredEvents.forEach(event => {
+                const row = [
+                    event.id,
+                    event.type,
+                    event.timestamp,
+                    event.payload.anchor || '',
+                    event.payload.status || '',
+                    event.payload.transaction_id || '',
+                    event.payload.request_id || '',
+                    JSON.stringify(event.payload).replace(/"/g, '""') // Escape quotes
+                ];
+                csvRows.push(row.map(field => `"${field}"`).join(','));
+            });
+
+            const csvContent = csvRows.join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `webhook-events-${new Date().toISOString().split('T')[0]}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Update URL with filter state
+        function updateURL() {
+            const params = new URLSearchParams();
+            
+            const eventType = document.getElementById('eventTypeFilter').value;
+            const anchor = document.getElementById('anchorFilter').value;
+            const status = document.getElementById('statusFilter').value;
+            const dateFrom = document.getElementById('dateFrom').value;
+            const dateTo = document.getElementById('dateTo').value;
+            const search = document.getElementById('searchBox').value;
+
+            if (eventType !== 'all') params.set('type', eventType);
+            if (anchor !== 'all') params.set('anchor', anchor);
+            if (status !== 'all') params.set('status', status);
+            if (dateFrom) params.set('from', dateFrom);
+            if (dateTo) params.set('to', dateTo);
+            if (search) params.set('search', search);
+
+            const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+            window.history.replaceState({}, '', newURL);
+        }
+
+        // Load filters from URL
+        function loadFiltersFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            
+            if (params.has('type')) {
+                document.getElementById('eventTypeFilter').value = params.get('type');
+            }
+            if (params.has('anchor')) {
+                document.getElementById('anchorFilter').value = params.get('anchor');
+            }
+            if (params.has('status')) {
+                document.getElementById('statusFilter').value = params.get('status');
+            }
+            if (params.has('from')) {
+                document.getElementById('dateFrom').value = params.get('from');
+            }
+            if (params.has('to')) {
+                document.getElementById('dateTo').value = params.get('to');
+            }
+            if (params.has('search')) {
+                document.getElementById('searchBox').value = params.get('search');
+            }
         }
 
         // Simulate events every 2-5 seconds (for demo)

@@ -86,6 +86,7 @@
         .anchor-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; background: linear-gradient(135deg, var(--color-primary), var(--color-secondary)); color: white; }
 
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     </style>
 </head>
 <body>
@@ -269,6 +270,121 @@
 &nbsp;&nbsp;<span class="string">"pair"</span>: <span class="string">"USDC/USD"</span>,<br>
 &nbsp;&nbsp;<span class="string">"rate"</span>: <span class="string">1.0</span><br>
 }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Filter Panel Story -->
+            <h2 class="section-title">🔍 Filter Panel</h2>
+            <div class="stories-grid">
+                <!-- Filter Panel Demo -->
+                <div class="story-card">
+                    <div class="story-header">
+                        <span class="story-title">
+                            <span class="story-badge info">Filter Panel</span>
+                            Real-time Filtering
+                        </span>
+                    </div>
+                    <div class="story-preview" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                        <div style="background: white; border-radius: 8px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                            <div style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #1a202c;">🔍 Filter Events</div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 13px; color: #4a5568;">Event Type:</label>
+                                    <select style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px;">
+                                        <option>All Events</option>
+                                        <option>Deposits</option>
+                                        <option>Withdrawals</option>
+                                        <option>KYC Updates</option>
+                                        <option>Attestations</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 13px; color: #4a5568;">Anchor:</label>
+                                    <select style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px;">
+                                        <option>All Anchors</option>
+                                        <option>Example Anchor</option>
+                                        <option>Stablecoin Issuer</option>
+                                        <option>Fiat On/Off Ramp</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 13px; color: #4a5568;">Status:</label>
+                                    <select style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px;">
+                                        <option>All Statuses</option>
+                                        <option>Success</option>
+                                        <option>Failed</option>
+                                        <option>Pending</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px;">
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <label style="font-size: 13px; color: #4a5568;">Date Range:</label>
+                                    <input type="date" style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px;">
+                                    <span style="color: #718096;">to</span>
+                                    <input type="date" style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px;">
+                                </div>
+                                <input type="text" placeholder="Transaction ID or Request ID" style="padding: 6px 10px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 13px; width: 200px;">
+                            </div>
+                            <div style="display: flex; gap: 8px; margin-top: 12px;">
+                                <button style="padding: 6px 12px; border: 1px solid #cbd5e0; border-radius: 6px; background: white; font-size: 13px; cursor: pointer;">📥 JSON</button>
+                                <button style="padding: 6px 12px; border: 1px solid #cbd5e0; border-radius: 6px; background: white; font-size: 13px; cursor: pointer;">📊 CSV</button>
+                                <button style="padding: 6px 12px; border: 1px solid #cbd5e0; border-radius: 6px; background: white; font-size: 13px; cursor: pointer;">Clear Filters</button>
+                            </div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #c6f6d5; border-radius: 6px; color: #22543d; font-size: 13px; font-weight: 500;">
+                            <span style="width: 8px; height: 8px; background: #38a169; border-radius: 50%; animation: blink 1s infinite;"></span>
+                            <span>5 events</span>
+                        </div>
+                    </div>
+                    <div class="story-code">
+<span class="comment">// Filter panel usage</span><br>
+<span class="keyword">const</span> filters = {<br>
+&nbsp;&nbsp;<span class="string">type</span>: <span class="string">'deposit'</span>,<br>
+&nbsp;&nbsp;<span class="string">anchor</span>: <span class="string">'example-anchor'</span>,<br>
+&nbsp;&nbsp;<span class="string">status</span>: <span class="string">'success'</span>,<br>
+&nbsp;&nbsp;<span class="string">from</span>: <span class="string">'2024-01-01'</span>,<br>
+&nbsp;&nbsp;<span class="string">to</span>: <span class="string">'2024-12-31'</span><br>
+};<br><br>
+<span class="comment">// Apply filters</span><br>
+<span class="keyword">const</span> filtered = applyFilters(filters);<br><br>
+<span class="comment">// Export filtered events</span><br>
+exportJSON(filtered);<br>
+exportCSV(filtered);<br><br>
+<span class="comment">// URL state is auto-saved</span><br>
+<span class="comment">// ?type=deposit&anchor=example-anchor&status=success</span>
+                    </div>
+                </div>
+
+                <!-- URL State Story -->
+                <div class="story-card">
+                    <div class="story-header">
+                        <span class="story-title">
+                            <span class="story-badge success">URL State</span>
+                            Shareable Bookmarks
+                        </span>
+                    </div>
+                    <div class="story-preview" style="flex-direction: column; align-items: flex-start; gap: 12px;">
+                        <div style="font-size: 13px; color: #4a5568; background: #edf2f7; padding: 12px; border-radius: 6px; font-family: monospace; word-break: break-all;">
+                            webhook_monitor.html<br>?type=deposit<br>&anchor=example-anchor<br>&status=success<br>&from=2024-01-01<br>&search=tx_001
+                        </div>
+                        <div style="font-size: 12px; color: #718096;">
+                            Filter state is preserved in URL for easy sharing and bookmarking
+                        </div>
+                    </div>
+                    <div class="story-code">
+<span class="comment">// Load filters from URL</span><br>
+<span class="keyword">const</span> params = <span class="keyword">new</span> URLSearchParams(<br>
+&nbsp;&nbsp;window.location.search<br>
+);<br><br>
+<span class="keyword">const</span> filters = {<br>
+&nbsp;&nbsp;type: params.get(<span class="string">'type'</span>) || <span class="string">'all'</span>,<br>
+&nbsp;&nbsp;anchor: params.get(<span class="string">'anchor'</span>),<br>
+&nbsp;&nbsp;status: params.get(<span class="string">'status'</span>),<br>
+&nbsp;&nbsp;from: params.get(<span class="string">'from'</span>),<br>
+&nbsp;&nbsp;search: params.get(<span class="string">'search'</span>)<br>
+};
                     </div>
                 </div>
             </div>

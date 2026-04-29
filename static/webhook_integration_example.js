@@ -294,6 +294,220 @@ function sanitizeWebhookPayload(payload) {
 }
 
 // ============================================================================
+// FILTERING API USAGE
+// ============================================================================
+
+// The webhook monitor exposes several filtering functions that can be used
+// programmatically to filter events based on various criteria.
+
+class WebhookFilterAPI {
+    constructor() {
+        this.events = [];
+    }
+
+    // Add event to the filterable list
+    addEvent(event) {
+        this.events.unshift(event);
+    }
+
+    // Filter events by type
+    filterByType(type) {
+        if (type === 'all') return this.events;
+        return this.events.filter(e => e.type === type);
+    }
+
+    // Filter events by anchor
+    filterByAnchor(anchor) {
+        if (anchor === 'all') return this.events;
+        return this.events.filter(e => e.payload.anchor === anchor);
+    }
+
+    // Filter events by status
+    filterByStatus(status) {
+        if (status === 'all') return this.events;
+        return this.events.filter(e => e.payload.status === status);
+    }
+
+    // Filter events by date range
+    filterByDateRange(from, to) {
+        return this.events.filter(event => {
+            const eventDate = new Date(event.timestamp);
+            if (from && eventDate < new Date(from)) return false;
+            if (to && eventDate > new Date(to)) return false;
+            return true;
+        });
+    }
+
+    // Search by transaction ID or request ID
+    search(query) {
+        const lowerQuery = query.toLowerCase();
+        return this.events.filter(event => {
+            const transactionId = event.payload.transaction_id || '';
+            const requestId = event.payload.request_id || '';
+            return transactionId.toLowerCase().includes(lowerQuery) ||
+                   requestId.toLowerCase().includes(lowerQuery);
+        });
+    }
+
+    // Combined filter - apply all filters at once
+    applyFilters(options = {}) {
+        let filtered = [...this.events];
+
+        if (options.type && options.type !== 'all') {
+            filtered = filtered.filter(e => e.type === options.type);
+        }
+
+        if (options.anchor && options.anchor !== 'all') {
+            filtered = filtered.filter(e => e.payload.anchor === options.anchor);
+        }
+
+        if (options.status && options.status !== 'all') {
+            filtered = filtered.filter(e => e.payload.status === options.status);
+        }
+
+        if (options.from) {
+            filtered = filtered.filter(e => new Date(e.timestamp) >= new Date(options.from));
+        }
+
+        if (options.to) {
+            filtered = filtered.filter(e => new Date(e.timestamp) <= new Date(options.to));
+        }
+
+        if (options.search) {
+            const query = options.search.toLowerCase();
+            filtered = filtered.filter(e => {
+                const txId = e.payload.transaction_id || '';
+                const reqId = e.payload.request_id || '';
+                return txId.toLowerCase().includes(query) || reqId.toLowerCase().includes(query);
+            });
+        }
+
+        return filtered;
+    }
+
+    // Export filtered events to JSON
+    exportToJSON(filteredEvents) {
+        return JSON.stringify(filteredEvents, null, 2);
+    }
+
+    // Export filtered events to CSV
+    exportToCSV(filteredEvents) {
+        const headers = ['ID', 'Type', 'Timestamp', 'Anchor', 'Status', 'Transaction ID', 'Request ID'];
+        const rows = filteredEvents.map(event => [
+            event.id,
+            event.type,
+            event.timestamp,
+            event.payload.anchor || '',
+            event.payload.status || '',
+            event.payload.transaction_id || '',
+            event.payload.request_id || ''
+        ]);
+
+        return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+    }
+}
+
+// Usage example:
+/*
+const filterAPI = new WebhookFilterAPI();
+
+// Add some sample events
+filterAPI.addEvent({ id: 1, type: 'deposit', timestamp: '2024-01-15T10:00:00Z', payload: { anchor: 'example-anchor', status: 'success', transaction_id: 'tx_001' } });
+filterAPI.addEvent({ id: 2, type: 'withdrawal', timestamp: '2024-01-15T11:00:00Z', payload: { anchor: 'stablecoin', status: 'pending', transaction_id: 'tx_002' } });
+filterAPI.addEvent({ id: 3, type: 'kyc', timestamp: '2024-01-15T12:00:00Z', payload: { anchor: 'fiat-ramp', status: 'success', request_id: 'req_001' } });
+
+// Filter by type
+const deposits = filterAPI.filterByType('deposit');
+console.log('Deposits:', deposits);
+
+// Filter by anchor
+const anchorEvents = filterAPI.filterByAnchor('example-anchor');
+console.log('Example Anchor events:', anchorEvents);
+
+// Combined filter
+const filtered = filterAPI.applyFilters({
+    type: 'deposit',
+    status: 'success',
+    from: '2024-01-01',
+    to: '2024-12-31'
+});
+console.log('Filtered events:', filtered);
+
+// Export to JSON
+const jsonData = filterAPI.exportToJSON(filtered);
+console.log('JSON Export:', jsonData);
+
+// Export to CSV
+const csvData = filterAPI.exportToCSV(filtered);
+console.log('CSV Export:', csvData);
+*/
+
+// ============================================================================
+// URL STATE MANAGEMENT
+// ============================================================================
+
+// The filter state can be preserved in the URL for bookmarking and sharing
+
+class WebhookFilterURLManager {
+    // Update URL with current filter state
+    static updateURL(filters) {
+        const params = new URLSearchParams();
+        
+        if (filters.type && filters.type !== 'all') params.set('type', filters.type);
+        if (filters.anchor && filters.anchor !== 'all') params.set('anchor', filters.anchor);
+        if (filters.status && filters.status !== 'all') params.set('status', filters.status);
+        if (filters.from) params.set('from', filters.from);
+        if (filters.to) params.set('to', filters.to);
+        if (filters.search) params.set('search', filters.search);
+
+        const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+        window.history.replaceState({}, '', newURL);
+    }
+
+    // Load filter state from URL
+    static loadFromURL() {
+        const params = new URLSearchParams(window.location.search);
+        
+        return {
+            type: params.get('type') || 'all',
+            anchor: params.get('anchor') || 'all',
+            status: params.get('status') || 'all',
+            from: params.get('from') || '',
+            to: params.get('to') || '',
+            search: params.get('search') || ''
+        };
+    }
+
+    // Get shareable URL with current filters
+    static getShareableURL(filters) {
+        this.updateURL(filters);
+        return window.location.href;
+    }
+}
+
+// Usage:
+/*
+// Save current filters to URL
+const currentFilters = {
+    type: 'deposit',
+    anchor: 'example-anchor',
+    status: 'success',
+    from: '2024-01-01',
+    to: '2024-12-31',
+    search: 'tx_001'
+};
+WebhookFilterURLManager.updateURL(currentFilters);
+
+// Load filters from URL
+const savedFilters = WebhookFilterURLManager.loadFromURL();
+console.log('Loaded filters:', savedFilters);
+
+// Get shareable URL
+const shareURL = WebhookFilterURLManager.getShareableURL(currentFilters);
+console.log('Share this URL:', shareURL);
+*/
+
+// ============================================================================
 // STELLAR HORIZON INTEGRATION EXAMPLE
 // ============================================================================
 
