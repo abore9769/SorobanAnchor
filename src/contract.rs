@@ -69,6 +69,20 @@ pub struct RequestId {
     pub created_at: u64,
 }
 
+/// Carries the root request ID and the ordered chain of operation names
+/// performed under that root request. Every sub-operation appends its name
+/// to `operation_chain` rather than creating a new root ID.
+#[contracttype]
+#[derive(Clone)]
+pub struct RequestContext {
+    /// The root request ID that initiated this chain of operations.
+    pub root_request_id: RequestId,
+    /// Ordered list of operation names performed under this root request.
+    pub operation_chain: Vec<String>,
+    /// Ledger timestamp when this context was first created.
+    pub created_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Attestation {
@@ -410,6 +424,15 @@ struct TxStateChangedEvent {
     old_state: u32,
     new_state: u32,
     timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+struct WebhookEvent {
+    event_type: String,
+    transaction_id: u64,
+    timestamp: u64,
+    payload_hash: Bytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +987,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             String::from_str(&env, "success"),
         );
 
+        // Propagate operation name into RequestContext
+        Self::record_operation_in_context(&env, &request_id.id, String::from_str(&env, "submit_attestation"));
+
         env.events().publish(
             (
                 symbol_short!("attest"),
@@ -1024,6 +1050,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             now,
             String::from_str(&env, "success"),
         );
+
+        // Propagate operation name into RequestContext
+        Self::record_operation_in_context(&env, &request_id.id, String::from_str(&env, "submit_quote"));
     }
 
     // -----------------------------------------------------------------------
@@ -1121,6 +1150,69 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         }
 
         spans
+    }
+
+    // -----------------------------------------------------------------------
+    // RequestContext — propagation and querying
+    // -----------------------------------------------------------------------
+
+    /// Create a new `RequestContext` for a root request ID.
+    ///
+    /// Stores the context in temporary storage keyed by the root request ID bytes
+    /// and returns it. The `operation_chain` starts empty; call
+    /// `append_operation` to record each sub-operation.
+    pub fn create_request_context(env: Env, root_request_id: RequestId) -> RequestContext {
+        let now = env.ledger().timestamp();
+        let ctx = RequestContext {
+            root_request_id: root_request_id.clone(),
+            operation_chain: Vec::new(&env),
+            created_at: now,
+        };
+        let key = (symbol_short!("REQCTX"), root_request_id.id.clone());
+        env.storage().temporary().set(&key, &ctx);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+        ctx
+    }
+
+    /// Append `operation_name` to the `operation_chain` of the context identified
+    /// by `root_request_id_bytes`. Creates the context if it does not yet exist.
+    pub fn append_operation(
+        env: Env,
+        root_request_id_bytes: Bytes,
+        operation_name: String,
+    ) {
+        let key = (symbol_short!("REQCTX"), root_request_id_bytes.clone());
+        let mut ctx: RequestContext = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .unwrap_or_else(|| {
+                // Auto-create a minimal context if none exists yet
+                let now = env.ledger().timestamp();
+                RequestContext {
+                    root_request_id: RequestId {
+                        id: root_request_id_bytes.clone(),
+                        created_at: now,
+                    },
+                    operation_chain: Vec::new(&env),
+                    created_at: now,
+                }
+            });
+        ctx.operation_chain.push_back(operation_name);
+        env.storage().temporary().set(&key, &ctx);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    /// Return the full `RequestContext` (including `operation_chain`) for a
+    /// given root request ID, or `None` if no context has been stored.
+    pub fn get_request_context(env: Env, root_request_id_bytes: Bytes) -> Option<RequestContext> {
+        env.storage()
+            .temporary()
+            .get::<_, RequestContext>(&(symbol_short!("REQCTX"), root_request_id_bytes))
     }
 
     // -----------------------------------------------------------------------
@@ -2563,6 +2655,30 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         };
         let key = (symbol_short!("SPAN"), request_id.id.clone());
         env.storage().temporary().set(&key, &span);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    /// Append `operation_name` to the `RequestContext` stored under `root_id_bytes`.
+    /// Creates a minimal context if none exists yet (e.g. for the root operation itself).
+    fn record_operation_in_context(env: &Env, root_id_bytes: &Bytes, operation_name: String) {
+        let key = (symbol_short!("REQCTX"), root_id_bytes.clone());
+        let now = env.ledger().timestamp();
+        let mut ctx: RequestContext = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .unwrap_or_else(|| RequestContext {
+                root_request_id: RequestId {
+                    id: root_id_bytes.clone(),
+                    created_at: now,
+                },
+                operation_chain: Vec::new(env),
+                created_at: now,
+            });
+        ctx.operation_chain.push_back(operation_name);
+        env.storage().temporary().set(&key, &ctx);
         env.storage()
             .temporary()
             .extend_ttl(&key, SPAN_TTL, SPAN_TTL);

@@ -69,8 +69,8 @@ fn default_network() -> String {
 
 
 /// Resolve the signing source from flags or environment.
-/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> String {
+/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
     if let Some(sk) = secret_key {
         return sk.to_string();
     }
@@ -90,7 +90,16 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> Strin
         }
         return raw.trim().to_string();
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, or use --keypair-file");
+    if let Some(name) = credential_name {
+        let password = rpassword::prompt_password("Keystore password: ")
+            .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+        let ks = keystore::load();
+        let entry = ks.credentials.get(name)
+            .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
+        return keystore::decrypt(&password, entry)
+            .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); });
+    }
+    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
 }
 
@@ -182,6 +191,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] sep10_token: String,
         #[arg(long)] sep10_issuer: String,
     },
@@ -193,6 +204,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] issuer: String,
         #[arg(long)] session_id: Option<u64>,
     },
@@ -208,6 +221,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
     },
     /// Fetch SEP-6 transaction status from an anchor URL
     Status {
@@ -223,6 +238,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
     },
     /// Check environment setup
     Doctor {
@@ -905,6 +922,22 @@ fn main() {
         }
         Commands::Network { action } => {
             network_cmd(action);
+        }
+        Commands::Credentials { action } => {
+            match action {
+                CredentialsAction::Add { name, value } => {
+                    credentials_add(&name, value.as_deref());
+                }
+                CredentialsAction::Get { name } => {
+                    credentials_get(&name);
+                }
+                CredentialsAction::List => {
+                    credentials_list();
+                }
+                CredentialsAction::Remove { name } => {
+                    credentials_remove(&name);
+                }
+            }
         }
     }
 }

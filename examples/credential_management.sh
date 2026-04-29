@@ -1,6 +1,6 @@
 #!/bin/bash
 # Example: Secure Credential Management with AnchorKit
-# This script demonstrates how to properly inject and manage credentials
+# This script demonstrates how to use the anchorkit CLI to manage credentials securely
 
 set -e
 
@@ -17,219 +17,71 @@ echo "=== AnchorKit Secure Credential Management Example ==="
 echo ""
 
 # ============================================================
-# Step 1: Fetch Credentials from Secure Secret Manager
+# Step 1: Store Credentials in Encrypted Keystore
 # ============================================================
-echo "Step 1: Fetching credentials from secret manager..."
+echo "Step 1: Storing credentials in encrypted keystore..."
 
-# Example: AWS Secrets Manager
-if command -v aws &> /dev/null; then
-    echo "  Using AWS Secrets Manager..."
-    KYC_API_KEY=$(aws secretsmanager get-secret-value \
-        --secret-id anchorkit/kyc-provider/api-key \
-        --query SecretString \
-        --output text 2>/dev/null || echo "")
-    
-    BANK_TOKEN=$(aws secretsmanager get-secret-value \
-        --secret-id anchorkit/bank-integration/token \
-        --query SecretString \
-        --output text 2>/dev/null || echo "")
-fi
+# Store KYC provider API key
+echo "  Storing KYC provider API key..."
+echo "sk_test_kyc_key_12345678901234567890" | anchorkit credentials add --name kyc-provider-api-key 2>/dev/null || echo "    (Skipped - credential may already exist)"
 
-# Example: HashiCorp Vault
-if command -v vault &> /dev/null && [ -z "$KYC_API_KEY" ]; then
-    echo "  Using HashiCorp Vault..."
-    KYC_API_KEY=$(vault kv get -field=api_key secret/anchorkit/kyc-provider 2>/dev/null || echo "")
-    BANK_TOKEN=$(vault kv get -field=token secret/anchorkit/bank-integration 2>/dev/null || echo "")
-fi
+# Store bank integration token
+echo "  Storing bank integration token..."
+echo "Bearer bank_token_12345678901234567890" | anchorkit credentials add --name bank-integration-token 2>/dev/null || echo "    (Skipped - credential may already exist)"
 
-# Fallback to environment variables (for demo purposes)
-if [ -z "$KYC_API_KEY" ]; then
-    echo "  Using environment variables (demo mode)..."
-    KYC_API_KEY="${ANCHOR_KYC_API_KEY:-sk_test_demo_key_12345678901234567890}"
-    BANK_TOKEN="${ANCHOR_BANK_TOKEN:-Bearer demo_token_12345678901234567890}"
-fi
-
-echo "  ✓ Credentials fetched securely"
+echo "  ✓ Credentials stored securely in ~/.anchorkit/keystore.json"
 echo ""
 
 # ============================================================
-# Step 2: Encrypt Credentials Before Storage
+# Step 2: List Stored Credentials
 # ============================================================
-echo "Step 2: Encrypting credentials..."
+echo "Step 2: Listing stored credentials..."
 
-# Simple encryption example (use proper encryption in production!)
-encrypt_credential() {
-    local credential="$1"
-    # In production, use proper encryption (AES-256, etc.)
-    # This is just a demo using base64
-    echo -n "$credential" | base64
-}
+anchorkit credentials list 2>/dev/null || echo "  (No credentials stored yet)"
 
-ENCRYPTED_KYC=$(encrypt_credential "$KYC_API_KEY")
-ENCRYPTED_BANK=$(encrypt_credential "$BANK_TOKEN")
-
-echo "  ✓ Credentials encrypted"
 echo ""
 
 # ============================================================
-# Step 3: Set Credential Policies
+# Step 3: Use Credentials in Contract Operations
 # ============================================================
-echo "Step 3: Setting credential policies..."
+echo "Step 3: Using credentials in contract operations..."
 
-# KYC Provider: 30-day rotation, encryption required
-echo "  Setting policy for KYC provider (30-day rotation)..."
-soroban contract invoke \
-    --id "$CONTRACT_ID" \
-    --source "$ADMIN_ACCOUNT" \
+# Example: Register attestor using stored credential
+echo "  Registering KYC provider using stored credential..."
+anchorkit register \
+    --address "$KYC_PROVIDER" \
+    --services deposits,kyc \
+    --contract-id "$CONTRACT_ID" \
     --network "$NETWORK" \
-    -- set_credential_policy \
-    --attestor "$KYC_PROVIDER" \
-    --rotation_interval_seconds 2592000 \
-    --require_encryption true \
-    2>/dev/null || echo "    (Skipped - contract not deployed)"
+    --credential-name kyc-provider-api-key \
+    --sep10-token "dummy-token" \
+    --sep10-issuer "$KYC_PROVIDER" \
+    2>/dev/null || echo "    (Skipped - contract not deployed or credential not found)"
 
-# Bank Integration: 7-day rotation, encryption required
-echo "  Setting policy for bank integration (7-day rotation)..."
-soroban contract invoke \
-    --id "$CONTRACT_ID" \
-    --source "$ADMIN_ACCOUNT" \
-    --network "$NETWORK" \
-    -- set_credential_policy \
-    --attestor "$BANK_INTEGRATION" \
-    --rotation_interval_seconds 604800 \
-    --require_encryption true \
-    2>/dev/null || echo "    (Skipped - contract not deployed)"
-
-echo "  ✓ Policies configured"
+echo "  ✓ Credential retrieved from keystore and used for signing"
 echo ""
 
 # ============================================================
-# Step 4: Store Encrypted Credentials
+# Step 4: Retrieve a Credential (for verification)
 # ============================================================
-echo "Step 4: Storing encrypted credentials..."
+echo "Step 4: Retrieving a credential (for verification)..."
 
-# Calculate expiry timestamps
-NOW=$(date +%s)
-KYC_EXPIRY=$((NOW + 2592000))  # 30 days
-BANK_EXPIRY=$((NOW + 604800))   # 7 days
+echo "  Retrieving KYC provider API key..."
+# Note: This will prompt for keystore password
+# anchorkit credentials get --name kyc-provider-api-key
 
-# Store KYC credential
-echo "  Storing KYC provider credential..."
-soroban contract invoke \
-    --id "$CONTRACT_ID" \
-    --source "$ADMIN_ACCOUNT" \
-    --network "$NETWORK" \
-    -- store_encrypted_credential \
-    --attestor "$KYC_PROVIDER" \
-    --credential_type ApiKey \
-    --encrypted_value "$ENCRYPTED_KYC" \
-    --expires_at "$KYC_EXPIRY" \
-    2>/dev/null || echo "    (Skipped - contract not deployed)"
-
-# Store bank credential
-echo "  Storing bank integration credential..."
-soroban contract invoke \
-    --id "$CONTRACT_ID" \
-    --source "$ADMIN_ACCOUNT" \
-    --network "$NETWORK" \
-    -- store_encrypted_credential \
-    --attestor "$BANK_INTEGRATION" \
-    --credential_type BearerToken \
-    --encrypted_value "$ENCRYPTED_BANK" \
-    --expires_at "$BANK_EXPIRY" \
-    2>/dev/null || echo "    (Skipped - contract not deployed)"
-
-echo "  ✓ Credentials stored securely"
+echo "  (Skipped in demo - would prompt for password)"
 echo ""
 
 # ============================================================
-# Step 5: Check Rotation Status
+# Step 5: Remove a Credential
 # ============================================================
-echo "Step 5: Checking credential rotation status..."
+echo "Step 5: Removing a credential..."
 
-check_rotation() {
-    local attestor="$1"
-    local name="$2"
-    
-    echo "  Checking $name..."
-    NEEDS_ROTATION=$(soroban contract invoke \
-        --id "$CONTRACT_ID" \
-        --network "$NETWORK" \
-        -- check_credential_rotation \
-        --attestor "$attestor" \
-        2>/dev/null || echo "false")
-    
-    if [ "$NEEDS_ROTATION" = "true" ]; then
-        echo "    ⚠️  Rotation required!"
-    else
-        echo "    ✓ No rotation needed"
-    fi
-}
+echo "  Removing test credential..."
+# anchorkit credentials remove --name kyc-provider-api-key
 
-check_rotation "$KYC_PROVIDER" "KYC provider"
-check_rotation "$BANK_INTEGRATION" "Bank integration"
-
-echo ""
-
-# ============================================================
-# Step 6: Demonstrate Credential Rotation
-# ============================================================
-echo "Step 6: Demonstrating credential rotation..."
-
-rotate_credential() {
-    local attestor="$1"
-    local name="$2"
-    local new_credential="$3"
-    local credential_type="$4"
-    local expiry="$5"
-    
-    echo "  Rotating credential for $name..."
-    
-    # Encrypt new credential
-    local encrypted_new=$(encrypt_credential "$new_credential")
-    
-    # Rotate in contract
-    soroban contract invoke \
-        --id "$CONTRACT_ID" \
-        --source "$ADMIN_ACCOUNT" \
-        --network "$NETWORK" \
-        -- rotate_credential \
-        --attestor "$attestor" \
-        --credential_type "$credential_type" \
-        --new_encrypted_value "$encrypted_new" \
-        --expires_at "$expiry" \
-        2>/dev/null || echo "    (Skipped - contract not deployed)"
-    
-    echo "    ✓ Rotation complete"
-}
-
-# Example rotation (in production, this would be triggered by policy)
-# rotate_credential "$KYC_PROVIDER" "KYC provider" "sk_live_new_key_..." "ApiKey" "$KYC_EXPIRY"
-
-echo "  (Rotation would be triggered automatically based on policy)"
-echo ""
-
-# ============================================================
-# Step 7: Verify Credential Policies
-# ============================================================
-echo "Step 7: Verifying credential policies..."
-
-verify_policy() {
-    local attestor="$1"
-    local name="$2"
-    
-    echo "  Verifying policy for $name..."
-    soroban contract invoke \
-        --id "$CONTRACT_ID" \
-        --network "$NETWORK" \
-        -- get_credential_policy \
-        --attestor "$attestor" \
-        2>/dev/null || echo "    (Skipped - contract not deployed)"
-}
-
-verify_policy "$KYC_PROVIDER" "KYC provider"
-verify_policy "$BANK_INTEGRATION" "Bank integration"
-
+echo "  (Skipped in demo - preserving credentials)"
 echo ""
 
 # ============================================================
@@ -237,28 +89,38 @@ echo ""
 # ============================================================
 echo "=== Summary ==="
 echo ""
-echo "✓ Credentials fetched from secure secret manager"
-echo "✓ Credentials encrypted before storage"
-echo "✓ Rotation policies configured"
-echo "✓ Credentials stored in contract (encrypted)"
-echo "✓ Rotation status checked"
-echo "✓ Policies verified"
+echo "✓ Credentials stored in encrypted keystore (~/.anchorkit/keystore.json)"
+echo "✓ Keystore uses AES-256-GCM encryption with Argon2id key derivation"
+echo "✓ Credentials can be used via --credential-name flag"
+echo "✓ No plaintext credentials in config files or shell history"
 echo ""
 echo "Security Best Practices Applied:"
-echo "  • No plaintext credentials in config files"
-echo "  • Runtime injection from secret manager"
-echo "  • Encryption before storage"
-echo "  • Automatic rotation policies"
-echo "  • Regular rotation checks"
+echo "  • Credentials encrypted at rest with AES-256-GCM"
+echo "  • Key derivation using Argon2id (m=65536 KiB, t=3, p=4)"
+echo "  • Keystore file permissions restricted to owner (0600)"
+echo "  • Password-protected keystore access"
+echo "  • No credentials exposed in command-line arguments"
+echo ""
+echo "CLI Commands:"
+echo "  anchorkit credentials add --name <name> [--value <value>]"
+echo "  anchorkit credentials get --name <name>"
+echo "  anchorkit credentials list"
+echo "  anchorkit credentials remove --name <name>"
+echo ""
+echo "Usage in Contract Operations:"
+echo "  anchorkit register --credential-name <name> ..."
+echo "  anchorkit attest --credential-name <name> ..."
+echo "  anchorkit quote --credential-name <name> ..."
+echo "  anchorkit revoke --credential-name <name> ..."
 echo ""
 echo "Next Steps:"
-echo "  1. Set up automated rotation (cron job or CI/CD)"
-echo "  2. Configure monitoring and alerting"
-echo "  3. Test credential revocation procedures"
-echo "  4. Document incident response plan"
+echo "  1. Store your production credentials using 'anchorkit credentials add'"
+echo "  2. Use --credential-name instead of --secret-key in all operations"
+echo "  3. Set up automated rotation (cron job or CI/CD)"
+echo "  4. Configure monitoring and alerting"
+echo "  5. Document incident response plan"
 echo ""
 echo "For more information, see:"
-echo "  • SECURE_CREDENTIALS.md"
-echo "  • DEPLOYMENT_WITH_CREDENTIALS.md"
-echo "  • configs/CREDENTIAL_SECURITY.md"
+echo "  • README.md"
+echo "  • docs/getting-started.md"
 echo ""
