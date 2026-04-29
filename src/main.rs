@@ -182,6 +182,16 @@ enum Commands {
         /// List deployment history
         #[arg(long)]
         list: bool,
+        /// Upgrade an existing contract instead of deploying a new one.
+        /// Requires --contract-id (or ANCHOR_CONTRACT_ID) and --secret-key / ANCHOR_ADMIN_SECRET.
+        #[arg(long)]
+        upgrade: bool,
+        /// Secret key used to sign the upgrade transaction (overrides ANCHOR_ADMIN_SECRET)
+        #[arg(long)]
+        secret_key: Option<String>,
+        /// Path to a JSON or plain-text keypair file (used when --secret-key is absent)
+        #[arg(long)]
+        keypair_file: Option<String>,
     },
     /// Register an attestor
     Register {
@@ -365,6 +375,77 @@ fn pre_deploy_validate(network: &str) -> bool {
     }
 
     ok
+}
+
+/// Upgrade an existing contract to a freshly-built WASM.
+///
+/// Steps:
+///   1. Build the WASM artifact.
+///   2. Upload the WASM to the network and obtain its hash.
+///   3. Call `upgrade(new_wasm_hash)` on the contract.
+///   4. Call `migrate()` to apply any state-schema changes.
+fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+    println!("\n🔍 Pre-upgrade validation ({network})...");
+    if !pre_deploy_validate(network) {
+        eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
+        std::process::exit(1);
+    }
+    println!("✅ Validation passed.\n");
+
+    // Build WASM.
+    println!("Building WASM...");
+    let build = std::process::Command::new("cargo")
+        .args([
+            "build", "--release",
+            "--target", "wasm32-unknown-unknown",
+            "--no-default-features", "--features", "wasm",
+        ])
+        .status()
+        .expect("failed to run cargo build");
+    if !build.success() {
+        eprintln!("WASM build failed");
+        std::process::exit(1);
+    }
+
+    let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
+    let net_url = rpc_url_for(network);
+    let net_phrase = passphrase_for(network);
+
+    // Upload WASM and capture the resulting hash.
+    println!("Uploading WASM to {network}...");
+    let upload_output = std::process::Command::new("stellar")
+        .args([
+            "contract", "upload",
+            "--wasm", wasm,
+            "--source", source,
+            "--rpc-url", &net_url,
+            "--network-passphrase", &net_phrase,
+        ])
+        .output()
+        .expect("failed to run stellar contract upload — is the Stellar CLI installed?");
+
+    if !upload_output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&upload_output.stderr).trim());
+        std::process::exit(1);
+    }
+
+    let new_wasm_hash = String::from_utf8_lossy(&upload_output.stdout).trim().to_string();
+    println!("New WASM hash: {new_wasm_hash}");
+
+    // Call upgrade() on the contract.
+    println!("Calling upgrade() on contract {contract_id}...");
+    stellar_invoke(contract_id, source, network, &[
+        "upgrade",
+        "--new_wasm_hash", &new_wasm_hash,
+    ]);
+
+    // Call migrate() to apply state-schema changes (idempotent).
+    println!("Calling migrate() on contract {contract_id}...");
+    stellar_invoke(contract_id, source, network, &["migrate"]);
+
+    println!("✅ Contract upgraded successfully.");
+    println!("   Contract ID : {contract_id}");
+    println!("   New WASM    : {new_wasm_hash}");
 }
 
 fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list: bool) {
@@ -894,8 +975,17 @@ fn main() {
     let cli = Cli::parse();
     let network = cli.network.unwrap_or_else(default_network);
     match cli.command {
-        Commands::Deploy { source, admin, dry_run, list } => {
-            deploy(&network, &source, admin.as_deref(), dry_run, list);
+        Commands::Deploy { source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
+            if upgrade {
+                let contract_id = cli.contract_id.unwrap_or_else(|| {
+                    eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
+                    std::process::exit(1);
+                });
+                let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+                upgrade_contract(&contract_id, &network, &signing_source);
+            } else {
+                deploy(&network, &source, admin.as_deref(), dry_run, list);
+            }
         }
         Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, sep10_token, sep10_issuer } => {
             let net = cmd_net;
