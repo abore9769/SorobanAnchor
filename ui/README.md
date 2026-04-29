@@ -49,6 +49,32 @@ import { ApiRequestPanel } from './components/ApiRequestPanel';
 - [Component Structure](./COMPONENT_STRUCTURE.md) - Architecture details
 - [Examples](./components/ApiRequestPanel.example.tsx) - Usage examples
 
+### PrecisionFintech
+
+High-level fintech dashboard component for portfolio summary, position table, and quick-execute workflows.
+
+**Features:**
+- Portfolio KPI cards with delta indicators
+- Time-series performance chart
+- Position table with buy/sell action controls
+- Quick execute side panel with allocation and alert widgets
+- Configurable typed props for metrics, positions, chart data, and headline content
+- Accessibility-tested with `jest-axe`
+
+**Quick Start:**
+
+```tsx
+import { PrecisionFintech } from '@anchorkit/ui-components';
+
+<PrecisionFintech initialTab="analytics" headlineValue="$4,210,981" />
+```
+
+**Documentation:**
+- [Component README](./components/README.md#precisionfintech)
+- [Component source](./components/PrecisionFintech.tsx)
+- [Component tests](./components/PrecisionFintech.test.tsx)
+- [Storybook static story](../storybook/precision-fintech.html)
+
 ## Installation
 
 ### Option 1: Copy Files

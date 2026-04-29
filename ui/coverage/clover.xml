@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1777451024069" clover="3.2.0">
+  <project timestamp="1777451024069" name="All files">
+    <metrics statements="28" coveredstatements="26" conditionals="42" coveredconditionals="41" methods="15" coveredmethods="13" elements="85" coveredelements="80" complexity="0" loc="28" ncloc="28" packages="1" files="1" classes="1"/>
+    <file name="PrecisionFintech.tsx" path="/Users/ijayabby/Documents/workspace/wave4/SorobanAnchor/ui/components/PrecisionFintech.tsx">
+      <metrics statements="28" coveredstatements="26" conditionals="42" coveredconditionals="41" methods="15" coveredmethods="13"/>
+      <line num="1" count="1" type="stmt"/>
+      <line num="73" count="1" type="stmt"/>
+      <line num="80" count="1" type="stmt"/>
+      <line num="123" count="1" type="stmt"/>
+      <line num="127" count="1" type="stmt"/>
+      <line num="135" count="5" type="stmt"/>
+      <line num="136" count="5" type="stmt"/>
+      <line num="138" count="5" type="stmt"/>
+      <line num="139" count="5" type="stmt"/>
+      <line num="141" count="5" type="stmt"/>
+      <line num="379" count="17" type="stmt"/>
+      <line num="440" count="25" type="stmt"/>
+      <line num="493" count="55" type="stmt"/>
+      <line num="495" count="55" type="stmt"/>
+      <line num="497" count="55" type="cond" truecount="2" falsecount="0"/>
+      <line num="508" count="55" type="stmt"/>
+      <line num="510" count="55" type="stmt"/>
+      <line num="512" count="55" type="cond" truecount="2" falsecount="0"/>
+      <line num="580" count="80" type="stmt"/>
+      <line num="602" count="15" type="stmt"/>
+      <line num="605" count="1" type="stmt"/>
+      <line num="624" count="30" type="stmt"/>
+      <line num="642" count="16" type="stmt"/>
+      <line num="645" count="0" type="stmt"/>
+      <line num="646" count="0" type="stmt"/>
+      <line num="760" count="15" type="stmt"/>
+      <line num="880" count="15" type="stmt"/>
+      <line num="942" count="15" type="stmt"/>
+    </file>
+  </project>
+</coverage>

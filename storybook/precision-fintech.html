@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PrecisionFintech Stories</title>
+  <style>
+    body { font-family: sans-serif; background: #f5f7fb; padding: 32px; color: #0f172a; }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    .muted { color: #64748b; font-size: 13px; }
+    .story-label {
+      margin: 28px 0 8px;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #94a3b8;
+    }
+    .story-frame {
+      background: #ffffff;
+      border-radius: 14px;
+      border: 1px solid #e2e8f0;
+      padding: 18px;
+      max-width: 860px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .preview {
+      background: #0b0b0b;
+      color: #00ffb2;
+      border-radius: 10px;
+      padding: 14px;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    pre {
+      margin: 0;
+      background: #0f172a;
+      color: #cbd5e1;
+      border-radius: 10px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>PrecisionFintech - Storybook</h1>
+  <p class="muted">Static stories describing primary states and integration usage.</p>
+
+  <div class="story-label">Story 1 - Default Portfolio Desk</div>
+  <div class="story-frame">
+    <div class="preview">Default state with positive market movement, populated positions, and overview tab selected.</div>
+    <pre>&lt;PrecisionFintech /&gt;</pre>
+  </div>
+
+  <div class="story-label">Story 2 - Analytics First Configuration</div>
+  <div class="story-frame">
+    <div class="preview">Opens on analytics with custom headline and institution-specific metrics.</div>
+    <pre>&lt;PrecisionFintech
+  initialTab="analytics"
+  headlineValue="$4,210,981"
+  headlineLabel="Managed NAV"
+  metrics={[
+    { label: "Portfolio Value", value: "$4,210,981", change: "+3.2%", up: true },
+    { label: "Daily P&amp;L", value: "+$21,103", change: "+0.5%", up: true },
+    { label: "Sharpe Ratio", value: "2.41", change: "+0.04", up: true },
+    { label: "Alpha", value: "14.9%", change: "+0.7%", up: true }
+  ]}
+/&gt;</pre>
+  </div>
+
+  <div class="story-label">Story 3 - Empty Positions State</div>
+  <div class="story-frame">
+    <div class="preview">No current holdings. Table shows explicit empty-state row while preserving shell layout.</div>
+    <pre>&lt;PrecisionFintech
+  positions={[]}
+  chartData={[18, 20, 22, 24, 21]}
+  headlineValue="$0"
+  headlineLabel="Sandbox AUM"
+/&gt;</pre>
+  </div>
+
+  <div class="story-label">Story 4 - Integrated Anchor Flow Shell</div>
+  <div class="story-frame">
+    <div class="preview">PrecisionFintech as a top-level shell around auth, capability, and transaction-status components.</div>
+    <pre>&lt;main&gt;
+  &lt;PrecisionFintech /&gt;
+  &lt;Sep10AuthFlow ... /&gt;
+  &lt;AnchorCapabilityCard ... /&gt;
+  &lt;TransactionTimeline ... /&gt;
+&lt;/main&gt;</pre>
+  </div>
+</body>
+</html>
