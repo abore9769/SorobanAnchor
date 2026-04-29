@@ -1,135 +1,72 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-// ── Keystore (AES-256-GCM + Argon2id) ────────────────────────────────────────
+// ── Network profile management ────────────────────────────────────────────────
 
-mod keystore {
-    use aes_gcm::{
-        aead::{Aead, KeyInit, OsRng as AeadOsRng},
-        Aes256Gcm, Nonce,
-    };
-    use argon2::{Argon2, Params, Version};
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use rand::RngCore;
-    use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
-
-    /// A single encrypted credential entry.
-    #[derive(Serialize, Deserialize, Clone)]
-    pub struct EncryptedEntry {
-        /// Base64-encoded 12-byte nonce.
-        pub nonce: String,
-        /// Base64-encoded AES-256-GCM ciphertext (includes 16-byte auth tag).
-        pub ciphertext: String,
-        /// Base64-encoded 16-byte Argon2id salt used to derive the key for this entry.
-        pub salt: String,
-    }
-
-    /// The on-disk keystore format stored at `~/.anchorkit/keystore.json`.
-    #[derive(Serialize, Deserialize, Default)]
-    pub struct Keystore {
-        /// Map of credential name → encrypted entry.
-        pub credentials: HashMap<String, EncryptedEntry>,
-    }
-
-    /// Path to the keystore file.
-    pub fn keystore_path() -> std::path::PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        let dir = std::path::Path::new(&home).join(".anchorkit");
-        std::fs::create_dir_all(&dir).ok();
-        dir.join("keystore.json")
-    }
-
-    /// Load the keystore from disk, returning an empty one if the file does not exist.
-    pub fn load() -> Keystore {
-        let path = keystore_path();
-        if !path.exists() {
-            return Keystore::default();
-        }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or_default()
-    }
-
-    /// Persist the keystore to disk with restricted permissions (0600 on Unix).
-    pub fn save(ks: &Keystore) -> std::io::Result<()> {
-        let path = keystore_path();
-        let json = serde_json::to_string_pretty(ks)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(&path, &json)?;
-        // Restrict file permissions to owner-only on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    }
-
-    /// Derive a 32-byte AES key from `password` and `salt` using Argon2id.
-    fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
-        // Argon2id with recommended parameters: m=65536 KiB, t=3, p=4
-        let params = Params::new(65536, 3, 4, Some(32))
-            .map_err(|e| format!("argon2 params error: {e}"))?;
-        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
-        let mut key = [0u8; 32];
-        argon2
-            .hash_password_into(password.as_bytes(), salt, &mut key)
-            .map_err(|e| format!("argon2 hash error: {e}"))?;
-        Ok(key)
-    }
-
-    /// Encrypt `plaintext` with AES-256-GCM using a key derived from `password`.
-    /// Returns an [`EncryptedEntry`] containing the nonce, ciphertext, and salt.
-    pub fn encrypt(password: &str, plaintext: &str) -> Result<EncryptedEntry, String> {
-        // Generate a fresh 16-byte salt and 12-byte nonce
-        let mut salt = [0u8; 16];
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut salt);
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-
-        let key_bytes = derive_key(password, &salt)?;
-        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-            .map_err(|e| format!("cipher init error: {e}"))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_bytes())
-            .map_err(|e| format!("encryption error: {e}"))?;
-
-        Ok(EncryptedEntry {
-            nonce: STANDARD.encode(nonce_bytes),
-            ciphertext: STANDARD.encode(ciphertext),
-            salt: STANDARD.encode(salt),
-        })
-    }
-
-    /// Decrypt an [`EncryptedEntry`] using `password`.
-    /// Returns `Err` if the password is wrong or the ciphertext is tampered.
-    pub fn decrypt(password: &str, entry: &EncryptedEntry) -> Result<String, String> {
-        let salt = STANDARD
-            .decode(&entry.salt)
-            .map_err(|e| format!("base64 salt decode error: {e}"))?;
-        let nonce_bytes = STANDARD
-            .decode(&entry.nonce)
-            .map_err(|e| format!("base64 nonce decode error: {e}"))?;
-        let ciphertext = STANDARD
-            .decode(&entry.ciphertext)
-            .map_err(|e| format!("base64 ciphertext decode error: {e}"))?;
-
-        let key_bytes = derive_key(password, &salt)?;
-        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-            .map_err(|e| format!("cipher init error: {e}"))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext.as_slice())
-            .map_err(|_| "wrong password or corrupted credential".to_string())?;
-
-        String::from_utf8(plaintext).map_err(|e| format!("utf8 decode error: {e}"))
-    }
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
+struct NetworkProfile {
+    name: String,
+    rpc_url: String,
+    network_passphrase: String,
+    horizon_url: Option<String>,
+    #[serde(default)]
+    is_default: bool,
 }
 
-// ── Key resolution ────────────────────────────────────────────────────────────
+fn networks_path() -> std::path::PathBuf {
+    let dir = dirs_home().join(".anchorkit");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("networks.json")
+}
+
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn load_network_profiles() -> Vec<NetworkProfile> {
+    let path = networks_path();
+    if !path.exists() { return Vec::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_network_profiles(profiles: &[NetworkProfile]) {
+    let path = networks_path();
+    let json = serde_json::to_string_pretty(profiles).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+fn find_profile<'a>(profiles: &'a [NetworkProfile], name: &str) -> Option<&'a NetworkProfile> {
+    profiles.iter().find(|p| p.name == name)
+}
+
+fn rpc_url_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.rpc_url.clone();
+    }
+    rpc_url(network).to_string()
+}
+
+fn passphrase_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.network_passphrase.clone();
+    }
+    passphrase(network).to_string()
+}
+
+fn default_network() -> String {
+    let profiles = load_network_profiles();
+    profiles.iter()
+        .find(|p| p.is_default)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "testnet".to_string())
+}
+
+
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
@@ -190,12 +127,14 @@ fn stellar_invoke(
     network: &str,
     fn_args: &[&str],
 ) -> String {
+    let url = rpc_url_for(network);
+    let phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &url,
+               "--network-passphrase", &phrase,
                "--"])
         .args(fn_args)
         .output()
@@ -218,9 +157,9 @@ struct Cli {
     #[arg(long, global = true, env = "ANCHOR_CONTRACT_ID")]
     contract_id: Option<String>,
 
-    /// Stellar network: testnet | mainnet | futurenet (or set STELLAR_NETWORK)
-    #[arg(long, global = true, env = "STELLAR_NETWORK", default_value = "testnet")]
-    network: String,
+    /// Stellar network: testnet | mainnet | futurenet | <custom> (or set STELLAR_NETWORK)
+    #[arg(long, global = true, env = "STELLAR_NETWORK")]
+    network: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -308,28 +247,30 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
-    /// Manage encrypted credentials
-    Credentials {
+    /// Manage custom network profiles
+    Network {
         #[command(subcommand)]
-        action: CredentialsAction,
+        action: NetworkAction,
     },
 }
 
 #[derive(Subcommand)]
-enum CredentialsAction {
-    /// Store an encrypted credential
+enum NetworkAction {
+    /// Add a custom network profile
     Add {
         #[arg(long)] name: String,
-        #[arg(long)] value: Option<String>,
+        #[arg(long)] rpc_url: String,
+        #[arg(long)] passphrase: String,
+        #[arg(long)] horizon_url: Option<String>,
     },
-    /// Retrieve a credential (prompts for keystore password)
-    Get {
+    /// List all configured network profiles
+    List,
+    /// Remove a custom network profile
+    Remove {
         #[arg(long)] name: String,
     },
-    /// List stored credential names (not values)
-    List,
-    /// Delete a credential
-    Remove {
+    /// Set the default network
+    SetDefault {
         #[arg(long)] name: String,
     },
 }
@@ -461,11 +402,13 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
 
     let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
     println!("Deploying {wasm} to {network}...");
+    let net_url = rpc_url_for(network);
+    let net_phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "deploy", "--wasm", wasm,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network)])
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase])
         .output()
         .expect("failed to run stellar contract deploy — is the Stellar CLI installed?");
 
@@ -495,8 +438,8 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
         .args(["contract", "invoke",
                "--id", &contract_id,
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase,
                "--", "initialize",
                "--admin", admin_addr])
         .output();
@@ -740,18 +683,8 @@ fn check_admin_secret_env() -> CheckResult {
 }
 
 fn check_network_connectivity(network: &str) -> CheckResult {
-    let url = rpc_url(network);
-    match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .and_then(|client| client.get(url).send())
-    {
-        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
-            CheckResult::pass(format!("Network connectivity to {} OK", network))
-        }
-        Ok(resp) => CheckResult::warn(format!("Network {} responded with HTTP {}", network, resp.status())),
-        Err(e) => CheckResult::fail(format!("Cannot connect to {} network: {}", network, e)),
-    }
+    let url = rpc_url_for(network);
+    check_network_connectivity_url(&url)
 }
 
 fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
@@ -761,8 +694,8 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
         .args(["contract", "invoke",
                "--id", contract_id,
                "--source", &source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &rpc_url_for(network),
+               "--network-passphrase", &passphrase_for(network),
                "--",
                "get_attestor_count"])
         .output();
@@ -866,106 +799,129 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
-// ── Credentials command ───────────────────────────────────────────────────────
+// ── Network command ───────────────────────────────────────────────────────────
 
-fn credentials_add(name: &str, value: Option<&str>) {
-    // Read value from stdin if not provided on command line (avoids shell history exposure)
-    let plaintext = if let Some(v) = value {
-        v.to_string()
-    } else {
-        rpassword::prompt_password(&format!("Value for '{}': ", name))
-            .unwrap_or_else(|e| { eprintln!("error: failed to read value: {e}"); std::process::exit(1); })
-    };
-
-    let password = rpassword::prompt_password("Keystore password: ")
-        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
-    let confirm = rpassword::prompt_password("Confirm password: ")
-        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
-
-    if password != confirm {
-        eprintln!("error: passwords do not match");
-        std::process::exit(1);
+fn network_cmd(action: NetworkAction) {
+    match action {
+        NetworkAction::Add { name, rpc_url, passphrase, horizon_url } => {
+            // Validate RPC URL connectivity before saving
+            let check = check_network_connectivity_url(&rpc_url);
+            if !check.passed {
+                eprintln!("error: RPC URL validation failed: {}", check.message);
+                std::process::exit(1);
+            }
+            let mut profiles = load_network_profiles();
+            if find_profile(&profiles, &name).is_some() {
+                eprintln!("error: network '{}' already exists. Remove it first.", name);
+                std::process::exit(1);
+            }
+            profiles.push(NetworkProfile {
+                name: name.clone(),
+                rpc_url,
+                network_passphrase: passphrase,
+                horizon_url,
+                is_default: false,
+            });
+            save_network_profiles(&profiles);
+            println!("Network '{}' added.", name);
+        }
+        NetworkAction::List => {
+            let profiles = load_network_profiles();
+            // Always show built-ins
+            let builtins = [
+                ("testnet",   "https://soroban-testnet.stellar.org",  "Test SDF Network ; September 2015"),
+                ("mainnet",   "https://horizon.stellar.org",           "Public Global Stellar Network ; September 2015"),
+                ("futurenet", "https://rpc-futurenet.stellar.org",     "Test SDF Future Network ; October 2022"),
+            ];
+            println!("{:<16} {:<45} {}", "NAME", "RPC URL", "PASSPHRASE");
+            for (name, url, phrase) in &builtins {
+                println!("{:<16} {:<45} {} (built-in)", name, url, phrase);
+            }
+            for p in &profiles {
+                let default_marker = if p.is_default { " (default)" } else { "" };
+                println!("{:<16} {:<45} {}{}", p.name, p.rpc_url, p.network_passphrase, default_marker);
+            }
+        }
+        NetworkAction::Remove { name } => {
+            let mut profiles = load_network_profiles();
+            let before = profiles.len();
+            profiles.retain(|p| p.name != name);
+            if profiles.len() == before {
+                eprintln!("error: network '{}' not found.", name);
+                std::process::exit(1);
+            }
+            save_network_profiles(&profiles);
+            println!("Network '{}' removed.", name);
+        }
+        NetworkAction::SetDefault { name } => {
+            let mut profiles = load_network_profiles();
+            // Allow setting built-in names as default (stored as a marker profile)
+            let found = profiles.iter().any(|p| p.name == name);
+            if !found {
+                // Check if it's a built-in
+                let builtins = ["testnet", "mainnet", "futurenet"];
+                if !builtins.contains(&name.as_str()) {
+                    eprintln!("error: network '{}' not found.", name);
+                    std::process::exit(1);
+                }
+            }
+            for p in &mut profiles {
+                p.is_default = p.name == name;
+            }
+            save_network_profiles(&profiles);
+            println!("Default network set to '{}'.", name);
+        }
     }
-
-    let entry = keystore::encrypt(&password, &plaintext)
-        .unwrap_or_else(|e| { eprintln!("error: encryption failed: {e}"); std::process::exit(1); });
-
-    let mut ks = keystore::load();
-    ks.credentials.insert(name.to_string(), entry);
-    keystore::save(&ks)
-        .unwrap_or_else(|e| { eprintln!("error: failed to save keystore: {e}"); std::process::exit(1); });
-
-    println!("Credential '{}' stored at {}", name, keystore::keystore_path().display());
 }
 
-fn credentials_get(name: &str) {
-    let ks = keystore::load();
-    let entry = ks.credentials.get(name)
-        .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
-
-    let password = rpassword::prompt_password("Keystore password: ")
-        .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
-
-    let value = keystore::decrypt(&password, entry)
-        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
-
-    println!("{}", value);
-}
-
-fn credentials_list() {
-    let ks = keystore::load();
-    if ks.credentials.is_empty() {
-        println!("No credentials stored.");
-        return;
+fn check_network_connectivity_url(url: &str) -> CheckResult {
+    match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .and_then(|client| client.get(url).send())
+    {
+        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+            CheckResult::pass(format!("RPC URL {} reachable", url))
+        }
+        Ok(resp) => CheckResult::warn(format!("RPC URL {} responded with HTTP {}", url, resp.status())),
+        Err(e) => CheckResult::fail(format!("Cannot connect to {}: {}", url, e)),
     }
-    let mut names: Vec<&String> = ks.credentials.keys().collect();
-    names.sort();
-    println!("Stored credentials ({}):", names.len());
-    for name in names {
-        println!("  - {}", name);
-    }
-}
-
-fn credentials_remove(name: &str) {
-    let mut ks = keystore::load();
-    if ks.credentials.remove(name).is_none() {
-        eprintln!("error: credential '{}' not found", name);
-        std::process::exit(1);
-    }
-    keystore::save(&ks)
-        .unwrap_or_else(|e| { eprintln!("error: failed to save keystore: {e}"); std::process::exit(1); });
-    println!("Credential '{}' removed.", name);
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
+    let network = cli.network.unwrap_or_else(default_network);
     match cli.command {
         Commands::Deploy { source, admin, dry_run, list } => {
-            deploy(&cli.network, &source, admin.as_deref(), dry_run, list);
+            deploy(&network, &source, admin.as_deref(), dry_run, list);
         }
-        Commands::Register { address, services, contract_id, network, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            register(&address, &services, &contract_id, &network, &source, &sep10_token, &sep10_issuer);
+        Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, sep10_token, sep10_issuer } => {
+            let net = cmd_net;
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network, secret_key, keypair_file, credential_name, issuer, session_id } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            attest(&subject, &payload_hash, &contract_id, &network, &source, &issuer, session_id);
+        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, issuer, session_id } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+            attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
         }
-        Commands::Quote { from, to, amount, contract_id, network, secret_key, keypair_file, credential_name } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            quote(&from, &to, amount, &contract_id, &network, &source);
+        Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+            quote(&from, &to, amount, &contract_id, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
-        Commands::Revoke { address, contract_id, network, secret_key, keypair_file, credential_name } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            revoke(&address, &contract_id, &network, &source);
+        Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+            revoke(&address, &contract_id, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
-            doctor(&cli.network, fix);
+            doctor(&network, fix);
+        }
+        Commands::Network { action } => {
+            network_cmd(action);
         }
         Commands::Credentials { action } => {
             match action {
