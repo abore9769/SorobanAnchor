@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use alloc::vec;
 use crate::stellar_toml::{fetch_stellar_toml_url, parse_stellar_toml};
 
 const VALID_TOML: &str = r#"

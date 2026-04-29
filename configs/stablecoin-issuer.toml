@@ -53,6 +53,7 @@ audit_log_retention_days = 2555  # 7 years for financial compliance
 [operations]
 # Reserve Proof
 [[operations.templates]]
+id = "reserve-proof"
 name = "reserve-proof"
 attestor = "reserve-auditor"
 operation_type = "reserve_attestation"
@@ -62,6 +63,7 @@ description = "Auditor confirms sufficient reserves backing stablecoins in circu
 
 # Collateral Deposit
 [[operations.templates]]
+id = "collateral-deposit"
 name = "collateral-deposit"
 attestor = "collateral-manager"
 operation_type = "collateral_deposit"
@@ -71,6 +73,7 @@ description = "Collateral received and registered with custodian"
 
 # Collateral Liquidation
 [[operations.templates]]
+id = "collateral-liquidation"
 name = "collateral-liquidation"
 attestor = "collateral-manager"
 operation_type = "collateral_liquidation"
@@ -80,6 +83,7 @@ description = "Collateral liquidated due to insufficient maintenance ratio"
 
 # Mint Authorization
 [[operations.templates]]
+id = "mint-authorization"
 name = "mint-authorization"
 attestor = "treasury-manager"
 operation_type = "mint_authorization"
@@ -89,6 +93,7 @@ description = "Treasury authorized minting of new stablecoins"
 
 # Burn Confirmation
 [[operations.templates]]
+id = "burn-confirmation"
 name = "burn-confirmation"
 attestor = "treasury-manager"
 operation_type = "burn_confirmation"
@@ -98,6 +103,7 @@ description = "Confirmed stablecoins removed from circulation"
 
 # Redemption Processing
 [[operations.templates]]
+id = "redemption-processing"
 name = "redemption-processing"
 attestor = "treasury-manager"
 operation_type = "redemption_processing"
@@ -107,6 +113,7 @@ description = "Stablecoins redeemed for underlying reserves"
 
 # Risk Assessment Update
 [[operations.templates]]
+id = "risk-assessment"
 name = "risk-assessment"
 attestor = "risk-monitor"
 operation_type = "risk_assessment"
@@ -116,6 +123,7 @@ description = "Risk parameters monitored and updated"
 
 # Price Feed Attestation
 [[operations.templates]]
+id = "price-feed"
 name = "price-feed"
 attestor = "risk-monitor"
 operation_type = "price_feed"
@@ -146,7 +154,7 @@ asset = "USD-equivalents"
 target_percentage = 10.0
 minimum_percentage = 5.0
 
-# Supply caps
+[stablecoin.supply_caps]
 maximum_supply_cap = 10000000000  # 10 billion stablecoins
 warning_threshold_percent = 90
 emergency_threshold_percent = 95
@@ -177,18 +185,18 @@ price_feed = "https://price-feed.example.com/xlm"
 minimum_deposit = 100
 
 [compliance]
-# Reserve ratio requirements
+[compliance.reserve_requirements]
 minimum_reserve_ratio = 1.0
 target_reserve_ratio = 1.05
 audit_frequency_days = 30
 audit_announcement_days = 7
 
-# Transaction limits
+[compliance.transaction_limits]
 max_single_redemption_usd = 1000000
 max_single_mint_usd = 1000000
 max_daily_total_flow_usd = 100000000
 
-# Collateral ratio monitoring
+[compliance.collateral_ratio_monitoring]
 minimum_collateral_ratio = 1.3
 warning_collateral_ratio = 1.5
 emergency_collateral_ratio = 1.2

@@ -5,7 +5,7 @@
 //! This is critical for replay-attack detection: the contract stores the hash
 //! of each submitted attestation and rejects duplicates.
 
-use soroban_sdk::{Address, Bytes, BytesN, Env};
+use soroban_sdk::{Address, Bytes, BytesN, Env, xdr::ToXdr};
 
 /// Compute a canonical SHA-256 hash over attestation payload fields.
 ///
@@ -60,7 +60,7 @@ pub fn compute_payload_hash(
     // 3. data payload
     input.append(data);
 
-    env.crypto().sha256(&input)
+    env.crypto().sha256(&input).into()
 }
 
 /// Verify that the stored attestation's payload hash matches the expected hash.

@@ -3,10 +3,8 @@
 //! Provides normalized service functions for fetching prices and requesting firm quotes
 //! across different anchors.
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 use crate::errors::Error;
 
@@ -202,6 +200,7 @@ pub fn is_quote_expired(quote: &FirmQuote, current_timestamp: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     fn valid_raw(expires_at: &str) -> RawFirmQuote {
         RawFirmQuote {

@@ -3,10 +3,8 @@
 //! Provides normalized service functions for initiating interactive deposits,
 //! interactive withdrawals, and fetching transaction status for SEP-24 flows.
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 use crate::domain_validator::validate_anchor_domain;
 use crate::errors::{AnchorKitError, ErrorCode};
@@ -247,9 +245,7 @@ pub fn fetch_sep24_transaction_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -----------------------------------------------------------------------
-    // validate_interactive_url
+    use alloc::string::ToString;
     // -----------------------------------------------------------------------
 
     #[test]

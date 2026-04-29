@@ -4,8 +4,6 @@
 //! (SEP-6, SEP-24, SEP-10, KYC) from a raw stellar.toml string.
 //! No external TOML crate is required; only `alloc` is used.
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
 

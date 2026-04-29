@@ -93,11 +93,7 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
     if let Some(name) = credential_name {
         let password = rpassword::prompt_password("Keystore password: ")
             .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
-        let ks = keystore::load();
-        let entry = ks.credentials.get(name)
-            .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
-        return keystore::decrypt(&password, entry)
-            .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); });
+        return keystore_get_decrypted(name, &password);
     }
     eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
@@ -251,6 +247,11 @@ enum Commands {
         /// Name of a credential stored in the keystore (alternative to --secret-key)
         #[arg(long)] credential_name: Option<String>,
     },
+    /// Manage stored credentials (encrypted secret keys)
+    Credentials {
+        #[command(subcommand)]
+        action: CredentialsAction,
+    },
     /// Check environment setup
     Doctor {
         /// Attempt to automatically fix issues
@@ -285,9 +286,29 @@ enum NetworkAction {
     },
 }
 
+#[derive(Subcommand)]
+enum CredentialsAction {
+    /// Store an encrypted credential
+    Add {
+        #[arg(long)] name: String,
+        /// Secret key value (prompted if omitted)
+        #[arg(long)] value: Option<String>,
+    },
+    /// Retrieve and print a stored credential
+    Get {
+        #[arg(long)] name: String,
+    },
+    /// List all stored credential names
+    List,
+    /// Remove a stored credential
+    Remove {
+        #[arg(long)] name: String,
+    },
+}
+
 // ── Output types (JSON) ───────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct QuoteOutput {
     quote_id: u64,
     anchor: String,
@@ -969,42 +990,180 @@ fn check_network_connectivity_url(url: &str) -> CheckResult {
     }
 }
 
+// ── Keystore (AES-256-GCM encrypted credential store) ─────────────────────────
+
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+use aes_gcm::aead::rand_core::RngCore;
+use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+fn keystore_path() -> std::path::PathBuf {
+    let dir = dirs_home().join(".anchorkit");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("credentials.json")
+}
+
+fn keystore_load() -> std::collections::HashMap<String, String> {
+    let path = keystore_path();
+    if !path.exists() { return std::collections::HashMap::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn keystore_save(store: &std::collections::HashMap<String, String>) {
+    let path = keystore_path();
+    let json = serde_json::to_string_pretty(store).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+/// Derive a 32-byte key from password using Argon2id with a fixed salt derived from the name.
+fn derive_key(password: &str, name: &str) -> [u8; 32] {
+    let salt_raw = format!("anchorkit-{name}");
+    let salt_padded = format!("{:>22}", &salt_raw[..salt_raw.len().min(22)]);
+    let salt = SaltString::from_b64(&base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        salt_padded.as_bytes(),
+    )).unwrap_or_else(|_| SaltString::generate(&mut rand::thread_rng()));
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), &salt)
+        .unwrap_or_else(|e| { eprintln!("error: key derivation failed: {e}"); std::process::exit(1); });
+    let hash_bytes = hash.hash.unwrap();
+    let mut key = [0u8; 32];
+    let bytes = hash_bytes.as_bytes();
+    key[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+    key
+}
+
+fn keystore_encrypt(password: &str, name: &str, plaintext: &str) -> String {
+    use aes_gcm::aead::generic_array::GenericArray;
+    let key_bytes = derive_key(password, name);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
+        .unwrap_or_else(|e| { eprintln!("error: encryption failed: {e}"); std::process::exit(1); });
+    // Store as base64(nonce) + "." + base64(ciphertext)
+    use base64::Engine;
+    format!(
+        "{}.{}",
+        base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
+        base64::engine::general_purpose::STANDARD.encode(ciphertext),
+    )
+}
+
+fn keystore_decrypt(password: &str, name: &str, stored: &str) -> Result<String, String> {
+    use aes_gcm::aead::generic_array::GenericArray;
+    use base64::Engine;
+    let parts: Vec<&str> = stored.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err("invalid stored credential format".to_string());
+    }
+    let nonce_bytes = base64::engine::general_purpose::STANDARD.decode(parts[0])
+        .map_err(|e| format!("base64 decode nonce: {e}"))?;
+    let ciphertext = base64::engine::general_purpose::STANDARD.decode(parts[1])
+        .map_err(|e| format!("base64 decode ciphertext: {e}"))?;
+    let key_bytes = derive_key(password, name);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
+    let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| "decryption failed — wrong password?".to_string())?;
+    String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))
+}
+
+fn keystore_get_decrypted(name: &str, password: &str) -> String {
+    let store = keystore_load();
+    let stored = store.get(name)
+        .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
+    keystore_decrypt(password, name, stored)
+        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); })
+}
+
+fn credentials_add(name: &str, value: Option<&str>) {
+    let secret = match value {
+        Some(v) => v.to_string(),
+        None => rpassword::prompt_password("Secret key value: ")
+            .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }),
+    };
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    let confirm = rpassword::prompt_password("Confirm password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    if password != confirm {
+        eprintln!("error: passwords do not match");
+        std::process::exit(1);
+    }
+    let encrypted = keystore_encrypt(&password, name, &secret);
+    let mut store = keystore_load();
+    store.insert(name.to_string(), encrypted);
+    keystore_save(&store);
+    println!("Credential '{}' stored.", name);
+}
+
+fn credentials_get(name: &str) {
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    let secret = keystore_get_decrypted(name, &password);
+    println!("{secret}");
+}
+
+fn credentials_list() {
+    let store = keystore_load();
+    if store.is_empty() {
+        println!("No credentials stored.");
+    } else {
+        for name in store.keys() {
+            println!("{name}");
+        }
+    }
+}
+
+fn credentials_remove(name: &str) {
+    let mut store = keystore_load();
+    if store.remove(name).is_none() {
+        eprintln!("error: credential '{}' not found", name);
+        std::process::exit(1);
+    }
+    keystore_save(&store);
+    println!("Credential '{}' removed.", name);
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
     let network = cli.network.unwrap_or_else(default_network);
     match cli.command {
-        Commands::Deploy { source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
+        Commands::Deploy { network: cmd_net, source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
+            let net = cmd_net;
             if upgrade {
                 let contract_id = cli.contract_id.unwrap_or_else(|| {
                     eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
                     std::process::exit(1);
                 });
-                let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-                upgrade_contract(&contract_id, &network, &signing_source);
+                let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+                upgrade_contract(&contract_id, &net, &signing_source);
             } else {
-                deploy(&network, &source, admin.as_deref(), dry_run, list);
+                deploy(&net, &source, admin.as_deref(), dry_run, list);
             }
         }
-        Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, sep10_token, sep10_issuer } => {
+        Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
             let net = cmd_net;
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, issuer, session_id } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
         }
-        Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             quote(&from, &to, amount, &contract_id, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
-        Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
+        Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             revoke(&address, &contract_id, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {

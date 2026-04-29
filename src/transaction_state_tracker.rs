@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
+#![allow(dead_code)]
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
 
 use crate::errors::AnchorKitError;
@@ -744,15 +744,15 @@ impl TransactionStateTracker {
     /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
     ///
     /// let mut tracker = TransactionStateTracker::new(true);
-    /// assert!(tracker.clear_cache().is_ok());
+    /// assert!(tracker.clear_cache(&env).is_ok());
     /// assert_eq!(tracker.cache_size(), 0);
     /// ```
-    pub fn clear_cache(&mut self) -> Result<(), String> {
+    pub fn clear_cache(&mut self, env: &Env) -> Result<(), String> {
         if self.is_dev_mode {
             self.cache = alloc::vec::Vec::new();
             Ok(())
         } else {
-            Err("Cannot clear cache in production mode".into())
+            Err(String::from_str(env, "Cannot clear cache in production mode"))
         }
     }
 
@@ -869,7 +869,6 @@ impl TransactionStateTracker {
 mod tests {
     use super::*;
     use soroban_sdk::Env;
-    use soroban_sdk::testutils::Address;
 
     #[test]
     fn test_create_transaction() {
@@ -927,6 +926,7 @@ mod tests {
         let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
 
         tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.start_transaction(1, &env).ok(); // Pending -> InProgress
         let error_msg = String::from_str(&env, "Test error");
         let result = tracker.fail_transaction(1, error_msg, &env);
 
@@ -1001,7 +1001,7 @@ mod tests {
         let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
 
         tracker.create_transaction(1, initiator.clone(), &env).ok();
-        let clear_result = tracker.clear_cache();
+        let clear_result = tracker.clear_cache(&env);
 
         assert!(clear_result.is_ok());
         assert_eq!(tracker.cache_size(), 0);
