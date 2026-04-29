@@ -1,4 +1,4 @@
-use Vec;
+use alloc::vec::Vec;
 
 /// Retry configuration for off-chain anchor requests.
 ///
@@ -282,6 +282,7 @@ where
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use alloc::vec;
 
     #[derive(Debug, PartialEq)]
     enum TestError {

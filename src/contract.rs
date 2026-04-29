@@ -1,6 +1,7 @@
+use alloc::{string::String as RustString, vec::Vec as RustVec};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 use crate::deterministic_hash::{compute_payload_hash, verify_payload_hash};
@@ -21,11 +22,9 @@ pub struct Session {
     pub created_at: u64,
     pub nonce: u64,
     pub operation_count: u64,
- feat/session-expiry-check
     pub session_ttl_seconds: u64,
 
     pub closed: bool,
- main
 }
 
 #[contracttype]
@@ -242,7 +241,7 @@ impl WeightedRoutingStrategy {
 // ---------------------------------------------------------------------------
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum KycStatus {
     NotSubmitted = 0,
@@ -669,8 +668,9 @@ impl AnchorKitContract {
 
         let hash = env.crypto().sha256(&input);
         let mut id = Bytes::new(&env);
-        for i in 0..16u32 {
-            id.push_back(hash.get(i).unwrap());
+        let hash_bytes = hash.to_array();
+        for b in hash_bytes.iter().take(16) {
+            id.push_back(*b);
         }
 
         RequestId { id, created_at: ts }
@@ -846,7 +846,9 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     pub fn set_endpoint(env: Env, attestor: Address, endpoint: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
-        crate::validate_anchor_domain(endpoint.as_str()).map_err(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat))?;
+        let endpoint_str = Self::soroban_string_to_rust_string(&env, &endpoint);
+        crate::validate_anchor_domain(&endpoint_str)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat));
         let key = (symbol_short!("ENDPOINT"), attestor.clone());
         env.storage().persistent().set(&key, &endpoint);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -878,12 +880,14 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     pub fn register_webhook(env: Env, attestor: Address, webhook_url: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
-        crate::validate_anchor_domain(webhook_url.as_str()).map_err(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat))?;
+        let webhook_url_str = Self::soroban_string_to_rust_string(&env, &webhook_url);
+        crate::validate_anchor_domain(&webhook_url_str)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat));
         let key = (symbol_short!("WEBHOOK"), attestor.clone());
         env.storage().persistent().set(&key, &webhook_url);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
-            (symbol_short!("webhook"), symbol_short!("registered")),
+            (symbol_short!("webhook"), symbol_short!("reg")),
             EndpointUpdated {
                 attestor,
                 endpoint: webhook_url,
@@ -1014,7 +1018,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     // Attestation submission with KYC enforcement
     // -----------------------------------------------------------------------
 
-    pub fn submit_attestation_with_kyc_check(
+    pub fn submit_attestation_kyc_check(
         env: Env,
         issuer: Address,
         subject: Address,
@@ -1602,7 +1606,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
-            (symbol_short!("compliance"), symbol_short!("checked"), subject),
+            (symbol_short!("comp"), symbol_short!("checked"), subject),
             record,
         );
     }
@@ -2433,7 +2437,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             reputation_weight: rw,
         };
         if !strategy.validate() {
-            panic_with_error!(&env, ErrorCode::InvalidWeights);
+            panic_with_error!(&env, ErrorCode::ValidationError);
         }
 
         let now = env.ledger().timestamp();
@@ -2716,6 +2720,16 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         }
     }
 
+    fn soroban_string_to_rust_string(env: &Env, value: &String) -> RustString {
+        let len = value.len() as usize;
+        let mut buffer = RustVec::new();
+        buffer.resize(len, 0u8);
+        value.copy_into_slice(&mut buffer);
+        RustString::from_utf8(buffer).unwrap_or_else(|_| {
+            panic_with_error!(env, ErrorCode::InvalidEndpointFormat)
+        })
+    }
+
     fn verify_attestation_signature(env: &Env, issuer: &Address, payload_hash: &Bytes, signature: &Bytes) {
         let pk: BytesN<32> = env
             .storage()
@@ -2725,9 +2739,11 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         if signature.len() != 64 {
             panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
         }
-        if !env.crypto().ed25519_verify(&pk, payload_hash, signature) {
-            panic_with_error!(env, ErrorCode::UnauthorizedAttestor);
-        }
+        let signature_bytes: BytesN<64> = signature.clone().try_into().unwrap_or_else(|_| {
+            panic_with_error!(env, ErrorCode::UnauthorizedAttestor)
+        });
+        env.crypto()
+            .ed25519_verify(&pk, payload_hash, &signature_bytes);
     }
 
     fn check_timestamp(env: &Env, timestamp: u64) {

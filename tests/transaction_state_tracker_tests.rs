@@ -177,7 +177,7 @@ mod transaction_state_tracker_tests {
         tracker.create_transaction(2, initiator.clone(), &env).ok();
         assert_eq!(tracker.cache_size(), 2);
 
-        let clear_result = tracker.clear_cache();
+        let clear_result = tracker.clear_cache(&env);
         assert!(clear_result.is_ok());
         assert_eq!(tracker.cache_size(), 0);
     }

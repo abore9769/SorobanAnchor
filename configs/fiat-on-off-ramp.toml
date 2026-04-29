@@ -21,7 +21,7 @@ enabled = true
 # Bank Integration Service
 [[attestors.registry]]
 name = "bank-integration"
-address = "GB7ZTQBJ7XXJQ6JDLHYQXQX3JQXJ3JQXJ3JQXJ3JQXJ3JQXJ3JQX"
+address = "GBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 description = "Bank wire transfer confirmation"
 endpoint = "https://banking-api.example.com/transfers"
 role = "transfer-verifier"
@@ -45,6 +45,7 @@ audit_log_retention_days = 365
 [operations]
 # KYC Verification Attestation
 [[operations.templates]]
+id = "kyc-verification"
 name = "kyc-verification"
 attestor = "kyc-provider"
 operation_type = "kyc_verification"
@@ -54,6 +55,7 @@ description = "Individual has completed KYC verification at specified level"
 
 # Fund Deposit Confirmation
 [[operations.templates]]
+id = "deposit-confirmation"
 name = "deposit-confirmation"
 attestor = "bank-integration"
 operation_type = "fund_transfer"
@@ -63,6 +65,7 @@ description = "Bank has confirmed receipt of fiat deposit"
 
 # Withdrawal Approval
 [[operations.templates]]
+id = "withdrawal-approval"
 name = "withdrawal-approval"
 attestor = "compliance-officer"
 operation_type = "withdrawal_approval"
@@ -72,6 +75,7 @@ description = "Compliance officer approved withdrawal request"
 
 # Deposit Refund
 [[operations.templates]]
+id = "deposit-refund"
 name = "deposit-refund"
 attestor = "bank-integration"
 operation_type = "fund_refund"

@@ -3,8 +3,6 @@
 //! Validates that anchor API responses contain all required fields before
 //! returning them to the SDK consumer. Throws [`Error::ValidationError`] on mismatch.
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 
 use crate::errors::Error;
@@ -55,6 +53,7 @@ pub struct AnchorInfoResponse {
 }
 
 /// A validated transaction status response.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionStatusResponse {
     pub transaction_id: alloc::string::String,
@@ -362,6 +361,7 @@ pub fn validate_anchor_info_response(
 /// # Errors
 ///
 /// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any field is empty.
+#[allow(dead_code)]
 pub fn validate_transaction_status_response(
     transaction_id: &str,
     status: &str,

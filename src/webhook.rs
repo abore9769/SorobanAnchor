@@ -5,14 +5,18 @@
 //! map under `dead_letter_storage_key`.  `get_dead_letter_webhooks` lets
 //! admins inspect those failed entries.
 
+#[cfg(feature = "std")]
+extern crate std;
+
 extern crate alloc;
 
 use alloc::{
     collections::BTreeMap,
     format,
     string::{String, ToString},
-    vec::Vec,
 };
+use alloc::vec;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use crate::{
@@ -69,6 +73,7 @@ where
     // closure itself is only FnMut (not FnOnce).
     let last_error_msg: RefCell<String> = RefCell::new(String::new());
 
+    let mut jitter_source = crate::retry::MockJitterSource::new(vec![0]);
     let result = retry_with_backoff(
         &retry_cfg,
         |attempt| {
@@ -77,19 +82,18 @@ where
                 Ok(s) => format!("HTTP {s}"),
                 Err(e) => e,
             };
-            let delay = retry_cfg.delay_for_attempt(attempt, attempt as u64 * 17 + 3);
             #[cfg(feature = "std")]
-            eprintln!(
-                "[webhook] attempt={} error=\"{}\" next_delay_ms={}",
+            std::eprintln!(
+                "[webhook] attempt={} error=\"{}\"",
                 attempt + 1,
-                msg,
-                delay
+                msg
             );
             *last_error_msg.borrow_mut() = msg.clone();
             Err(msg)
         },
         |_e: &String| true, // all HTTP/transport errors are retryable
         &mut sleep_fn,
+        &mut jitter_source,
     );
 
     match result {

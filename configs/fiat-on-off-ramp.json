@@ -19,7 +19,7 @@
       },
       {
         "name": "bank-integration",
-        "address": "GB7ZTQBJ7XXJQ6JDLHYQXQX3JQXJ3JQXJ3JQXJ3JQXJ3JQXJ3JQX",
+        "address": "GBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
         "description": "Bank wire transfer confirmation",
         "endpoint": "https://banking-api.example.com/transfers",
         "role": "transfer-verifier",

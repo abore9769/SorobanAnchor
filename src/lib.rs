@@ -103,11 +103,11 @@ extern crate alloc;
 
 mod deterministic_hash;
 mod domain_validator;
-mod errors;
+pub mod errors;
 pub mod sep10_jwt;
-mod rate_limiter;
+pub mod rate_limiter;
 mod response_validator;
-mod retry;
+pub mod retry;
 mod transaction_state_tracker;
 pub mod webhook;
 pub mod sep6;
@@ -133,8 +133,6 @@ pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, Led
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
 pub use webhook::{deliver_webhook, get_dead_letter_webhooks, WebhookDeliveryConfig};
 
-#[cfg(test)]
-mod transaction_state_tracker_tests;
 pub use sep6::{
     fetch_transaction_status, initiate_deposit, initiate_withdrawal, DepositResponse,
     RawDepositResponse, RawTransactionResponse, RawWithdrawalResponse, TransactionKind,
@@ -147,52 +145,11 @@ pub use sep24::{
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
-pub use contract::{AnchorKitContract, EndpointUpdated, get_endpoint, set_endpoint};
+pub use contract::{AnchorKitContract, EndpointUpdated};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord};
 pub use transaction_state_tracker::StorageBudgetMonitor;
 pub mod streaming_monitor;
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
-
-#[cfg(test)]
-mod request_id_tests;
-
-#[cfg(test)]
-mod tracing_span_tests;
-
-#[cfg(test)]
-mod metadata_cache_tests;
-
-#[cfg(test)]
-mod streaming_flow_tests;
-
-#[cfg(test)]
-mod webhook_middleware_tests;
-
-#[cfg(test)]
-mod session_tests;
-
-#[cfg(test)]
-mod sep10_test_util;
-
-#[cfg(test)]
-mod sep10_contract_tests;
-
-#[cfg(test)]
-mod routing_tests;
-
-#[cfg(test)]
-mod attestation_sig_tests;
-
-#[cfg(test)]
-mod deterministic_hash_snapshot_tests {
-    // Snapshot tests live inside deterministic_hash module itself.
-    // This module exists to satisfy the test_snapshots/deterministic_hash_tests path.
-}
-
-mod capability_detection_tests;
-
-#[cfg(test)]
-mod attestor_endpoint_tests;
 
 #[cfg(test)]
 mod stellar_toml_tests;

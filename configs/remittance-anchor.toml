@@ -53,6 +53,7 @@ audit_log_retention_days = 1825  # 5 years for regulatory compliance
 [operations]
 # Sender Identity Verification
 [[operations.templates]]
+id = "sender-kyc"
 name = "sender-kyc"
 attestor = "identity-verifier"
 operation_type = "sender_verification"
@@ -62,6 +63,7 @@ description = "Sender identity verified through biometric or document verificati
 
 # Recipient Identity Verification
 [[operations.templates]]
+id = "recipient-verification"
 name = "recipient-verification"
 attestor = "identity-verifier"
 operation_type = "recipient_verification"
@@ -71,6 +73,7 @@ description = "Recipient identity and account details verified"
 
 # AML/CFT Screening
 [[operations.templates]]
+id = "aml-clearance"
 name = "aml-clearance"
 attestor = "aml-screening"
 operation_type = "aml_screening"
@@ -80,6 +83,7 @@ description = "Transaction cleared by AML/CFT screening against sanctions lists"
 
 # Settlement Instruction
 [[operations.templates]]
+id = "settlement-instruction"
 name = "settlement-instruction"
 attestor = "correspondent-bank"
 operation_type = "settlement_instruction"
@@ -89,6 +93,7 @@ description = "Settlement instruction sent to correspondent bank"
 
 # Settlement Confirmation
 [[operations.templates]]
+id = "settlement-confirmation"
 name = "settlement-confirmation"
 attestor = "correspondent-bank"
 operation_type = "settlement_confirmation"
@@ -98,6 +103,7 @@ description = "Correspondent bank confirmed funds settled to recipient"
 
 # Corridor Routing Decision
 [[operations.templates]]
+id = "corridor-routing"
 name = "corridor-routing"
 attestor = "corridor-operator"
 operation_type = "corridor_routing"
@@ -135,6 +141,7 @@ minimum_amount = 100.0
 maximum_amount = 100000.0
 
 # Exchange rate handling
+[remittance.exchange_rate]
 enable_live_rates = true
 rate_lock_duration_seconds = 60
 rate_variance_tolerance_percent = 0.5
