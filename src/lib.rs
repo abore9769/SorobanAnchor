@@ -125,8 +125,9 @@ pub use errors::Error;
 pub use rate_limiter::{RateLimiter, RateLimitConfig, RateLimitState};
 pub use response_validator::{
     validate_anchor_info_response, validate_deposit_response, validate_quote_response,
-    validate_withdraw_response, validate_stellar_asset, AnchorInfoResponse,
-    DepositResponse as ValidatorDepositResponse, QuoteResponse, WithdrawResponse,
+    validate_sep38_quote_response, validate_withdraw_response, validate_stellar_asset,
+    AnchorInfoResponse, DepositResponse as ValidatorDepositResponse, QuoteResponse,
+    Sep38QuoteResponse, WithdrawResponse,
 };
 pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
