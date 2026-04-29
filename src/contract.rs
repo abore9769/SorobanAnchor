@@ -2511,10 +2511,6 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         result
     }
 
-
-        let limit = if max_results == 0 { 3u32 } else { max_results };
-        let mut result: Vec<Quote> = Vec::new(&env);
-        let mut taken = 0u32;
     // -----------------------------------------------------------------------
     // Anchor Info Discovery
     // -----------------------------------------------------------------------

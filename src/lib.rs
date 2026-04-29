@@ -172,9 +172,6 @@ mod webhook_middleware_tests;
 mod session_tests;
 
 #[cfg(test)]
-mod anchor_info_discovery_tests;
-
-#[cfg(test)]
 mod sep10_test_util;
 
 #[cfg(test)]

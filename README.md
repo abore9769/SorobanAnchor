@@ -35,9 +35,7 @@ tests/                      # Integration and unit tests
 configs/                    # Example anchor configurations (JSON + TOML)
 examples/                   # Rust and shell usage examples
 scripts/                    # Build, validation, and deploy scripts
-ui/                         # React components for anchor UIs
 docs/                       # Feature and guide documentation
-static/                     # HTML dashboards (status monitor, webhook monitor)
 test_snapshots/             # Snapshot fixtures for deterministic tests
 ```
 
