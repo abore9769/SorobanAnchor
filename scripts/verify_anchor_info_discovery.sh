@@ -1,8 +1,12 @@
 #!/bin/bash
-# Test verification script for Anchor Info Discovery
+# Deprecated helper script for the old Anchor Info Discovery review process.
+# Current implementation lives in src/contract.rs and tests/anchor_info_discovery_tests.rs.
 
-echo "=== Anchor Info Discovery - Verification ==="
+echo "Deprecated: this verification script is no longer used."
+echo "Use the core repository tests instead:"
+echo "  cargo test --test anchor_info_discovery_tests"
 echo ""
+exit 0
 
 echo "✓ Files Created:"
 echo "  - src/anchor_info_discovery.rs (470 lines)"
