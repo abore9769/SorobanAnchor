@@ -332,6 +332,101 @@ test('copies cURL to clipboard', async () => {
 });
 ```
 
+## PrecisionFintech
+
+High-level portfolio dashboard component for fintech-style account monitoring, charting, and position management.
+
+### Props Interface
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `metrics` | `PrecisionFintechMetric[]` | No | `DEFAULT_METRICS` | Summary cards at the top of the dashboard. |
+| `positions` | `PrecisionFintechPosition[]` | No | `DEFAULT_POSITIONS` | Rows rendered in the positions table. |
+| `chartData` | `number[]` | No | `DEFAULT_CHART_DATA` | Time-series values rendered by the performance chart. |
+| `initialTab` | `'overview' \| 'analytics' \| 'history'` | No | `'overview'` | Initial active tab in the positions panel. |
+| `headlineValue` | `string` | No | `'$2,847,391'` | Main hero value shown above the dashboard grid. |
+| `headlineLabel` | `string` | No | `'Total AUM'` | Secondary hero label shown under the headline. |
+
+### Supporting Types
+
+```ts
+export interface PrecisionFintechMetric {
+  label: string;
+  value: string;
+  change: string;
+  up: boolean;
+}
+
+export interface PrecisionFintechPosition {
+  ticker: string;
+  name: string;
+  qty: number;
+  price: number;
+  change: number;
+  value: number;
+}
+```
+
+### Usage Example
+
+```tsx
+import { PrecisionFintech } from '@anchorkit/ui-components';
+
+export function PortfolioScreen() {
+  return (
+    <PrecisionFintech
+      headlineValue="$4,210,981"
+      headlineLabel="Managed NAV"
+      initialTab="analytics"
+      metrics={[
+        { label: 'Portfolio Value', value: '$4,210,981', change: '+3.2%', up: true },
+        { label: 'Daily P&L', value: '+$21,103', change: '+0.5%', up: true },
+        { label: 'Sharpe Ratio', value: '2.41', change: '+0.04', up: true },
+        { label: 'Alpha', value: '14.9%', change: '+0.7%', up: true },
+      ]}
+    />
+  );
+}
+```
+
+### Integration Pattern
+
+`PrecisionFintech` is commonly used as the shell around identity, capability, and transfer-progress flows.
+
+Typical composition:
+- `Sep10AuthFlow` for wallet authentication
+- `AnchorCapabilityCard` for asset/rail eligibility
+- `TransactionTimeline` for post-submit status tracking
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant Shell as PrecisionFintech
+  participant Auth as Sep10AuthFlow
+  participant Cap as AnchorCapabilityCard
+  participant Tx as TransactionTimeline
+
+  User->>Shell: Open dashboard
+  Shell->>Auth: Request auth challenge
+  Auth-->>Shell: JWT/session context
+  Shell->>Cap: Load anchor capabilities
+  Cap-->>Shell: Supported assets + limits + fees
+  User->>Shell: Submit trade/deposit/withdraw action
+  Shell->>Tx: Start transaction tracking
+  Tx-->>Shell: Status updates (pending/processing/completed)
+  Shell-->>User: Refresh metrics/positions + alerts
+```
+
+### Test Coverage and Accessibility
+
+- Test file: `ui/components/PrecisionFintech.test.tsx`
+- Accessibility audit: `jest-axe` assertions are included in the test suite.
+- Suggested coverage command:
+
+```bash
+npx jest components/PrecisionFintech.test.tsx --coverage --collectCoverageFrom=components/PrecisionFintech.tsx
+```
+
 ## License
 
 Part of the AnchorKit project.

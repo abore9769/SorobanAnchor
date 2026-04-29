@@ -1,13 +1,83 @@
 import { useState } from "react";
 
-const metrics = [
+/** Metric row displayed in the portfolio summary strip. */
+export interface PrecisionFintechMetric {
+  /** Human-readable metric label. */
+  label: string;
+  /** Primary metric value shown in large type. */
+  value: string;
+  /** Delta string shown below the value. */
+  change: string;
+  /** Indicates positive (up) or negative (down) movement. */
+  up: boolean;
+}
+
+/** Position row displayed in the positions table. */
+export interface PrecisionFintechPosition {
+  /** Tradable symbol or asset code. */
+  ticker: string;
+  /** Expanded instrument name. */
+  name: string;
+  /** Position quantity. */
+  qty: number;
+  /** Last traded unit price. */
+  price: number;
+  /** Percentage change for the current period. */
+  change: number;
+  /** Mark-to-market total value for the position. */
+  value: number;
+}
+
+/**
+ * Public props for the PrecisionFintech dashboard shell.
+ */
+export interface PrecisionFintechProps {
+  /**
+   * Summary metrics rendered in the top KPI strip.
+   *
+   * @default DEFAULT_METRICS
+   */
+  metrics?: PrecisionFintechMetric[];
+  /**
+   * Portfolio positions rendered in the positions table.
+   *
+   * @default DEFAULT_POSITIONS
+   */
+  positions?: PrecisionFintechPosition[];
+  /**
+   * Time-series points used to draw the performance sparkline.
+   *
+   * @default DEFAULT_CHART_DATA
+   */
+  chartData?: number[];
+  /**
+   * Starting tab in the positions section.
+   *
+   * @default "overview"
+   */
+  initialTab?: "overview" | "analytics" | "history";
+  /**
+   * Heading value shown in the main portfolio hero.
+   *
+   * @default "$2,847,391"
+   */
+  headlineValue?: string;
+  /**
+   * Sub-label for the headline value.
+   *
+   * @default "Total AUM"
+   */
+  headlineLabel?: string;
+}
+
+const DEFAULT_METRICS: PrecisionFintechMetric[] = [
   { label: "Portfolio Value", value: "$2,847,391", change: "+4.21%", up: true },
   { label: "Daily P&L", value: "+$12,043", change: "+0.43%", up: true },
   { label: "Sharpe Ratio", value: "2.84", change: "-0.07", up: false },
   { label: "Alpha", value: "18.3%", change: "+1.2%", up: true },
 ];
 
-const positions = [
+const DEFAULT_POSITIONS: PrecisionFintechPosition[] = [
   {
     ticker: "NVDA",
     name: "NVIDIA Corp",
@@ -50,12 +120,19 @@ const positions = [
   },
 ];
 
-const chartData = [
+const DEFAULT_CHART_DATA = [
   32, 48, 41, 55, 47, 62, 58, 71, 65, 80, 74, 88, 82, 95, 91, 100,
 ];
 
-export default function PrecisionFintech() {
-  const [activeTab, setActiveTab] = useState("overview");
+export default function PrecisionFintech({
+  metrics = DEFAULT_METRICS,
+  positions = DEFAULT_POSITIONS,
+  chartData = DEFAULT_CHART_DATA,
+  initialTab = "overview",
+  headlineValue = "$2,847,391",
+  headlineLabel = "Total AUM",
+}: PrecisionFintechProps) {
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
 
   const maxChart = Math.max(...chartData);
@@ -263,6 +340,7 @@ export default function PrecisionFintech() {
               PORTFOLIO OVERVIEW — FEB 24, 2026
             </div>
             <div
+              aria-label="portfolio-headline-value"
               style={{
                 fontFamily: "'Syne', sans-serif",
                 fontWeight: 800,
@@ -271,10 +349,10 @@ export default function PrecisionFintech() {
                 letterSpacing: "-0.03em",
               }}
             >
-              $2,847,<span className="mint">391</span>
+              {headlineValue}
             </div>
             <div className="flex items-center gap-3 mt-3">
-              <span style={{ fontSize: 13, color: "#555" }}>Total AUM</span>
+              <span style={{ fontSize: 13, color: "#555" }}>{headlineLabel}</span>
               <span
                 style={{
                   width: 1,
@@ -569,6 +647,7 @@ export default function PrecisionFintech() {
                         style={{
                           borderBottom: "1px solid #0d0d0d",
                           cursor: "pointer",
+                          background: hoveredRow === i ? "rgba(0,255,178,0.08)" : "transparent",
                           transition: "background 0.1s",
                         }}
                       >
@@ -626,12 +705,14 @@ export default function PrecisionFintech() {
                             <button
                               className="btn-primary"
                               style={{ padding: "6px 14px" }}
+                              aria-label={`Buy ${p.ticker}`}
                             >
                               Buy
                             </button>
                             <button
                               className="btn-ghost"
                               style={{ padding: "6px 14px" }}
+                              aria-label={`Sell ${p.ticker}`}
                             >
                               Sell
                             </button>
@@ -639,6 +720,22 @@ export default function PrecisionFintech() {
                         </td>
                       </tr>
                     ))}
+                    {positions.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          style={{
+                            padding: "24px",
+                            color: "#666",
+                            fontSize: 12,
+                            textAlign: "center",
+                            letterSpacing: "0.08em",
+                          }}
+                        >
+                          NO ACTIVE POSITIONS
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
