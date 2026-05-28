@@ -393,3 +393,80 @@ fn test_get_webhook_url_unregistered_attestor_rejected() {
     let unknown = Address::generate(&env);
     client.get_webhook_url(&unknown);
 }
+
+// ---------------------------------------------------------------------------
+// #240 — AttestorProfile unified model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_profile_endpoint_and_webhook_are_atomic() {
+    // Setting endpoint and webhook independently should both be reflected in
+    // get_attestor_profile as a single consistent record.
+    let env = make_env();
+    let (client, _admin) = setup_contract(&env);
+    let (attestor, _sk) = register_fresh_attestor(&env, &client);
+
+    let endpoint = String::from_str(&env, "https://anchor.example.com/api");
+    let webhook = String::from_str(&env, "https://hooks.example.com/anchor");
+
+    client.set_endpoint(&attestor, &endpoint);
+    client.register_webhook(&attestor, &webhook);
+
+    let profile = client.get_attestor_profile(&attestor);
+    assert_eq!(profile.attestor, attestor);
+    assert_eq!(profile.endpoint, endpoint);
+    assert_eq!(profile.webhook_url, webhook);
+    assert!(profile.enabled);
+    assert!(profile.updated_at > 0);
+}
+
+#[test]
+fn test_profile_services_reflected_in_profile() {
+    let env = make_env();
+    let (client, _admin) = setup_contract(&env);
+    let (attestor, _sk) = register_fresh_attestor(&env, &client);
+
+    let services = soroban_sdk::vec![&env, 1u32, 2u32];
+    client.configure_services(&attestor, &services);
+
+    let profile = client.get_attestor_profile(&attestor);
+    assert_eq!(profile.services.len(), 2);
+    assert!(profile.services.contains(&1u32));
+    assert!(profile.services.contains(&2u32));
+}
+
+#[test]
+fn test_profile_endpoint_update_overwrites_previous() {
+    let env = make_env();
+    let (client, _admin) = setup_contract(&env);
+    let (attestor, _sk) = register_fresh_attestor(&env, &client);
+
+    client.set_endpoint(&attestor, &String::from_str(&env, "https://v1.example.com"));
+    client.set_endpoint(&attestor, &String::from_str(&env, "https://v2.example.com"));
+
+    let profile = client.get_attestor_profile(&attestor);
+    assert_eq!(profile.endpoint, String::from_str(&env, "https://v2.example.com"));
+}
+
+#[test]
+#[should_panic]
+fn test_get_profile_unregistered_attestor_panics() {
+    let env = make_env();
+    let (client, _admin) = setup_contract(&env);
+    let unknown = Address::generate(&env);
+    client.get_attestor_profile(&unknown);
+}
+
+#[test]
+fn test_get_supported_services_reads_from_profile() {
+    let env = make_env();
+    let (client, _admin) = setup_contract(&env);
+    let (attestor, _sk) = register_fresh_attestor(&env, &client);
+
+    let services = soroban_sdk::vec![&env, 1u32, 3u32];
+    client.configure_services(&attestor, &services);
+
+    let record = client.get_supported_services(&attestor);
+    assert!(record.services.contains(&1u32));
+    assert!(record.services.contains(&3u32));
+}

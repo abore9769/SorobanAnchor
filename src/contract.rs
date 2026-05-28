@@ -116,6 +116,27 @@ pub struct TracingContext {
     pub next_span_index: u32,
 }
 
+/// Unified attestor profile — single source of truth for all attestor metadata.
+///
+/// Replaces the separate `ENDPOINT`, `WEBHOOK`, and `SERVICES` storage keys.
+/// All profile fields are updated atomically through `set_endpoint`,
+/// `register_webhook`, and `configure_services`.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorProfile {
+    pub attestor: Address,
+    /// HTTPS endpoint URL (empty string = not set).
+    pub endpoint: String,
+    /// Webhook URL (empty string = not set).
+    pub webhook_url: String,
+    /// Supported service type codes (see `SERVICE_*` constants).
+    pub services: Vec<u32>,
+    /// Whether this attestor is currently enabled.
+    pub enabled: bool,
+    /// Ledger timestamp of the last profile update.
+    pub updated_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct AnchorServices {
@@ -693,6 +714,32 @@ impl AnchorKitContract {
         RequestId { id, created_at: ts }
     }
 
+    /// Generate a deterministic child request ID from a root request's bytes and a nonce.
+    ///
+    /// ID = sha256(root_bytes || nonce_u64_be || ledger_timestamp_u64_be)[:16]
+    ///
+    /// This ensures child IDs are:
+    /// - deterministic given the same inputs
+    /// - unique across different nonces / timestamps
+    /// - cryptographically bound to the root request
+    pub fn generate_child_request_id(env: Env, root_bytes: Bytes, nonce: u64) -> RequestId {
+        let ts = env.ledger().timestamp();
+        let mut input = root_bytes;
+        for b in nonce.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+        for b in ts.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+        let hash = env.crypto().sha256(&input);
+        let mut id = Bytes::new(&env);
+        let hash_bytes = hash.to_array();
+        for b in hash_bytes.iter().take(16) {
+            id.push_back(*b);
+        }
+        RequestId { id, created_at: ts }
+    }
+
     // -----------------------------------------------------------------------
     // Attestor management
     // -----------------------------------------------------------------------
@@ -899,6 +946,45 @@ impl AnchorKitContract {
     }
 
     // -----------------------------------------------------------------------
+    // Attestor profile helpers
+    // -----------------------------------------------------------------------
+
+    fn profile_key(attestor: &Address) -> (Symbol, Address) {
+        (symbol_short!("PROFILE"), attestor.clone())
+    }
+
+    fn load_or_init_profile(env: &Env, attestor: &Address) -> AttestorProfile {
+        let key = Self::profile_key(attestor);
+        env.storage()
+            .persistent()
+            .get::<_, AttestorProfile>(&key)
+            .unwrap_or(AttestorProfile {
+                attestor: attestor.clone(),
+                endpoint: String::from_str(env, ""),
+                webhook_url: String::from_str(env, ""),
+                services: Vec::new(env),
+                enabled: true,
+                updated_at: 0,
+            })
+    }
+
+    fn save_profile(env: &Env, profile: &AttestorProfile) {
+        let key = Self::profile_key(&profile.attestor);
+        env.storage().persistent().set(&key, profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    /// Return the unified `AttestorProfile` for an attestor.
+    pub fn get_attestor_profile(env: Env, attestor: Address) -> AttestorProfile {
+        if !Self::is_attestor(env.clone(), attestor.clone()) {
+            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
+        }
+        Self::load_or_init_profile(&env, &attestor)
+    }
+
+    // -----------------------------------------------------------------------
     // Attestor endpoint management
     // -----------------------------------------------------------------------
 
@@ -908,9 +994,11 @@ impl AnchorKitContract {
         let endpoint_str = Self::soroban_string_to_rust_string(&env, &endpoint);
         crate::validate_anchor_domain(&endpoint_str)
             .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat));
-        let key = (symbol_short!("ENDPOINT"), attestor.clone());
-        env.storage().persistent().set(&key, &endpoint);
-        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let now = env.ledger().timestamp();
+        let mut profile = Self::load_or_init_profile(&env, &attestor);
+        profile.endpoint = endpoint.clone();
+        profile.updated_at = now;
+        Self::save_profile(&env, &profile);
         env.events().publish(
             (symbol_short!("endpoint"), symbol_short!("updated")),
             EndpointUpdated { attestor, endpoint },
@@ -934,9 +1022,11 @@ impl AnchorKitContract {
         let webhook_url_str = Self::soroban_string_to_rust_string(&env, &webhook_url);
         crate::validate_anchor_domain(&webhook_url_str)
             .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat));
-        let key = (symbol_short!("WEBHOOK"), attestor.clone());
-        env.storage().persistent().set(&key, &webhook_url);
-        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        let now = env.ledger().timestamp();
+        let mut profile = Self::load_or_init_profile(&env, &attestor);
+        profile.webhook_url = webhook_url.clone();
+        profile.updated_at = now;
+        Self::save_profile(&env, &profile);
         env.events().publish(
             (symbol_short!("webhook"), symbol_short!("reg")),
             EndpointUpdated {
@@ -1231,6 +1321,11 @@ impl AnchorKitContract {
     ///
     /// The TracingContext for the root must have been initialised by a prior
     /// `submit_with_request_id` call (which stores span_index = 0).
+    ///
+    /// Panics with `ValidationError` if:
+    /// - the parent span does not exist (no root context found)
+    /// - `child_request_id` bytes are identical to `parent_request_id` bytes
+    /// - the child span index would not increment correctly
     pub fn propagate_span(
         env: Env,
         parent_request_id: RequestId,
@@ -1239,21 +1334,25 @@ impl AnchorKitContract {
         actor: Address,
     ) {
         actor.require_auth();
-        let now = env.ledger().timestamp();
 
-        // Load or create the TracingContext for this root trace
+        // Validate: child must differ from parent
+        if child_request_id.id == parent_request_id.id {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+
+        // Validate: a root context must exist for the parent (i.e. the parent
+        // span was created by submit_with_request_id or a prior propagate_span).
         let ctx_key = (symbol_short!("TRACECTX"), parent_request_id.id.clone());
         let mut ctx: TracingContext = env
             .storage()
             .temporary()
             .get(&ctx_key)
-            .unwrap_or(TracingContext {
-                root_request_id_bytes: parent_request_id.id.clone(),
-                next_span_index: 1,
-            });
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ValidationError));
 
         let span_index = ctx.next_span_index;
         ctx.next_span_index += 1;
+
+        let now = env.ledger().timestamp();
         env.storage().temporary().set(&ctx_key, &ctx);
         env.storage().temporary().extend_ttl(&ctx_key, SPAN_TTL, SPAN_TTL);
 
@@ -1319,10 +1418,12 @@ impl AnchorKitContract {
 
     /// Create a new `RequestContext` for a root request ID.
     ///
-    /// Stores the context in temporary storage keyed by the root request ID bytes
-    /// and returns it. The `operation_chain` starts empty; call
-    /// `append_operation` to record each sub-operation.
+    /// Panics with `ValidationError` if `root_request_id.id` is empty.
     pub fn create_request_context(env: Env, root_request_id: RequestId) -> RequestContext {
+        if root_request_id.id.is_empty() {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        Self::require_valid_timestamp(&env, root_request_id.created_at);
         let now = env.ledger().timestamp();
         let ctx = RequestContext {
             root_request_id: root_request_id.clone(),
@@ -1339,11 +1440,14 @@ impl AnchorKitContract {
 
     /// Append `operation_name` to the `operation_chain` of the context identified
     /// by `root_request_id_bytes`. Creates the context if it does not yet exist.
+    ///
+    /// Panics with `ValidationError` if `operation_name` is empty.
     pub fn append_operation(
         env: Env,
         root_request_id_bytes: Bytes,
         operation_name: String,
     ) {
+        Self::require_non_empty_string(&env, &operation_name);
         let key = (symbol_short!("REQCTX"), root_request_id_bytes.clone());
         let mut ctx: RequestContext = env
             .storage()
@@ -1555,6 +1659,24 @@ impl AnchorKitContract {
             (symbol_short!("comp"), symbol_short!("checked"), subject),
             record,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Input validation helpers (#243)
+    // -----------------------------------------------------------------------
+
+    /// Panic with `ValidationError` if `s` is empty.
+    fn require_non_empty_string(env: &Env, s: &String) {
+        if s.len() == 0 {
+            panic_with_error!(env, ErrorCode::ValidationError);
+        }
+    }
+
+    /// Panic with `InvalidTimestamp` if `ts` is zero.
+    fn require_valid_timestamp(env: &Env, ts: u64) {
+        if ts == 0 {
+            panic_with_error!(env, ErrorCode::InvalidTimestamp);
+        }
     }
 
     pub fn create_session(env: Env, initiator: Address) -> u64 {

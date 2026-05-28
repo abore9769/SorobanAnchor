@@ -426,3 +426,97 @@ mod request_id_tests {
         let result = client.get_request_context(&unknown_id);
         assert!(result.is_none(), "get_request_context must return None for unknown IDs");
     }
+
+    // -----------------------------------------------------------------------
+    // #241 — Deterministic request ID hashing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_generate_request_id_is_deterministic_for_same_inputs() {
+        // Two calls with identical ledger state (same timestamp + sequence) must
+        // produce the same ID bytes.
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 5000,
+            protocol_version: 21,
+            sequence_number: 42,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let id1 = client.generate_request_id();
+        let id2 = client.generate_request_id();
+        // Same ledger state → same hash
+        assert_eq!(id1.id, id2.id);
+        assert_eq!(id1.created_at, 5000);
+    }
+
+    #[test]
+    fn test_generate_child_request_id_differs_from_root() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 6000,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let root = client.generate_request_id();
+        let child = client.generate_child_request_id(&root.id, &1u64);
+        assert_ne!(root.id, child.id, "child ID must differ from root");
+        assert_eq!(child.id.len(), 16);
+    }
+
+    #[test]
+    fn test_generate_child_request_id_different_nonces_produce_different_ids() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 7000,
+            protocol_version: 21,
+            sequence_number: 5,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let root = client.generate_request_id();
+        let child_a = client.generate_child_request_id(&root.id, &1u64);
+        let child_b = client.generate_child_request_id(&root.id, &2u64);
+        assert_ne!(child_a.id, child_b.id, "different nonces must produce different child IDs");
+    }
+
+    // -----------------------------------------------------------------------
+    // #242 — Error code assertions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_error_code_discriminants() {
+        use crate::errors::ErrorCode;
+        assert_eq!(ErrorCode::AttestorProfileNotFound as u32, 50);
+        assert_eq!(ErrorCode::InvalidRequestContext   as u32, 51);
+        assert_eq!(ErrorCode::InvalidSessionMetadata  as u32, 52);
+    }
+
+    #[test]
+    fn test_new_error_code_messages_non_empty() {
+        use crate::errors::ErrorCode;
+        assert!(!ErrorCode::AttestorProfileNotFound.default_message().is_empty());
+        assert!(!ErrorCode::InvalidRequestContext.default_message().is_empty());
+        assert!(!ErrorCode::InvalidSessionMetadata.default_message().is_empty());
+    }
+}

@@ -408,4 +408,200 @@ mod tracing_span_tests {
         assert_eq!(span.actor, attestor);
         assert_eq!(span.status, String::from_str(&env, "success"));
     }
+
+    // -----------------------------------------------------------------------
+    // #241 — Span lineage validation
+    // -----------------------------------------------------------------------
+
+    fn setup_with_root_span(env: &Env) -> (AnchorKitContractClient<'_>, Address, crate::contract::RequestId) {
+        env.ledger().set(LedgerInfo {
+            timestamp: 2000,
+            protocol_version: 21,
+            sequence_number: 10,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let attestor = Address::generate(env);
+        let subject = Address::generate(env);
+        client.initialize(&admin);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(env, &client, &attestor, &attestor, &sk);
+        let root_id = client.generate_request_id();
+        let ph = payload(env, 0xAA);
+        let sig = sign_payload(env, &sk, &ph);
+        client.submit_with_request_id(&root_id, &attestor, &subject, &2000u64, &ph, &sig);
+        (client, attestor, root_id)
+    }
+
+    #[test]
+    fn test_propagate_span_increments_index() {
+        let env = make_env();
+        let (client, attestor, root_id) = setup_with_root_span(&env);
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 2001,
+            protocol_version: 21,
+            sequence_number: 11,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let child_id = client.generate_request_id();
+        client.propagate_span(
+            &root_id,
+            &child_id,
+            &String::from_str(&env, "child_op"),
+            &attestor,
+        );
+
+        let child_span = client.get_tracing_span(&child_id.id).unwrap();
+        assert_eq!(child_span.span_index, 1);
+        assert_eq!(child_span.parent_request_id_bytes, root_id.id);
+    }
+
+    #[test]
+    fn test_get_trace_returns_spans_in_order() {
+        let env = make_env();
+        let (client, attestor, root_id) = setup_with_root_span(&env);
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 2001,
+            protocol_version: 21,
+            sequence_number: 11,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let child_id = client.generate_request_id();
+        client.propagate_span(
+            &root_id,
+            &child_id,
+            &String::from_str(&env, "child_op"),
+            &attestor,
+        );
+
+        let spans = client.get_trace(&root_id.id);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans.get(0).unwrap().span_index, 0);
+        assert_eq!(spans.get(1).unwrap().span_index, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_propagate_span_rejects_missing_root_context() {
+        // Calling propagate_span with a parent that has no TracingContext
+        // (i.e. was never created via submit_with_request_id) must panic.
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 3000,
+            protocol_version: 21,
+            sequence_number: 20,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let fake_parent = client.generate_request_id();
+        env.ledger().set(LedgerInfo {
+            timestamp: 3001,
+            protocol_version: 21,
+            sequence_number: 21,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let child_id = client.generate_request_id();
+        let actor = Address::generate(&env);
+        // Must panic: no TracingContext exists for fake_parent
+        client.propagate_span(
+            &fake_parent,
+            &child_id,
+            &String::from_str(&env, "op"),
+            &actor,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_propagate_span_rejects_identical_parent_child_ids() {
+        let env = make_env();
+        let (client, attestor, root_id) = setup_with_root_span(&env);
+        // Passing the same ID for both parent and child must panic.
+        client.propagate_span(
+            &root_id,
+            &root_id,
+            &String::from_str(&env, "op"),
+            &attestor,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #243 — RequestContext validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_append_operation_empty_name_rejected() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1000,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let req_id = client.generate_request_id();
+        // Empty operation name must panic with ValidationError
+        client.append_operation(&req_id.id, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_create_request_context_zero_timestamp_rejected() {
+        let env = make_env();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1000,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let mut req_id = client.generate_request_id();
+        // Force zero timestamp — must panic with InvalidTimestamp
+        req_id.created_at = 0;
+        client.create_request_context(&req_id);
+    }
 }
+
