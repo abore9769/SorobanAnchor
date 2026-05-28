@@ -69,8 +69,47 @@ pub struct Sep24TransactionStatusResponse {
 // ---------------------------------------------------------------------------
 
 /// Validates that a SEP-24 interactive flow URL is a well-formed HTTPS URL.
-/// Delegates to `validate_anchor_domain` to avoid duplicating logic.
+///
+/// In addition to the base `validate_anchor_domain` checks, this function also:
+/// - Rejects URLs with embedded userinfo (`https://user:pass@host/...`)
+/// - Rejects IP literals in brackets (`https://[::1]/...`)
+/// - Rejects excessively long individual URL components (host > 253 chars, path > 2048 chars)
 pub fn validate_interactive_url(url: &str) -> Result<(), AnchorKitError> {
+    if url.is_empty() {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
+    // Must start with https://
+    if !url.starts_with("https://") {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
+    let after_scheme = &url[8..]; // skip "https://"
+
+    // Reject IP literals: https://[...]
+    if after_scheme.starts_with('[') {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
+    // Reject userinfo: presence of '@' before the first '/' indicates user:pass@host
+    let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    if authority.contains('@') {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
+    // Reject excessively long host component (RFC 1035: max 253 chars)
+    let host = authority.split(':').next().unwrap_or(authority);
+    if host.len() > 253 {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
+    // Reject excessively long path component
+    let path = &after_scheme[authority_end..];
+    if path.len() > 2048 {
+        return Err(AnchorKitError::invalid_endpoint_format());
+    }
+
     validate_anchor_domain(url).map_err(|_| AnchorKitError::invalid_endpoint_format())
 }
 
@@ -272,6 +311,36 @@ mod tests {
     #[test]
     fn test_validate_interactive_url_rejects_empty() {
         assert!(validate_interactive_url("").is_err());
+    }
+
+    #[test]
+    fn test_validate_interactive_url_rejects_userinfo() {
+        assert!(validate_interactive_url("https://user:pass@anchor.example.com/deposit").is_err());
+        assert!(validate_interactive_url("https://user@anchor.example.com/deposit").is_err());
+    }
+
+    #[test]
+    fn test_validate_interactive_url_rejects_ip_literal() {
+        assert!(validate_interactive_url("https://[::1]/deposit").is_err());
+        assert!(validate_interactive_url("https://[2001:db8::1]/deposit").is_err());
+    }
+
+    #[test]
+    fn test_validate_interactive_url_rejects_long_host() {
+        // 254-char host (exceeds RFC 1035 limit of 253)
+        let long_host = alloc::format!("https://{}.com/path", "a".repeat(250));
+        assert!(validate_interactive_url(&long_host).is_err());
+    }
+
+    #[test]
+    fn test_validate_interactive_url_rejects_long_path() {
+        let long_path = alloc::format!("https://anchor.example.com/{}", "a".repeat(2049));
+        assert!(validate_interactive_url(&long_path).is_err());
+    }
+
+    #[test]
+    fn test_validate_interactive_url_accepts_valid_with_path_and_query() {
+        assert!(validate_interactive_url("https://anchor.example.com/sep24/deposit?asset=USDC").is_ok());
     }
 
     // -----------------------------------------------------------------------

@@ -694,6 +694,43 @@ impl AnchorKitContract {
             .extend_ttl(&storage_key, PERSISTENT_TTL, PERSISTENT_TTL);
     }
 
+    /// Rotate the SEP-10 issuer key for `issuer` to `new_public_key`.
+    ///
+    /// Requires admin authorization. The old key is replaced atomically; any
+    /// subsequent `verify_sep10_token` call will use the new key. The previous
+    /// key is stored under `"SEP10OLD"` for one TTL period to allow in-flight
+    /// tokens signed with the old key to drain gracefully.
+    pub fn rotate_sep10_key(env: Env, issuer: Address, new_public_key: Bytes) {
+        Self::require_admin(&env);
+        if new_public_key.len() != 32 {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        let storage_key = (symbol_short!("SEP10KEY"), issuer.clone());
+        // Preserve old key for graceful drain
+        if let Some(old_key) = env.storage().persistent().get::<_, Bytes>(&storage_key) {
+            let old_key_storage = (symbol_short!("SEP10OLD"), issuer.clone());
+            env.storage().persistent().set(&old_key_storage, &old_key);
+            env.storage()
+                .persistent()
+                .extend_ttl(&old_key_storage, PERSISTENT_TTL, PERSISTENT_TTL);
+        }
+        env.storage().persistent().set(&storage_key, &new_public_key);
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.events().publish(
+            (symbol_short!("sep10key"), symbol_short!("rotated"), issuer),
+            (),
+        );
+    }
+
+    /// Return the current SEP-10 verifying key for `issuer`, or `None` if not set.
+    pub fn get_sep10_key(env: Env, issuer: Address) -> Option<Bytes> {
+        env.storage()
+            .persistent()
+            .get(&(symbol_short!("SEP10KEY"), issuer))
+    }
+
     /// Configure the maximum JWT length accepted by `verify_sep10_jwt` (issue #64).
     /// Must be between 2048 and 16384. Admin-only.
     pub fn set_jwt_max_len(env: Env, max_len: u32) {

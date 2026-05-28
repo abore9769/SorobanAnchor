@@ -169,6 +169,7 @@ impl RateLimiter {
     ///
     /// Loads the stored admin from instance storage (key `"ADMIN"`) and calls
     /// `admin.require_auth()`. Returns `Err(NotInitialized)` if no admin is stored.
+    /// Returns `Err(ValidationError)` if `config` contains zero or nonsensical values.
     pub fn update_config(
         env: &Env,
         admin: &Address,
@@ -183,8 +184,22 @@ impl RateLimiter {
             return Err(AnchorKitError::unauthorized_attestor());
         }
         admin.require_auth();
+        Self::validate_config(config)?;
         let config_key = Self::get_config_key(env);
         env.storage().persistent().set(&config_key, config);
+        Ok(())
+    }
+
+    /// Validate that a [`RateLimitConfig`] has sensible non-zero values.
+    ///
+    /// Returns `Err(ValidationError)` if `max_submissions` or `window_length` is zero.
+    pub fn validate_config(config: &RateLimitConfig) -> Result<(), AnchorKitError> {
+        if config.max_submissions == 0 {
+            return Err(AnchorKitError::validation_error("max_submissions must be > 0"));
+        }
+        if config.window_length == 0 {
+            return Err(AnchorKitError::validation_error("window_length must be > 0"));
+        }
         Ok(())
     }
     
@@ -452,5 +467,114 @@ mod tests {
         });
         assert_eq!(config.max_submissions, 10);
         assert_eq!(config.window_length, 100);
+    }
+
+    #[test]
+    fn test_validate_config_rejects_zero_max_submissions() {
+        let config = RateLimitConfig { max_submissions: 0, window_length: 100 };
+        assert!(RateLimiter::validate_config(&config).is_err());
+        assert_eq!(
+            RateLimiter::validate_config(&config).unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn test_validate_config_rejects_zero_window_length() {
+        let config = RateLimitConfig { max_submissions: 5, window_length: 0 };
+        assert!(RateLimiter::validate_config(&config).is_err());
+        assert_eq!(
+            RateLimiter::validate_config(&config).unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn test_validate_config_accepts_valid() {
+        let config = RateLimitConfig { max_submissions: 1, window_length: 1 };
+        assert!(RateLimiter::validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_update_config_rejects_zero_values() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let bad_config = RateLimitConfig { max_submissions: 0, window_length: 100 };
+
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        env.as_contract(&contract_id, &|| {
+            env.storage()
+                .instance()
+                .set(&soroban_sdk::vec![&env, soroban_sdk::symbol_short!("ADMIN")], &admin);
+        });
+
+        let result = env.as_contract(&contract_id, &|| {
+            RateLimiter::update_config(&env, &admin, &bad_config)
+        });
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_window_rollover_at_exact_boundary() {
+        let env = Env::default();
+        let attestor = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 1, window_length: 10 };
+
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        // Fill the window
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_ok());
+        // Same window — should fail
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_err());
+
+        // Advance ledger by exactly window_length (10)
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            sequence_number: 10,
+            timestamp: 1000,
+            protocol_version: 21,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        // Window should have rolled over — first submission in new window succeeds
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_ok());
+    }
+
+    #[test]
+    fn test_max_submission_error_is_consistent() {
+        let env = Env::default();
+        let attestor = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 2, window_length: 100 };
+
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        env.as_contract(&contract_id, &|| { RateLimiter::check_and_increment(&env, &attestor, &config).unwrap(); });
+        env.as_contract(&contract_id, &|| { RateLimiter::check_and_increment(&env, &attestor, &config).unwrap(); });
+
+        // Every subsequent call must return RateLimitExceeded without corrupting state
+        for _ in 0..3 {
+            let err = env.as_contract(&contract_id, &|| {
+                RateLimiter::check_and_increment(&env, &attestor, &config)
+            }).unwrap_err();
+            assert_eq!(err.code, ErrorCode::RateLimitExceeded);
+        }
+        // State must still show exactly max_submissions
+        let state = env.as_contract(&contract_id, &|| RateLimiter::get_state(&env, &attestor));
+        assert_eq!(state.submission_count, 2);
     }
 }

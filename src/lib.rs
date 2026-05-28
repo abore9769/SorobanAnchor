@@ -131,7 +131,7 @@ pub use response_validator::{
 };
 pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
-pub use webhook::{deliver_webhook, get_dead_letter_webhooks, WebhookDeliveryConfig};
+pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, WebhookDeliveryConfig, DlqEntry};
 
 pub use sep6::{
     fetch_transaction_status, initiate_deposit, initiate_withdrawal, DepositResponse,

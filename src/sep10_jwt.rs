@@ -170,6 +170,28 @@ fn parse_json_jti(payload: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Parse first `"iss":"..."` string value. Returns `None` if absent.
+fn parse_json_iss(payload: &[u8]) -> Option<Vec<u8>> {
+    let key = b"\"iss\":";
+    let pos = find_bytes(payload, key)?;
+    let mut i = pos + key.len();
+    while i < payload.len() && payload[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= payload.len() || payload[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < payload.len() {
+        if payload[i] == b'"' {
+            return Some(payload[start..i].to_vec());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse first `"sub":"..."` string value (no escape sequences inside value).
 fn parse_json_sub(env: &Env, payload: &[u8]) -> Result<String, ()> {
     let key = b"\"sub\":";
@@ -297,6 +319,13 @@ pub fn verify_sep10_jwt(
     if !contains_subslice(&header_dec, b"EdDSA") {
         return Err(());
     }
+    // Reject tokens that claim a non-EdDSA algorithm alongside EdDSA (e.g. "alg":"RS256")
+    // by requiring the header to NOT contain any of the common non-EdDSA algorithm names.
+    for forbidden in &[b"RS256" as &[u8], b"RS384", b"RS512", b"HS256", b"HS384", b"HS512", b"ES256", b"ES384", b"ES512", b"none"] {
+        if contains_subslice(&header_dec, forbidden) {
+            return Err(());
+        }
+    }
 
     let sig_dec = base64url_decode(sig_b64).map_err(|_| ())?;
     if sig_dec.len() != 64 {
@@ -362,6 +391,12 @@ pub fn verify_sep10_jwt(
         }
     }
 
+    // iss claim must be present and non-empty (SEP-10 requirement)
+    match parse_json_iss(&payload_dec) {
+        Some(iss) if !iss.is_empty() => {}
+        _ => return Err(()),
+    }
+
     Ok(())
 }
 
@@ -397,7 +432,7 @@ mod tests {
     fn build_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
+        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -415,7 +450,7 @@ mod tests {
     ) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let mut payload = format!(r#"{{"sub":"{}","exp":{}"#, sub, exp);
+        let mut payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com""#, sub, exp);
         if let Some(n) = nbf {
             payload.push_str(&format!(r#","nbf":{}"#, n));
         }
@@ -423,6 +458,30 @@ mod tests {
             payload.push_str(&format!(r#","jti":"{}""#, j));
         }
         payload.push('}');
+        let header_b64 = URL_SAFE_NO_PAD.encode(header);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn build_jwt_with_alg(signing_key: &SigningKey, alg: &str, sub: &str, exp: u64) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = format!(r#"{{"alg":"{}","typ":"JWT"}}"#, alg);
+        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
+        let header_b64 = URL_SAFE_NO_PAD.encode(header);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn build_jwt_no_iss(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+        let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -583,6 +642,75 @@ mod tests {
                 .instance()
                 .set(&soroban_sdk::symbol_short!("JWTMAXLEN"), &8192u32);
             assert!(verify_sep10_jwt(&env, &token2, &pk, None).is_ok());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_missing_iss_claim() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_no_iss(&signing_key, sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_rs256_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        // RS256 header — should be rejected even if EdDSA is absent
+        let jwt = build_jwt_with_alg(&signing_key, "RS256", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_hs256_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_with_alg(&signing_key, "HS256", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_none_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_with_alg(&signing_key, "none", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
         });
     }
 }
