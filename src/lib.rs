@@ -89,3 +89,9 @@ mod batch_transaction_tests;
 
 #[cfg(test)]
 mod metadata_version_history_tests;
+
+#[cfg(test)]
+mod proof_of_possession_tests;
+
+#[cfg(test)]
+mod anchor_health_tests;

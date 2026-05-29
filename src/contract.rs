@@ -3,6 +3,8 @@ use soroban_sdk::{
     Env, String, Symbol, Vec,
 };
 
+extern crate alloc;
+
 use crate::deterministic_hash::{compute_payload_hash, verify_payload_hash};
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
@@ -308,6 +310,58 @@ pub struct CachedToml {
 }
 
 const MIN_TEMP_TTL: u32 = 15; // min_temp_entry_ttl - 1
+
+// ---------------------------------------------------------------------------
+// Proof-of-possession types
+// ---------------------------------------------------------------------------
+
+/// A challenge issued to an anchor to prove control of its registered endpoint.
+///
+/// The anchor must sign `nonce` with the Ed25519 key stored via
+/// `set_sep10_jwt_verifying_key` and return the signature via
+/// `verify_pop_response`.  The challenge expires after `expires_at`.
+#[contracttype]
+#[derive(Clone)]
+pub struct EndpointChallenge {
+    pub attestor: Address,
+    /// Random nonce (16 bytes derived from ledger hash) the attestor must sign.
+    pub nonce: Bytes,
+    /// Ledger timestamp after which this challenge is no longer valid.
+    pub expires_at: u64,
+    /// Whether this challenge has already been successfully verified.
+    pub verified: bool,
+}
+
+/// Stored record of a completed proof-of-possession verification.
+#[contracttype]
+#[derive(Clone)]
+pub struct PopVerificationResult {
+    pub attestor: Address,
+    pub nonce: Bytes,
+    pub verified_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Anchor health metric types
+// ---------------------------------------------------------------------------
+
+/// Accumulated health metrics for a single anchor endpoint.
+#[contracttype]
+#[derive(Clone)]
+pub struct AnchorHealthMetrics {
+    pub anchor: Address,
+    pub success_count: u64,
+    pub failure_count: u64,
+    /// Consecutive failures since the last success (reset on any success).
+    pub consecutive_failures: u32,
+    /// Ledger timestamp of the most recent response (success or failure).
+    pub last_response_at: u64,
+    /// Ledger timestamp of the most recent successful response (0 if none).
+    pub last_success_at: u64,
+    /// Uptime in basis points (0–10000).  10000 = 100 %.
+    /// Computed as: success_count * 10000 / (success_count + failure_count).
+    pub uptime_bps: u32,
+}
 
 // ---------------------------------------------------------------------------
 // Event structs
@@ -2051,6 +2105,275 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         match Self::get_anchor_asset_info(env, anchor, asset_code) {
             asset => asset.withdrawal_enabled,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Proof-of-possession for anchor endpoints
+    // -----------------------------------------------------------------------
+
+    /// Issue a proof-of-possession challenge for `attestor`'s registered endpoint.
+    ///
+    /// Generates a 16-byte nonce from the current ledger hash and stores it
+    /// with a TTL of `ttl_seconds` (capped at 3600).  The attestor must sign
+    /// the nonce with the Ed25519 key registered via `set_sep10_jwt_verifying_key`
+    /// and call `verify_pop_response` before the challenge expires.
+    ///
+    /// Admin-only — prevents spam issuance.
+    pub fn issue_pop_challenge(env: Env, attestor: Address, ttl_seconds: u64) -> EndpointChallenge {
+        Self::require_admin(&env);
+        Self::check_attestor(&env, &attestor);
+
+        // Cap TTL at 1 hour.
+        let effective_ttl = if ttl_seconds == 0 || ttl_seconds > 3600 { 3600 } else { ttl_seconds };
+
+        // Derive a 16-byte nonce from sha256(timestamp_be || sequence_be || attestor_bytes).
+        let ts = env.ledger().timestamp();
+        let seq = env.ledger().sequence();
+        let mut nonce_input = Bytes::new(&env);
+        for b in ts.to_be_bytes().iter() {
+            nonce_input.push_back(*b);
+        }
+        for b in seq.to_be_bytes().iter() {
+            nonce_input.push_back(*b);
+        }
+        let addr_str = attestor.to_string();
+        let addr_len = addr_str.len() as usize;
+        let mut addr_buf = alloc::vec![0u8; addr_len];
+        addr_str.copy_into_slice(&mut addr_buf);
+        for b in addr_buf.iter() {
+            nonce_input.push_back(*b);
+        }
+        let hash = env.crypto().sha256(&nonce_input).to_bytes();
+        let mut nonce = Bytes::new(&env);
+        for i in 0..16u32 {
+            nonce.push_back(hash.get(i).unwrap());
+        }
+
+        let now = env.ledger().timestamp();
+        let challenge = EndpointChallenge {
+            attestor: attestor.clone(),
+            nonce: nonce.clone(),
+            expires_at: now + effective_ttl,
+            verified: false,
+        };
+
+        let key = (symbol_short!("POPCHAL"), attestor.clone());
+        env.storage().persistent().set(&key, &challenge);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        challenge
+    }
+
+    /// Verify a proof-of-possession response for `attestor`.
+    ///
+    /// `signature` must be a 64-byte Ed25519 signature over the stored nonce,
+    /// produced by the key registered via `set_sep10_jwt_verifying_key`.
+    ///
+    /// On success the challenge is marked verified and a `PopVerificationResult`
+    /// is stored.  Panics with `ProofOfPossessionFailed` on any mismatch.
+    pub fn verify_pop_response(env: Env, attestor: Address, signature: Bytes) -> PopVerificationResult {
+        Self::check_attestor(&env, &attestor);
+
+        // Load the pending challenge.
+        let key = (symbol_short!("POPCHAL"), attestor.clone());
+        let mut challenge: EndpointChallenge = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ChallengeNotFound));
+
+        // Reject expired challenges.
+        let now = env.ledger().timestamp();
+        if now >= challenge.expires_at {
+            panic_with_error!(&env, ErrorCode::ChallengeExpired);
+        }
+
+        // Signature must be exactly 64 bytes (Ed25519).
+        if signature.len() != 64 {
+            panic_with_error!(&env, ErrorCode::ProofOfPossessionFailed);
+        }
+
+        // Load the stored Ed25519 verifying key for this attestor.
+        let pk: Bytes = env
+            .storage()
+            .persistent()
+            .get(&(symbol_short!("SEP10KEY"), attestor.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ProofOfPossessionFailed));
+
+        if pk.len() != 32 {
+            panic_with_error!(&env, ErrorCode::ProofOfPossessionFailed);
+        }
+
+        // Verify Ed25519 signature: sig over nonce using pk.
+        let mut pk_arr = [0u8; 32];
+        for i in 0..32u32 {
+            pk_arr[i as usize] = pk.get(i).unwrap();
+        }
+        let pk_bytes: BytesN<32> = BytesN::from_array(&env, &pk_arr);
+
+        let mut sig_arr = [0u8; 64];
+        for i in 0..64u32 {
+            sig_arr[i as usize] = signature.get(i).unwrap();
+        }
+        let sig_bytes: BytesN<64> = BytesN::from_array(&env, &sig_arr);
+
+        // Soroban's ed25519_verify panics on failure — catch via the SDK.
+        env.crypto().ed25519_verify(&pk_bytes, &challenge.nonce, &sig_bytes);
+
+        // Mark challenge verified.
+        challenge.verified = true;
+        env.storage().persistent().set(&key, &challenge);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        let result = PopVerificationResult {
+            attestor: attestor.clone(),
+            nonce: challenge.nonce.clone(),
+            verified_at: now,
+        };
+
+        // Persist the verification result.
+        let result_key = (symbol_short!("POPRESULT"), attestor.clone());
+        env.storage().persistent().set(&result_key, &result);
+        env.storage().persistent().extend_ttl(&result_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("pop"), symbol_short!("verified"), attestor),
+            (),
+        );
+
+        result
+    }
+
+    /// Return the current proof-of-possession challenge for `attestor`, if any.
+    pub fn get_pop_challenge(env: Env, attestor: Address) -> EndpointChallenge {
+        env.storage()
+            .persistent()
+            .get(&(symbol_short!("POPCHAL"), attestor))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ChallengeNotFound))
+    }
+
+    /// Return the most recent successful PoP verification result for `attestor`.
+    pub fn get_pop_status(env: Env, attestor: Address) -> PopVerificationResult {
+        env.storage()
+            .persistent()
+            .get(&(symbol_short!("POPRESULT"), attestor))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ChallengeNotFound))
+    }
+
+    // -----------------------------------------------------------------------
+    // Anchor health metrics
+    // -----------------------------------------------------------------------
+
+    /// Record a successful endpoint response for `anchor`.
+    ///
+    /// Increments `success_count`, resets `consecutive_failures`, updates
+    /// `last_response_at` and `last_success_at`, and recomputes `uptime_bps`.
+    /// Admin-only so only trusted callers can update metrics.
+    pub fn record_endpoint_success(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let key = (symbol_short!("HEALTH"), anchor.clone());
+        let mut metrics: AnchorHealthMetrics = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(AnchorHealthMetrics {
+                anchor: anchor.clone(),
+                success_count: 0,
+                failure_count: 0,
+                consecutive_failures: 0,
+                last_response_at: 0,
+                last_success_at: 0,
+                uptime_bps: 0,
+            });
+
+        metrics.success_count += 1;
+        metrics.consecutive_failures = 0;
+        metrics.last_response_at = now;
+        metrics.last_success_at = now;
+        let total = metrics.success_count + metrics.failure_count;
+        metrics.uptime_bps = ((metrics.success_count * 10_000) / total) as u32;
+
+        env.storage().persistent().set(&key, &metrics);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    /// Record a failed endpoint response for `anchor`.
+    ///
+    /// Increments `failure_count` and `consecutive_failures`, updates
+    /// `last_response_at`, and recomputes `uptime_bps`.
+    /// Admin-only.
+    pub fn record_endpoint_failure(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let now = env.ledger().timestamp();
+        let key = (symbol_short!("HEALTH"), anchor.clone());
+        let mut metrics: AnchorHealthMetrics = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(AnchorHealthMetrics {
+                anchor: anchor.clone(),
+                success_count: 0,
+                failure_count: 0,
+                consecutive_failures: 0,
+                last_response_at: 0,
+                last_success_at: 0,
+                uptime_bps: 0,
+            });
+
+        metrics.failure_count += 1;
+        metrics.consecutive_failures += 1;
+        metrics.last_response_at = now;
+        let total = metrics.success_count + metrics.failure_count;
+        metrics.uptime_bps = ((metrics.success_count * 10_000) / total) as u32;
+
+        env.storage().persistent().set(&key, &metrics);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    /// Return the health metrics for `anchor`.
+    /// Panics with `HealthMetricsNotFound` if no metrics have been recorded yet.
+    pub fn get_anchor_health(env: Env, anchor: Address) -> AnchorHealthMetrics {
+        env.storage()
+            .persistent()
+            .get(&(symbol_short!("HEALTH"), anchor))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::HealthMetricsNotFound))
+    }
+
+    /// Reset health metrics for `anchor` back to zero.  Admin-only.
+    pub fn reset_anchor_health(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let key = (symbol_short!("HEALTH"), anchor.clone());
+        let reset = AnchorHealthMetrics {
+            anchor: anchor.clone(),
+            success_count: 0,
+            failure_count: 0,
+            consecutive_failures: 0,
+            last_response_at: 0,
+            last_success_at: 0,
+            uptime_bps: 0,
+        };
+        env.storage().persistent().set(&key, &reset);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    /// Return health metrics for all anchors in ANCHLIST that have recorded data.
+    pub fn list_anchor_health(env: Env) -> Vec<AnchorHealthMetrics> {
+        let list_key = soroban_sdk::vec![&env, symbol_short!("ANCHLIST")];
+        let anchors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&list_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut results = Vec::new(&env);
+        for anchor in anchors.iter() {
+            let key = (symbol_short!("HEALTH"), anchor.clone());
+            if let Some(metrics) = env.storage().persistent().get::<_, AnchorHealthMetrics>(&key) {
+                results.push_back(metrics);
+            }
+        }
+        results
     }
 
     // -----------------------------------------------------------------------

@@ -54,6 +54,10 @@ pub enum ErrorCode {
     SessionClosed = 26,
     CacheExpired = 48,
     CacheNotFound = 49,
+    ProofOfPossessionFailed = 50,
+    ChallengeNotFound = 51,
+    ChallengeExpired = 52,
+    HealthMetricsNotFound = 53,
 }
 
 impl ErrorCode {
@@ -88,6 +92,10 @@ impl ErrorCode {
             ErrorCode::SessionClosed => "Session is closed",
             ErrorCode::CacheExpired => "Cache entry has expired",
             ErrorCode::CacheNotFound => "Cache entry not found",
+            ErrorCode::ProofOfPossessionFailed => "Proof-of-possession verification failed",
+            ErrorCode::ChallengeNotFound => "Proof-of-possession challenge not found",
+            ErrorCode::ChallengeExpired => "Proof-of-possession challenge has expired",
+            ErrorCode::HealthMetricsNotFound => "Anchor health metrics not found",
         }
     }
 }
@@ -245,6 +253,22 @@ impl AnchorKitError {
     pub fn session_closed() -> Self {
         Self::from_code(ErrorCode::SessionClosed)
     }
+
+    pub fn proof_of_possession_failed() -> Self {
+        Self::from_code(ErrorCode::ProofOfPossessionFailed)
+    }
+
+    pub fn challenge_not_found() -> Self {
+        Self::from_code(ErrorCode::ChallengeNotFound)
+    }
+
+    pub fn challenge_expired() -> Self {
+        Self::from_code(ErrorCode::ChallengeExpired)
+    }
+
+    pub fn health_metrics_not_found() -> Self {
+        Self::from_code(ErrorCode::HealthMetricsNotFound)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +375,10 @@ mod tests {
             ErrorCode::SessionClosed,
             ErrorCode::CacheExpired,
             ErrorCode::CacheNotFound,
+            ErrorCode::ProofOfPossessionFailed,
+            ErrorCode::ChallengeNotFound,
+            ErrorCode::ChallengeExpired,
+            ErrorCode::HealthMetricsNotFound,
         ];
         for code in codes {
             assert!(!code.default_message().is_empty());
