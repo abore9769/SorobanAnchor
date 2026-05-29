@@ -108,7 +108,7 @@ pub mod sep10_jwt;
 pub mod rate_limiter;
 mod response_validator;
 pub mod retry;
-mod transaction_state_tracker;
+pub mod transaction_state_tracker;
 pub mod webhook;
 pub mod sep6;
 pub mod sep24;
@@ -146,8 +146,8 @@ pub use sep24::{
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
 pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
-pub use transaction_state_tracker::{TransactionState, TransactionStateRecord};
-pub use transaction_state_tracker::StorageBudgetMonitor;
+pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
+pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub mod streaming_monitor;
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
