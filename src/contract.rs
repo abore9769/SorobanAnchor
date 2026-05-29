@@ -764,6 +764,14 @@ impl AnchorKitContract {
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
+    /// Returns `true` if the contract has been initialized, `false` otherwise.
+    pub fn is_initialized(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&symbol_short!("INITED"))
+            .unwrap_or(false)
+    }
+
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
