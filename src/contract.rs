@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, Address, Bytes, BytesN,
+    Env, String, Symbol, Vec,
 };
 
 use crate::deterministic_hash::{compute_payload_hash, verify_payload_hash};
@@ -21,11 +21,8 @@ pub struct Session {
     pub created_at: u64,
     pub nonce: u64,
     pub operation_count: u64,
- feat/session-expiry-check
     pub session_ttl_seconds: u64,
-
     pub closed: bool,
- main
 }
 
 #[contracttype]
@@ -168,7 +165,7 @@ pub struct RoutingOptions {
 // ---------------------------------------------------------------------------
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum KycStatus {
     Pending = 0,
@@ -192,6 +189,46 @@ pub struct KycRecord {
     pub status: u32,
     pub timestamp: u64,
     pub rejection_reason_hash: Option<Bytes>,
+}
+
+// ---------------------------------------------------------------------------
+// Batch transaction query types
+// ---------------------------------------------------------------------------
+
+/// A page of transaction records returned by a batch query.
+#[contracttype]
+#[derive(Clone)]
+pub struct TransactionBatchResult {
+    /// The records in this page (at most `limit` entries).
+    pub records: Vec<TransactionStateRecord>,
+    /// Total number of records stored in the requested id range.
+    pub total: u32,
+}
+
+/// Aggregated counts per state, used for audit / reconciliation reports.
+#[contracttype]
+#[derive(Clone)]
+pub struct TransactionSummary {
+    pub pending_count: u32,
+    pub in_progress_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub total_count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Anchor metadata version history types
+// ---------------------------------------------------------------------------
+
+/// A single immutable snapshot of anchor metadata captured at update time.
+#[contracttype]
+#[derive(Clone)]
+pub struct AnchorMetadataVersion {
+    /// Monotonically increasing version number (1-based).
+    pub version: u32,
+    pub metadata: RoutingAnchorMeta,
+    /// Ledger timestamp when this version was written.
+    pub updated_at: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +381,15 @@ struct TxStateChangedEvent {
     timestamp: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+struct WebhookEvent {
+    event_type: String,
+    transaction_id: u64,
+    timestamp: u64,
+    payload_hash: Bytes,
+}
+
 // ---------------------------------------------------------------------------
 // TTLs (in ledgers)
 // ---------------------------------------------------------------------------
@@ -365,6 +411,15 @@ fn kyc_record_key(subject: &Address) -> (Symbol, Address) {
 
 fn compliance_check_key(subject: &Address, check_type: &String) -> (Symbol, Address, String) {
     (symbol_short!("COMP"), subject.clone(), check_type.clone())
+}
+
+/// Convert a `soroban_sdk::String` to an `alloc::string::String` for use with
+/// functions that require a `&str` (e.g. domain validation).
+fn soroban_sdk_string_to_alloc(s: &String) -> alloc::string::String {
+    let len = s.len() as usize;
+    let mut buf = alloc::vec![0u8; len];
+    s.copy_into_slice(&mut buf);
+    alloc::string::String::from_utf8(buf).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +470,7 @@ impl AnchorKitContract {
             input.push_back(*b);
         }
 
-        let hash = env.crypto().sha256(&input);
+        let hash = env.crypto().sha256(&input).to_bytes();
         let mut id = Bytes::new(&env);
         for i in 0..16u32 {
             id.push_back(hash.get(i).unwrap());
@@ -564,7 +619,10 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     pub fn set_endpoint(env: Env, attestor: Address, endpoint: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
-        crate::validate_anchor_domain(endpoint.as_str()).map_err(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat))?;
+        let endpoint_str = soroban_sdk_string_to_alloc(&endpoint);
+        if crate::validate_anchor_domain(&endpoint_str).is_err() {
+            panic_with_error!(&env, ErrorCode::InvalidEndpointFormat);
+        }
         let key = (symbol_short!("ENDPOINT"), attestor.clone());
         env.storage().persistent().set(&key, &endpoint);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -596,12 +654,15 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     pub fn register_webhook(env: Env, attestor: Address, webhook_url: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
-        crate::validate_anchor_domain(webhook_url.as_str()).map_err(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat))?;
+        let webhook_str = soroban_sdk_string_to_alloc(&webhook_url);
+        if crate::validate_anchor_domain(&webhook_str).is_err() {
+            panic_with_error!(&env, ErrorCode::InvalidEndpointFormat);
+        }
         let key = (symbol_short!("WEBHOOK"), attestor.clone());
         env.storage().persistent().set(&key, &webhook_url);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
-            (symbol_short!("webhook"), symbol_short!("registered")),
+            (symbol_short!("webhook"), symbol_short!("reg")),
             EndpointUpdated {
                 attestor,
                 endpoint: webhook_url,
@@ -731,7 +792,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     // Attestation submission with KYC enforcement
     // -----------------------------------------------------------------------
 
-    pub fn submit_attestation_with_kyc_check(
+    pub fn submit_attest_with_kyc(
         env: Env,
         issuer: Address,
         subject: Address,
@@ -1053,7 +1114,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
-            (symbol_short!("compliance"), symbol_short!("checked"), subject),
+            (symbol_short!("comply"), symbol_short!("checked"), subject),
             record,
         );
     }
@@ -1073,11 +1134,8 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             created_at: now,
             nonce: 0,
             operation_count: 0,
- feat/session-expiry-check
             session_ttl_seconds: 3600,
-
             closed: false,
- main
         };
         let sess_key = (symbol_short!("SESS"), session_id);
         env.storage().persistent().set(&sess_key, &session);
@@ -1218,7 +1276,6 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         signature: Bytes,
     ) -> u64 {
         issuer.require_auth();
- feat/session-expiry-check
         let sess_key = (symbol_short!("SESS"), session_id);
         let session: Session = env
             .storage()
@@ -1229,9 +1286,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         if now > session.created_at + session.session_ttl_seconds {
             panic_with_error!(&env, ErrorCode::SessionExpired);
         }
-
         Self::require_session_open(&env, session_id);
- main
         Self::check_attestor(&env, &issuer);
         Self::enforce_rate_limit(&env, &issuer);
         Self::check_timestamp(&env, timestamp);
@@ -1566,6 +1621,33 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             total_volume,
             is_active: true,
         };
+
+        // ---- version history ----
+        // Increment the per-anchor version counter and store a snapshot.
+        let vcnt_key = (symbol_short!("METAVCNT"), anchor.clone());
+        let next_version: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&vcnt_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage().persistent().set(&vcnt_key, &next_version);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vcnt_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        let snapshot = AnchorMetadataVersion {
+            version: next_version,
+            metadata: meta.clone(),
+            updated_at: env.ledger().timestamp(),
+        };
+        let snap_key = (symbol_short!("METAHIST"), anchor.clone(), next_version);
+        env.storage().persistent().set(&snap_key, &snapshot);
+        env.storage()
+            .persistent()
+            .extend_ttl(&snap_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        // ---- end version history ----
+
         let meta_key = (symbol_short!("ANCHMETA"), anchor.clone());
         env.storage().persistent().set(&meta_key, &meta);
         env.storage().persistent().extend_ttl(&meta_key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -1580,6 +1662,73 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
             env.storage().persistent().set(&list_key, &list);
             env.storage().persistent().extend_ttl(&list_key, PERSISTENT_TTL, PERSISTENT_TTL);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Anchor metadata version history
+    // -----------------------------------------------------------------------
+
+    /// Return the total number of metadata versions stored for `anchor`.
+    pub fn get_anchor_meta_version_count(env: Env, anchor: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, u32>(&(symbol_short!("METAVCNT"), anchor))
+            .unwrap_or(0)
+    }
+
+    /// Return up to `limit` historical metadata versions for `anchor`, ordered
+    /// from oldest (version 1) to newest.  `limit` is capped at 50.
+    pub fn get_anchor_metadata_history(
+        env: Env,
+        anchor: Address,
+        limit: u32,
+    ) -> Vec<AnchorMetadataVersion> {
+        const MAX_HISTORY: u32 = 50;
+        let effective_limit = if limit == 0 || limit > MAX_HISTORY { MAX_HISTORY } else { limit };
+
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&(symbol_short!("METAVCNT"), anchor.clone()))
+            .unwrap_or(0);
+
+        let mut results = Vec::new(&env);
+        if total == 0 {
+            return results;
+        }
+
+        // Return the most recent `effective_limit` versions in ascending order.
+        let start = if total > effective_limit { total - effective_limit + 1 } else { 1 };
+        let mut v = start;
+        while v <= total {
+            let snap_key = (symbol_short!("METAHIST"), anchor.clone(), v);
+            if let Some(snapshot) = env
+                .storage()
+                .persistent()
+                .get::<_, AnchorMetadataVersion>(&snap_key)
+            {
+                results.push_back(snapshot);
+            }
+            v += 1;
+        }
+        results
+    }
+
+    /// Return the metadata snapshot at a specific `version` number for `anchor`.
+    /// Panics with `ValidationError` if the version does not exist.
+    pub fn get_anchor_metadata_at_version(
+        env: Env,
+        anchor: Address,
+        version: u32,
+    ) -> AnchorMetadataVersion {
+        if version == 0 {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        let snap_key = (symbol_short!("METAHIST"), anchor.clone(), version);
+        env.storage()
+            .persistent()
+            .get::<_, AnchorMetadataVersion>(&snap_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ValidationError))
     }
 
     /// Reactivate a previously deactivated anchor (admin-only). Sets `is_active = true`.
@@ -1845,7 +1994,7 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
                 return asset;
             }
         }
-        panic_with_error!(&env, ErrorCode::ValidationError);
+        panic_with_error!(&env, ErrorCode::ValidationError)
     }
 
     pub fn get_anchor_deposit_limits(
@@ -1926,6 +2075,102 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         record
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch transaction queries (audit / reconciliation)
+    // -----------------------------------------------------------------------
+
+    /// Return up to `limit` transaction records whose IDs fall in
+    /// `[from_id, to_id]` (inclusive).  `limit` is capped at 100 to prevent
+    /// unbounded iteration.
+    ///
+    /// Records are returned in ascending ID order.  The `total` field in the
+    /// result reflects how many IDs in the range actually have a stored record.
+    pub fn get_transactions_in_range(
+        env: Env,
+        from_id: u64,
+        to_id: u64,
+        limit: u32,
+    ) -> TransactionBatchResult {
+        // Defensive bounds: require a valid, non-empty range.
+        if from_id > to_id {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        // Cap to prevent unbounded loops.
+        const MAX_BATCH: u32 = 100;
+        let effective_limit = if limit == 0 || limit > MAX_BATCH { MAX_BATCH } else { limit };
+
+        let mut records = Vec::new(&env);
+        let mut total: u32 = 0;
+
+        let mut id = from_id;
+        while id <= to_id {
+            let key = (symbol_short!("TXSTATE"), id);
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, TransactionStateRecord>(&key)
+            {
+                total += 1;
+                if (records.len() as u32) < effective_limit {
+                    records.push_back(record);
+                }
+            }
+            id += 1;
+        }
+
+        TransactionBatchResult { records, total }
+    }
+
+    /// Return aggregated counts for all transaction IDs in `[from_id, to_id]`.
+    /// Scans at most 500 IDs to prevent unbounded loops.
+    pub fn summarize_transactions_by_status(
+        env: Env,
+        from_id: u64,
+        to_id: u64,
+    ) -> TransactionSummary {
+        if from_id > to_id {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        const MAX_SCAN: u64 = 500;
+        let scan_end = if to_id - from_id + 1 > MAX_SCAN {
+            from_id + MAX_SCAN - 1
+        } else {
+            to_id
+        };
+
+        let mut pending: u32 = 0;
+        let mut in_progress: u32 = 0;
+        let mut completed: u32 = 0;
+        let mut failed: u32 = 0;
+
+        let mut id = from_id;
+        while id <= scan_end {
+            let key = (symbol_short!("TXSTATE"), id);
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, TransactionStateRecord>(&key)
+            {
+                match record.state {
+                    TransactionState::Pending => pending += 1,
+                    TransactionState::InProgress => in_progress += 1,
+                    TransactionState::Completed => completed += 1,
+                    TransactionState::Failed => failed += 1,
+                }
+            }
+            id += 1;
+        }
+
+        let total = pending + in_progress + completed + failed;
+        TransactionSummary {
+            pending_count: pending,
+            in_progress_count: in_progress,
+            completed_count: completed,
+            failed_count: failed,
+            total_count: total,
+        }
     }
 
     // -----------------------------------------------------------------------

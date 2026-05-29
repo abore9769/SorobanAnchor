@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use soroban_sdk::{Bytes, Env, String};
+use soroban_sdk::{Bytes, BytesN, Env, String};
 
 /// Default maximum JWT character length. Can be overridden via contract storage key "JWTMAXLEN".
 pub const MAX_JWT_LEN: u32 = 2048;
@@ -220,14 +220,20 @@ pub fn verify_sep10_jwt(
     }
 
     let signing_input = Bytes::from_slice(env, &buf[..d1]);
-    let sig_bytes = Bytes::from_slice(env, sig_dec.as_slice());
+    let sig_bytes_raw = Bytes::from_slice(env, sig_dec.as_slice());
 
-    if !env
-        .crypto()
-        .ed25519_verify(anchor_public_key, &signing_input, &sig_bytes)
-    {
-        return Err(());
-    }
+    // Convert to fixed-size types required by ed25519_verify
+    let pk_fixed: BytesN<32> = anchor_public_key
+        .clone()
+        .try_into()
+        .map_err(|_| ())?;
+    let sig_fixed: BytesN<64> = sig_bytes_raw
+        .try_into()
+        .map_err(|_| ())?;
+
+    // ed25519_verify panics on bad signature (SDK contract).
+    // In the test environment the Env wraps panics so we can catch them.
+    env.crypto().ed25519_verify(&pk_fixed, &signing_input, &sig_fixed);
 
     let payload_dec = base64url_decode(payload_b64).map_err(|_| ())?;
     let exp = parse_json_exp(&payload_dec)?;
@@ -381,7 +387,11 @@ mod tests {
         let jwt = build_jwt(&signing_key, sub_str.as_str(), 2_000);
         let token = String::from_str(&env, jwt.as_str());
 
-        assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        // ed25519_verify panics on bad sig; catch_unwind converts that to an Err-like result
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_sep10_jwt(&env, &token, &pk, Some(&sub))
+        }));
+        assert!(result.is_err() || result.unwrap().is_err());
     }
 
     // Issue #61: nbf support

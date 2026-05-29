@@ -197,10 +197,10 @@ pub struct RawTransactionResponse {
 
 /// Normalize a raw anchor deposit response into a canonical [`DepositResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if required fields are missing.
+/// Returns `Err(Error::invalid_transaction_intent())` if required fields are missing.
 pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Error> {
     if raw.transaction_id.is_empty() || raw.how.is_empty() {
-        return Err(Error::InvalidTransactionIntent);
+        return Err(Error::invalid_transaction_intent());
     }
 
     Ok(DepositResponse {
@@ -223,10 +223,10 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
 
 /// Normalize a raw anchor withdrawal response into a canonical [`WithdrawalResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if required fields are missing.
+/// Returns `Err(Error::invalid_transaction_intent())` if required fields are missing.
 pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalResponse, Error> {
     if raw.transaction_id.is_empty() || raw.account_id.is_empty() {
-        return Err(Error::InvalidTransactionIntent);
+        return Err(Error::invalid_transaction_intent());
     }
 
     Ok(WithdrawalResponse {
@@ -248,12 +248,12 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
 /// Normalize a raw anchor transaction-status response into a canonical
 /// [`TransactionStatusResponse`].
 ///
-/// Returns `Err(Error::InvalidTransactionIntent)` if the transaction ID is missing.
+/// Returns `Err(Error::invalid_transaction_intent())` if the transaction ID is missing.
 pub fn fetch_transaction_status(
     raw: RawTransactionResponse,
 ) -> Result<TransactionStatusResponse, Error> {
     if raw.transaction_id.is_empty() {
-        return Err(Error::InvalidTransactionIntent);
+        return Err(Error::invalid_transaction_intent());
     }
 
     Ok(TransactionStatusResponse {
@@ -355,7 +355,7 @@ mod tests {
     fn test_initiate_deposit_missing_fields_returns_error() {
         let mut raw = raw_deposit();
         raw.transaction_id = "".to_string();
-        assert_eq!(initiate_deposit(raw), Err(Error::InvalidTransactionIntent));
+        assert_eq!(initiate_deposit(raw), Err(Error::invalid_transaction_intent()));
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         raw.account_id = "".to_string();
         assert_eq!(
             initiate_withdrawal(raw),
-            Err(Error::InvalidTransactionIntent)
+            Err(Error::invalid_transaction_intent())
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
         raw.transaction_id = "".to_string();
         assert_eq!(
             fetch_transaction_status(raw),
-            Err(Error::InvalidTransactionIntent)
+            Err(Error::invalid_transaction_intent())
         );
     }
 

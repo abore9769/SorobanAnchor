@@ -39,7 +39,7 @@ pub use sep24::{
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
-pub use contract::{AnchorKitContract, EndpointUpdated, get_endpoint, set_endpoint};
+pub use contract::{AnchorKitContract, EndpointUpdated};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord};
 
 #[cfg(test)]
@@ -78,7 +78,14 @@ mod deterministic_hash_snapshot_tests {
     // This module exists to satisfy the test_snapshots/deterministic_hash_tests path.
 }
 
+#[cfg(test)]
 mod capability_detection_tests;
 
 #[cfg(test)]
 mod attestor_endpoint_tests;
+
+#[cfg(test)]
+mod batch_transaction_tests;
+
+#[cfg(test)]
+mod metadata_version_history_tests;

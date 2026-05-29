@@ -264,6 +264,108 @@ impl TransactionStateTracker {
         }
     }
 
+    /// Return up to `limit` records whose IDs fall in `[from_id, to_id]` (inclusive).
+    /// `limit` is capped at 100 to prevent unbounded iteration.
+    /// In dev mode, scans the in-memory cache; in production, scans persistent storage.
+    pub fn get_transactions_in_range(
+        &self,
+        from_id: u64,
+        to_id: u64,
+        limit: usize,
+        env: &Env,
+    ) -> Result<alloc::vec::Vec<TransactionStateRecord>, String> {
+        if from_id > to_id {
+            return Err(String::from_str(env, "from_id must be <= to_id"));
+        }
+        const MAX_BATCH: usize = 100;
+        let effective_limit = if limit == 0 || limit > MAX_BATCH { MAX_BATCH } else { limit };
+
+        let mut results = alloc::vec::Vec::new();
+
+        if self.is_dev_mode {
+            for record in self.cache.iter() {
+                if record.transaction_id >= from_id && record.transaction_id <= to_id {
+                    if results.len() < effective_limit {
+                        results.push(record.clone());
+                    }
+                }
+            }
+            // Sort by transaction_id ascending for deterministic output.
+            results.sort_by_key(|r| r.transaction_id);
+        } else {
+            let mut id = from_id;
+            while id <= to_id && results.len() < effective_limit {
+                let key = (symbol_short!("TXSTATE"), id);
+                if let Some(record) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, TransactionStateRecord>(&key)
+                {
+                    results.push(record);
+                }
+                id += 1;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Return aggregated counts for all records in `[from_id, to_id]`.
+    /// Scans at most 500 IDs to prevent unbounded loops.
+    pub fn summarize_by_status(
+        &self,
+        from_id: u64,
+        to_id: u64,
+        env: &Env,
+    ) -> Result<(u32, u32, u32, u32), String> {
+        if from_id > to_id {
+            return Err(String::from_str(env, "from_id must be <= to_id"));
+        }
+        let mut pending: u32 = 0;
+        let mut in_progress: u32 = 0;
+        let mut completed: u32 = 0;
+        let mut failed: u32 = 0;
+
+        if self.is_dev_mode {
+            for record in self.cache.iter() {
+                if record.transaction_id >= from_id && record.transaction_id <= to_id {
+                    match record.state {
+                        TransactionState::Pending => pending += 1,
+                        TransactionState::InProgress => in_progress += 1,
+                        TransactionState::Completed => completed += 1,
+                        TransactionState::Failed => failed += 1,
+                    }
+                }
+            }
+        } else {
+            const MAX_SCAN: u64 = 500;
+            let scan_end = if to_id - from_id + 1 > MAX_SCAN {
+                from_id + MAX_SCAN - 1
+            } else {
+                to_id
+            };
+            let mut id = from_id;
+            while id <= scan_end {
+                let key = (symbol_short!("TXSTATE"), id);
+                if let Some(record) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, TransactionStateRecord>(&key)
+                {
+                    match record.state {
+                        TransactionState::Pending => pending += 1,
+                        TransactionState::InProgress => in_progress += 1,
+                        TransactionState::Completed => completed += 1,
+                        TransactionState::Failed => failed += 1,
+                    }
+                }
+                id += 1;
+            }
+        }
+
+        Ok((pending, in_progress, completed, failed))
+    }
+
     /// Clear all cached transactions (dev mode only)
     pub fn clear_cache(&mut self) -> Result<(), String> {
         if self.is_dev_mode {
