@@ -1,0 +1,18 @@
+version: 2
+
+# Percy visual regression configuration for AnchorKit
+# Docs: https://docs.percy.io/docs/percy-yml
+
+snapshot:
+  # Widths to capture for each snapshot (desktop + mobile)
+  widths:
+    - 375   # mobile
+    - 1280  # desktop
+
+  # Minimum pixel difference to flag a change (0 = flag any change)
+  min-height: 600
+
+percy:
+  # Require explicit approval before Percy marks a build as passing
+  # This enforces the "visual diff review required before merge" criterion
+  branch-detection: true

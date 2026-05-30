@@ -1,0 +1,18 @@
+{
+  "name": "anchorkit-visual-tests",
+  "version": "1.0.0",
+  "description": "Visual regression tests for AnchorKit UI components",
+  "private": true,
+  "scripts": {
+    "test:visual": "playwright test",
+    "test:visual:update": "playwright test --update-snapshots",
+    "percy": "percy exec -- playwright test",
+    "serve": "npx serve . --listen 3000 --no-clipboard"
+  },
+  "devDependencies": {
+    "@percy/cli": "^1.30.0",
+    "@percy/playwright": "^1.0.6",
+    "@playwright/test": "^1.44.0",
+    "serve": "^14.2.3"
+  }
+}

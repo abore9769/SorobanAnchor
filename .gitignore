@@ -3,3 +3,11 @@ Cargo.lock
 .DS_Store
 .env
 **/*.rs.bk
+
+# Visual regression testing
+node_modules/
+package-lock.json
+visual-tests/report/
+visual-tests/snapshots/
+playwright-report/
+test-results/
