@@ -9,7 +9,7 @@ use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_p
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
 use crate::sep10_jwt;
-use crate::transaction_state_tracker::{TransactionState, TransactionStateRecord};
+use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -156,6 +156,46 @@ pub const SERVICE_DEPOSITS: u32 = 1;
 pub const SERVICE_WITHDRAWALS: u32 = 2;
 pub const SERVICE_QUOTES: u32 = 3;
 pub const SERVICE_KYC: u32 = 4;
+
+// ---------------------------------------------------------------------------
+// #344 — Admin permission model
+//
+// Every admin-gated method maps to one of the categories below. The primary
+// admin (set during `initialize`) has implicit access to ALL categories.
+// Additional addresses may be granted category-scoped roles via `grant_role`.
+//
+// | Category / Role   | Protected operations                                    |
+// |-------------------|---------------------------------------------------------|
+// | (primary admin)   | initialize, upgrade, migrate, set_cache_config,         |
+// |                   | set_sep10_jwt_verifying_key, rotate_sep10_key,          |
+// |                   | set_jwt_max_len, set_jwt_skew, set_rate_limit_config,   |
+// |                   | set_anchor_metadata, reactivate_anchor                  |
+// | KycAdmin          | approve_kyc, reject_kyc                                 |
+// | AttestorAdmin     | register_attestor, revoke_attestor,                     |
+// |                   | register_attestor_with_session,                         |
+// |                   | revoke_attestor_with_session                            |
+// | CacheAdmin        | cache_metadata, cache_metadata_swr, force_refresh_metadata,|
+// |                   | refresh_metadata_cache, refresh_metadata_cache_swr,     |
+// |                   | cache_capabilities, refresh_capabilities_cache          |
+// ---------------------------------------------------------------------------
+
+/// Role-based access control for delegatable admin operations (#345).
+///
+/// Addresses may be granted a role by the primary admin via [`AnchorKitContract::grant_role`].
+/// Role holders can call the operations associated with their role without being
+/// the primary admin. The primary admin always passes any role check regardless
+/// of explicit grants.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum AdminRole {
+    /// May call `approve_kyc` and `reject_kyc`.
+    KycAdmin      = 0,
+    /// May call `register_attestor`, `revoke_attestor`, and their session variants.
+    AttestorAdmin = 1,
+    /// May call all `cache_*` and `refresh_*_cache*` methods.
+    CacheAdmin    = 2,
+}
 
 /// Current on-chain service-capability schema version (#239).
 ///
@@ -323,6 +363,49 @@ pub struct KycRecord {
     pub rejection_reason_hash: Option<Bytes>,
     /// Schema version for this record. See [`SCHEMA_V1`].
     pub schema_version: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Health check types (#268)
+// ---------------------------------------------------------------------------
+
+/// Overall contract health state returned by [`AnchorKitContract::get_health_status`].
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum HealthStatus {
+    /// Contract is initialized and all subsystems are operational.
+    Healthy = 0,
+    /// Contract is initialized but one or more subsystems are using fallback defaults.
+    Degraded = 1,
+    /// Contract has not been initialized.
+    Unavailable = 2,
+}
+
+/// Metadata freshness report returned by [`AnchorKitContract::get_metadata_freshness`].
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataFreshnessReport {
+    pub anchor: Address,
+    pub state: MetadataCacheState,
+    /// Age of the cached entry in seconds (0 when missing).
+    pub age_seconds: u64,
+    /// Whether a background refresh is recommended.
+    pub needs_refresh: bool,
+}
+
+/// Rate limiter health report returned by [`AnchorKitContract::get_rate_limiter_health`].
+#[contracttype]
+#[derive(Clone)]
+pub struct RateLimiterHealth {
+    pub attestor: Address,
+    /// Effective submission count in the current window (0 if window expired).
+    pub submission_count: u32,
+    pub max_submissions: u32,
+    pub window_length: u32,
+    pub window_start_ledger: u32,
+    /// `true` when the attestor has reached the submission limit.
+    pub is_throttled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +722,35 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
 
+/// Default lifetime for an approved KYC record before the approval expires.
+const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+fn current_kyc_status(env: &Env, record: &KycRecord) -> KycStatus {
+    if let Some(expiry) = record.expiry {
+        if env.ledger().timestamp() > expiry {
+            return KycStatus::Expired;
+        }
+    }
+    match record.status {
+        0 => KycStatus::NotSubmitted,
+        1 => KycStatus::Pending,
+        2 => KycStatus::Approved,
+        3 => KycStatus::Rejected,
+        4 => KycStatus::Expired,
+        _ => KycStatus::NotSubmitted,
+    }
+}
+
+fn validate_kyc_transition(current: KycStatus, next: KycStatus, _record: &KycRecord, _now: u64) -> bool {
+    match (current, next) {
+        (KycStatus::NotSubmitted, KycStatus::Pending) => true,
+        (KycStatus::Expired, KycStatus::Pending) => true,
+        (KycStatus::Pending, KycStatus::Approved) => true,
+        (KycStatus::Pending, KycStatus::Rejected) => true,
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage key helpers — all keys go through make_storage_key for collision
 // resistance (#229). Each namespace uses a unique prefix byte slice.
@@ -681,6 +793,14 @@ fn xdr_to_vec(b: &Bytes) -> alloc::vec::Vec<u8> {
     v
 }
 
+/// Storage key for a specific `(role, grantee)` pair.
+fn role_key(env: &Env, role: AdminRole, grantee: &Address) -> BytesN<32> {
+    let xdr = grantee.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    let role_byte = [role as u32 as u8];
+    make_storage_key(env, &[b"ROLESET", &role_byte, &raw])
+}
+
 fn anchor_meta_opt(env: &Env, anchor: &Address) -> Option<RoutingAnchorMeta> {
     env.storage().persistent().get(&anchor_meta_key(env, anchor))
 }
@@ -715,7 +835,7 @@ fn validate_currency_code(env: &Env, code: &String) {
         panic_with_error!(env, ErrorCode::InvalidAssetCode);
     }
     // Soroban String: iterate bytes and check ASCII alphanumeric
-    let bytes = code.to_xdr(env);
+    let bytes = code.clone().to_xdr(env);
     // XDR-encoded string has a 4-byte length prefix; skip it
     let n = bytes.len() as usize;
     for i in 4..n {
@@ -777,6 +897,46 @@ impl AnchorKitContract {
             .instance()
             .get::<_, Address>(&admin_key(&env))
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized))
+    }
+
+    // -----------------------------------------------------------------------
+    // Role-based access control (#345)
+    // -----------------------------------------------------------------------
+
+    /// Grant `role` to `grantee`. Only the primary admin may call this.
+    ///
+    /// After this call `grantee` may invoke the operations protected by `role`
+    /// without being the primary admin.  Granting a role that is already held
+    /// is a no-op.
+    pub fn grant_role(env: Env, grantee: Address, role: AdminRole) {
+        Self::require_admin(&env);
+        let key = role_key(&env, role, &grantee);
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.events().publish(
+            (symbol_short!("role"), symbol_short!("granted"), grantee),
+            role as u32,
+        );
+    }
+
+    /// Revoke `role` from `grantee`. Only the primary admin may call this.
+    ///
+    /// Revoking a role that was never granted is a no-op.
+    pub fn revoke_role(env: Env, grantee: Address, role: AdminRole) {
+        Self::require_admin(&env);
+        let key = role_key(&env, role, &grantee);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
+        env.events().publish(
+            (symbol_short!("role"), symbol_short!("revoked"), grantee),
+            role as u32,
+        );
+    }
+
+    /// Returns `true` if `address` holds `role` or is the primary admin.
+    pub fn has_role(env: Env, address: Address, role: AdminRole) -> bool {
+        Self::has_role_internal(&env, &address, role)
     }
 
     // -----------------------------------------------------------------------
@@ -1864,7 +2024,12 @@ impl AnchorKitContract {
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         if env.storage().persistent().has(&key) {
-            panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            let existing: KycRecord = env.storage().persistent().get(&key)
+                .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ComplianceNotMet));
+            let current_status = Self::current_kyc_status(&env, &existing);
+            if !Self::validate_kyc_transition(current_status, KycStatus::Pending, &existing, now) {
+                panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            }
         }
         let record = KycRecord {
             subject: subject.clone(), status: KycStatus::Pending as u32,
@@ -1886,17 +2051,22 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn approve_kyc(env: Env, subject: Address) {
-        Self::require_admin(&env);
+    /// Approve a pending KYC record.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::KycAdmin`].
+    pub fn approve_kyc(env: Env, operator: Address, subject: Address) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::KycAdmin);
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Approved, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Approved as u32;
         record.reviewed_at = Some(now);
+        record.expiry = Some(now + KYC_EXPIRY_SECONDS);
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
@@ -1908,17 +2078,22 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn reject_kyc(env: Env, subject: Address, reason_hash: Bytes) {
-        Self::require_admin(&env);
+    /// Reject a pending KYC record.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::KycAdmin`].
+    pub fn reject_kyc(env: Env, operator: Address, subject: Address, reason_hash: Bytes) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::KycAdmin);
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Rejected, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Rejected as u32;
         record.reviewed_at = Some(now);
+        record.expiry = None;
         record.rejection_reason_hash = Some(reason_hash.clone());
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -2232,8 +2407,11 @@ impl AnchorKitContract {
         id
     }
 
-    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address, public_key: BytesN<32>) {
-        Self::require_admin(&env);
+    /// Register an attestor within a session.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::AttestorAdmin`].
+    pub fn register_attestor_with_session(env: Env, operator: Address, session_id: u64, attestor: Address, public_key: BytesN<32>) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::AttestorAdmin);
         Self::require_session_open(&env, session_id);
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -2258,12 +2436,9 @@ impl AnchorKitContract {
         inst.set(&acnt_key, &(log_id + 1));
         inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
-        let admin: Address = inst
-            .get::<_, Address>(&admin_key(&env))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
         let now = env.ledger().timestamp();
         let audit = AuditLog {
-            log_id, session_id, actor: admin,
+            log_id, session_id, actor: operator.clone(),
             operation: OperationContext {
                 session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "register"),
@@ -2289,8 +2464,11 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn revoke_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
-        Self::require_admin(&env);
+    /// Revoke an attestor within a session.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::AttestorAdmin`].
+    pub fn revoke_attestor_with_session(env: Env, operator: Address, session_id: u64, attestor: Address) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::AttestorAdmin);
         Self::require_session_open(&env, session_id);
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -2313,12 +2491,9 @@ impl AnchorKitContract {
         inst.set(&acnt_key, &(log_id + 1));
         inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
-        let admin: Address = inst
-            .get::<_, Address>(&admin_key(&env))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
         let now = env.ledger().timestamp();
         let audit = AuditLog {
-            log_id, session_id, actor: admin,
+            log_id, session_id, actor: operator.clone(),
             operation: OperationContext {
                 session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "revoke"),
@@ -3145,8 +3320,10 @@ impl AnchorKitContract {
             initiator,
             timestamp: now,
             last_updated: now,
+            last_updated_ledger: env.ledger().sequence(),
             error_message: None,
             state_history: history,
+            recovery_metadata: OptRecovery::None,
         };
         let key = (symbol_short!("TXSTATE"), transaction_id);
         env.storage().persistent().set(&key, &record);
@@ -3201,6 +3378,32 @@ impl AnchorKitContract {
             .get::<_, Address>(&admin_key(env))
             .unwrap_or_else(|| panic_with_error!(env, ErrorCode::NotInitialized));
         admin.require_auth();
+    }
+
+    /// Returns `true` if `address` holds `role` OR is the primary admin.
+    fn has_role_internal(env: &Env, address: &Address, role: AdminRole) -> bool {
+        // Primary admin implicitly has every role.
+        if let Some(admin) = env.storage().instance().get::<_, Address>(&admin_key(env)) {
+            if *address == admin {
+                return true;
+            }
+        }
+        env.storage()
+            .persistent()
+            .get::<_, bool>(&role_key(env, role, address))
+            .unwrap_or(false)
+    }
+
+    /// Require that `caller` is either the primary admin or holds `role`.
+    ///
+    /// Panics with `NotInitialized` if the contract has not been initialised,
+    /// or with `Unauthorized` if the caller has neither admin status nor the
+    /// required role.
+    fn require_admin_or_role(env: &Env, caller: &Address, role: AdminRole) {
+        if !Self::has_role_internal(env, caller, role) {
+            panic_with_error!(env, ErrorCode::Unauthorized);
+        }
+        caller.require_auth();
     }
 
     /// Validate freshly-fetched anchor metadata before it is written to the
@@ -3350,6 +3553,82 @@ impl AnchorKitContract {
         env.storage()
             .temporary()
             .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Health check APIs (#268)
+    // -----------------------------------------------------------------------
+
+    /// Overall service health status.
+    ///
+    /// Returns `Healthy` when the contract is initialized and the rate limiter
+    /// config is present. Returns `Degraded` when initialized but the rate
+    /// limiter config is missing (default fallback in use). Returns
+    /// `Unavailable` when the contract has not been initialized.
+    pub fn get_health_status(env: Env) -> HealthStatus {
+        if !env.storage().persistent().has(&initialized_key(&env)) {
+            return HealthStatus::Unavailable;
+        }
+        let rl_key = make_storage_key(&env, &[b"RL_CONFIG"]);
+        if env.storage().persistent().has(&rl_key) {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        }
+    }
+
+    /// Metadata freshness report for a given anchor.
+    ///
+    /// Returns the cache state together with the age of the entry in seconds
+    /// (zero when missing). Callers can use this to detect stale or expired
+    /// metadata without triggering a panic.
+    pub fn get_metadata_freshness(env: Env, anchor: Address) -> MetadataFreshnessReport {
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        match env.storage().temporary().get::<_, MetadataCache>(&key) {
+            None => MetadataFreshnessReport {
+                anchor,
+                state: MetadataCacheState::Missing,
+                age_seconds: 0,
+                needs_refresh: false,
+            },
+            Some(entry) => {
+                let now = env.ledger().timestamp();
+                let age = now.saturating_sub(entry.cached_at);
+                let state = if age <= entry.ttl_seconds {
+                    MetadataCacheState::Fresh
+                } else if age <= entry.ttl_seconds.saturating_add(entry.stale_ttl_seconds) {
+                    MetadataCacheState::Stale
+                } else {
+                    MetadataCacheState::Expired
+                };
+                MetadataFreshnessReport {
+                    anchor,
+                    state,
+                    age_seconds: age,
+                    needs_refresh: entry.needs_refresh || state != MetadataCacheState::Fresh,
+                }
+            }
+        }
+    }
+
+    /// Rate limiter health for a given attestor.
+    ///
+    /// Returns the current submission count, window start ledger, configured
+    /// limits, and whether the attestor is currently throttled.
+    pub fn get_rate_limiter_health(env: Env, attestor: Address) -> RateLimiterHealth {
+        let config = RateLimiter::get_config(&env);
+        let state = RateLimiter::get_state(&env, &attestor);
+        let current_ledger = env.ledger().sequence();
+        let window_expired = state.window_start_ledger.saturating_add(config.window_length) <= current_ledger;
+        let effective_count = if window_expired { 0 } else { state.submission_count };
+        RateLimiterHealth {
+            attestor,
+            submission_count: effective_count,
+            max_submissions: config.max_submissions,
+            window_length: config.window_length,
+            window_start_ledger: state.window_start_ledger,
+            is_throttled: !window_expired && effective_count >= config.max_submissions,
+        }
     }
 
     /// Append `operation_name` to the `RequestContext` stored under `root_id_bytes`.
