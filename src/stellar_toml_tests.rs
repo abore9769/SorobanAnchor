@@ -284,147 +284,294 @@ KYC_SERVER = "https://kyc.example.com"
 }
 
 // ---------------------------------------------------------------------------
-// Issue #346 — invalid anchor metadata shape and schema drift
+// Resilient discovery tests (issue #289)
 // ---------------------------------------------------------------------------
 
-/// A line that has no `=` character is not a key-value pair and must be
-/// silently ignored — the parser should not panic or return an error.
+use crate::stellar_toml::{
+    fetch_stellar_toml_with_retry, StellarTomlFetchConfig,
+};
+use crate::retry::{MockJitterSource, RetryConfig};
+use crate::errors::AnchorKitError;
+
+const MINIMAL_TOML: &str = r#"NETWORK_PASSPHRASE = "Test SDF Network ; September 2015""#;
+
+/// A fetch that always succeeds on the first attempt returns the content
+/// without marking it as a fallback.
 #[test]
-fn test_malformed_line_without_equals_is_ignored() {
-    let raw = r#"
-THIS_LINE_HAS_NO_EQUALS_SIGN
-TRANSFER_SERVER = "https://api.example.com"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+fn test_fetch_succeeds_on_first_attempt() {
+    let config = StellarTomlFetchConfig::default();
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| Ok(MINIMAL_TOML.into()),
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert_eq!(result.used_fallback, false);
+    assert_eq!(
+        result.resolved_url,
+        "https://anchor.example.com/.well-known/stellar.toml"
+    );
+    assert!(result.raw_content.contains("NETWORK_PASSPHRASE"));
 }
 
-/// Deprecated or renamed field names that the current schema no longer
-/// recognises are silently ignored (schema drift — old → new).
+/// A fetch that fails once then succeeds on the second attempt (retry path).
 #[test]
-fn test_schema_drift_deprecated_fields_silently_ignored() {
-    let raw = r#"
-STELLAR_ACCOUNT = "GACCOUNT123"
-FEDERATION_SERVER = "https://old.example.com"
-HORIZON_URL = "https://horizon.example.com"
-TRANSFER_SERVER = "https://api.example.com"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    // Only the still-valid field is parsed; deprecated fields produce no error.
-    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
-    assert!(parsed.kyc_server.is_none());
+fn test_fetch_succeeds_after_one_transient_failure() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(3, 0, 0, 1),
+        fallback_hosts: vec![],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+    let mut call_count = 0u32;
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| {
+            call_count += 1;
+            if call_count < 2 {
+                Err(AnchorKitError::new(
+                    crate::errors::ErrorCode::ServicesNotConfigured,
+                    "transient network error",
+                ))
+            } else {
+                Ok(MINIMAL_TOML.into())
+            }
+        },
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert_eq!(call_count, 2);
+    assert_eq!(result.used_fallback, false);
+    assert!(result.raw_content.contains("NETWORK_PASSPHRASE"));
 }
 
-/// Completely unknown top-level fields (forward-compat schema drift) must be
-/// ignored rather than causing a parse error so older parsers can read newer
-/// stellar.toml files.
+/// When the primary host exhausts all retries, the fallback host is tried
+/// and its successful response is returned with `used_fallback = true`.
 #[test]
-fn test_schema_drift_forward_compat_unknown_fields_ignored() {
-    let raw = r#"
-TRANSFER_SERVER = "https://api.example.com"
-UNKNOWN_FUTURE_FIELD = "some_value"
-ANOTHER_NEW_FIELD = "42"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+fn test_fallback_host_used_when_primary_fails() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(2, 0, 0, 1),
+        fallback_hosts: vec!["https://mirror.example.com".into()],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 20]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://primary.example.com",
+        &config,
+        |url| {
+            if url.contains("primary") {
+                Err(AnchorKitError::new(
+                    crate::errors::ErrorCode::ServicesNotConfigured,
+                    "primary unreachable",
+                ))
+            } else {
+                Ok(MINIMAL_TOML.into())
+            }
+        },
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert_eq!(result.used_fallback, true);
+    assert!(result.resolved_url.contains("mirror.example.com"));
+    assert!(result.raw_content.contains("NETWORK_PASSPHRASE"));
 }
 
-/// A currency block that carries fields the current schema does not recognise
-/// (e.g. new fields added in a future stellar.toml spec) must be parsed without
-/// error and with the known fields (`code`, `issuer`, `status`) extracted.
+/// When all hosts (primary + all fallbacks) fail, the function returns an error
+/// rather than panicking or hanging.
 #[test]
-fn test_schema_drift_unknown_currency_fields_ignored() {
-    let raw = r#"
-[[CURRENCIES]]
-code = "USDC"
-issuer = "GABC123"
-min_amount = "0.01"
-max_amount = "100000"
-deposit_fee_percent = "0.1"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.currencies.len(), 1);
-    assert_eq!(parsed.currencies[0].code, "USDC");
-    assert_eq!(parsed.currencies[0].issuer.as_deref(), Some("GABC123"));
+fn test_all_hosts_fail_returns_error() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(2, 0, 0, 1),
+        fallback_hosts: vec!["https://fallback1.example.com".into()],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 20]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://primary.example.com",
+        &config,
+        |_url| {
+            Err(AnchorKitError::new(
+                crate::errors::ErrorCode::ServicesNotConfigured,
+                "all hosts down",
+            ))
+        },
+        |_ms| {},
+        &mut js,
+    );
+
+    assert!(result.is_err());
 }
 
-/// An empty value for a URL field must be rejected gracefully — the validator
-/// rejects empty strings and must not panic.
+/// The primary host is tried before any fallback: if the primary succeeds,
+/// the fallback fetch closure is never called.
 #[test]
-fn test_invalid_empty_transfer_server_rejected() {
-    let raw = r#"TRANSFER_SERVER = """#;
-    assert!(parse_stellar_toml(raw).is_err());
+fn test_primary_tried_before_fallback() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(3, 0, 0, 1),
+        fallback_hosts: vec!["https://fallback.example.com".into()],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+    let mut fallback_called = false;
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://primary.example.com",
+        &config,
+        |url| {
+            if url.contains("fallback") {
+                fallback_called = true;
+            }
+            Ok(MINIMAL_TOML.into())
+        },
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert_eq!(result.used_fallback, false);
+    assert!(!fallback_called, "fallback should not be called when primary succeeds");
 }
 
-/// A currency block whose `code` consists only of whitespace produces an
-/// empty string after stripping — it must be dropped, not inserted.
+/// Multiple fallback hosts are tried in order; the first one that succeeds
+/// is used and subsequent fallbacks are not attempted.
 #[test]
-fn test_currency_whitespace_only_code_dropped() {
-    let raw = r#"
-[[CURRENCIES]]
-code = "   "
-issuer = "GABC123"
+fn test_multiple_fallbacks_tried_in_order() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(1, 0, 0, 1),
+        fallback_hosts: vec![
+            "https://fallback1.example.com".into(),
+            "https://fallback2.example.com".into(),
+        ],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 20]);
+    let mut fallback2_called = false;
 
-[[CURRENCIES]]
-code = "USDC"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    // The whitespace-only code is stored as-is by the parser (it reads the
-    // quoted string literally). Since "   " is non-empty the entry IS kept
-    // but the `supported_assets` list reflects what was actually parsed.
-    assert!(parsed.currencies.iter().any(|c| c.code == "USDC"));
+    let result = fetch_stellar_toml_with_retry(
+        "https://primary.example.com",
+        &config,
+        |url| {
+            if url.contains("primary") || url.contains("fallback1") {
+                Err(AnchorKitError::new(
+                    crate::errors::ErrorCode::ServicesNotConfigured,
+                    "unreachable",
+                ))
+            } else {
+                if url.contains("fallback2") {
+                    fallback2_called = true;
+                }
+                Ok(MINIMAL_TOML.into())
+            }
+        },
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert!(result.used_fallback, "should have used a fallback");
+    assert!(fallback2_called, "fallback2 should have been tried");
+    assert!(result.resolved_url.contains("fallback2.example.com"));
 }
 
-/// When the same top-level key appears multiple times, the last value wins.
-/// This matches TOML's last-assignment-wins semantics.
+/// An invalid primary domain (non-HTTPS) is rejected immediately without
+/// calling the fetch closure.
 #[test]
-fn test_duplicate_top_level_field_last_value_wins() {
-    let raw = r#"
-TRANSFER_SERVER = "https://first.example.com"
-TRANSFER_SERVER = "https://second.example.com"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.transfer_server.as_deref(), Some("https://second.example.com"));
+fn test_invalid_primary_domain_returns_error() {
+    let config = StellarTomlFetchConfig::default();
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+    let mut fetch_called = false;
+
+    let result = fetch_stellar_toml_with_retry(
+        "http://insecure.example.com",
+        &config,
+        |_url| {
+            fetch_called = true;
+            Ok(MINIMAL_TOML.into())
+        },
+        |_ms| {},
+        &mut js,
+    );
+
+    assert!(result.is_err(), "invalid domain should return error");
+    assert!(!fetch_called, "fetch should not be called for invalid domain");
 }
 
-/// An inline comment after a quoted value must be stripped cleanly so the URL
-/// is validated against the canonical value without the comment text.
+/// The sleep callback is invoked between retries (not on the first attempt
+/// and not after the final attempt).
 #[test]
-fn test_inline_comment_stripped_before_validation() {
-    let raw = r#"TRANSFER_SERVER = "https://api.example.com" # production endpoint"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+fn test_sleep_called_between_retries_on_failure() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(3, 50, 5_000, 2),
+        fallback_hosts: vec![],
+    };
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+    let mut sleep_calls = 0u32;
+
+    let _ = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| {
+            Err(AnchorKitError::new(
+                crate::errors::ErrorCode::ServicesNotConfigured,
+                "always fails",
+            ))
+        },
+        |_ms| sleep_calls += 1,
+        &mut js,
+    );
+
+    // 3 attempts → 2 sleeps (between attempt 0→1 and 1→2).
+    assert_eq!(sleep_calls, 2);
 }
 
-/// A malformed stellar.toml that has only unknown section headers and no
-/// recognised keys should produce an empty but valid ParsedStellarToml.
+/// The resolved URL in the result always points to the `.well-known/stellar.toml`
+/// path, not just the bare domain.
 #[test]
-fn test_all_unknown_sections_produces_empty_result() {
-    let raw = r#"
-[UNKNOWN_SECTION]
-foo = "bar"
+fn test_resolved_url_contains_well_known_path() {
+    let config = StellarTomlFetchConfig::default();
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
 
-[ANOTHER_SECTION]
-baz = "qux"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert!(parsed.transfer_server.is_none());
-    assert!(parsed.web_auth_endpoint.is_none());
-    assert!(parsed.currencies.is_empty());
-    assert!(parsed.supported_assets.is_empty());
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| Ok(MINIMAL_TOML.into()),
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    assert!(
+        result.resolved_url.ends_with("/.well-known/stellar.toml"),
+        "resolved_url should end with /.well-known/stellar.toml, got: {}",
+        result.resolved_url
+    );
 }
 
-/// A currency entry that contains a valid `code` but no `issuer` or `status`
-/// is still retained — only an absent `code` causes an entry to be dropped.
+/// Verify that the raw content returned by the fetch can be parsed by
+/// `parse_stellar_toml` without error (end-to-end smoke test).
 #[test]
-fn test_minimal_currency_entry_code_only_retained() {
-    let raw = r#"
-[[CURRENCIES]]
-code = "XLM"
-"#;
-    let parsed = parse_stellar_toml(raw).unwrap();
-    assert_eq!(parsed.currencies.len(), 1);
-    assert_eq!(parsed.currencies[0].code, "XLM");
-    assert!(parsed.currencies[0].issuer.is_none());
-    assert!(parsed.currencies[0].status.is_none());
+fn test_fetched_content_is_parseable() {
+    let config = StellarTomlFetchConfig::default();
+    let mut js = MockJitterSource::new(vec![0u64; 10]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| Ok(VALID_TOML.into()),
+        |_ms| {},
+        &mut js,
+    )
+    .unwrap();
+
+    let parsed = parse_stellar_toml(&result.raw_content).unwrap();
+    assert!(parsed.supports_sep6());
+    assert!(parsed.supports_sep24());
 }

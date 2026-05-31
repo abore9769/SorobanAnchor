@@ -9,7 +9,7 @@ use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_p
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
 use crate::sep10_jwt;
-use crate::transaction_state_tracker::{TransactionState, TransactionStateRecord};
+use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -366,6 +366,49 @@ pub struct KycRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Health check types (#268)
+// ---------------------------------------------------------------------------
+
+/// Overall contract health state returned by [`AnchorKitContract::get_health_status`].
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum HealthStatus {
+    /// Contract is initialized and all subsystems are operational.
+    Healthy = 0,
+    /// Contract is initialized but one or more subsystems are using fallback defaults.
+    Degraded = 1,
+    /// Contract has not been initialized.
+    Unavailable = 2,
+}
+
+/// Metadata freshness report returned by [`AnchorKitContract::get_metadata_freshness`].
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataFreshnessReport {
+    pub anchor: Address,
+    pub state: MetadataCacheState,
+    /// Age of the cached entry in seconds (0 when missing).
+    pub age_seconds: u64,
+    /// Whether a background refresh is recommended.
+    pub needs_refresh: bool,
+}
+
+/// Rate limiter health report returned by [`AnchorKitContract::get_rate_limiter_health`].
+#[contracttype]
+#[derive(Clone)]
+pub struct RateLimiterHealth {
+    pub attestor: Address,
+    /// Effective submission count in the current window (0 if window expired).
+    pub submission_count: u32,
+    pub max_submissions: u32,
+    pub window_length: u32,
+    pub window_start_ledger: u32,
+    /// `true` when the attestor has reached the submission limit.
+    pub is_throttled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Metadata cache types
 // ---------------------------------------------------------------------------
 
@@ -679,6 +722,35 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
 
+/// Default lifetime for an approved KYC record before the approval expires.
+const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+fn current_kyc_status(env: &Env, record: &KycRecord) -> KycStatus {
+    if let Some(expiry) = record.expiry {
+        if env.ledger().timestamp() > expiry {
+            return KycStatus::Expired;
+        }
+    }
+    match record.status {
+        0 => KycStatus::NotSubmitted,
+        1 => KycStatus::Pending,
+        2 => KycStatus::Approved,
+        3 => KycStatus::Rejected,
+        4 => KycStatus::Expired,
+        _ => KycStatus::NotSubmitted,
+    }
+}
+
+fn validate_kyc_transition(current: KycStatus, next: KycStatus, _record: &KycRecord, _now: u64) -> bool {
+    match (current, next) {
+        (KycStatus::NotSubmitted, KycStatus::Pending) => true,
+        (KycStatus::Expired, KycStatus::Pending) => true,
+        (KycStatus::Pending, KycStatus::Approved) => true,
+        (KycStatus::Pending, KycStatus::Rejected) => true,
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage key helpers — all keys go through make_storage_key for collision
 // resistance (#229). Each namespace uses a unique prefix byte slice.
@@ -763,7 +835,7 @@ fn validate_currency_code(env: &Env, code: &String) {
         panic_with_error!(env, ErrorCode::InvalidAssetCode);
     }
     // Soroban String: iterate bytes and check ASCII alphanumeric
-    let bytes = code.to_xdr(env);
+    let bytes = code.clone().to_xdr(env);
     // XDR-encoded string has a 4-byte length prefix; skip it
     let n = bytes.len() as usize;
     for i in 4..n {
@@ -1952,7 +2024,12 @@ impl AnchorKitContract {
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         if env.storage().persistent().has(&key) {
-            panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            let existing: KycRecord = env.storage().persistent().get(&key)
+                .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ComplianceNotMet));
+            let current_status = Self::current_kyc_status(&env, &existing);
+            if !Self::validate_kyc_transition(current_status, KycStatus::Pending, &existing, now) {
+                panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            }
         }
         let record = KycRecord {
             subject: subject.clone(), status: KycStatus::Pending as u32,
@@ -1983,11 +2060,13 @@ impl AnchorKitContract {
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Approved, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Approved as u32;
         record.reviewed_at = Some(now);
+        record.expiry = Some(now + KYC_EXPIRY_SECONDS);
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
@@ -2008,11 +2087,13 @@ impl AnchorKitContract {
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Rejected, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Rejected as u32;
         record.reviewed_at = Some(now);
+        record.expiry = None;
         record.rejection_reason_hash = Some(reason_hash.clone());
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -3239,8 +3320,10 @@ impl AnchorKitContract {
             initiator,
             timestamp: now,
             last_updated: now,
+            last_updated_ledger: env.ledger().sequence(),
             error_message: None,
             state_history: history,
+            recovery_metadata: OptRecovery::None,
         };
         let key = (symbol_short!("TXSTATE"), transaction_id);
         env.storage().persistent().set(&key, &record);
@@ -3470,6 +3553,82 @@ impl AnchorKitContract {
         env.storage()
             .temporary()
             .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Health check APIs (#268)
+    // -----------------------------------------------------------------------
+
+    /// Overall service health status.
+    ///
+    /// Returns `Healthy` when the contract is initialized and the rate limiter
+    /// config is present. Returns `Degraded` when initialized but the rate
+    /// limiter config is missing (default fallback in use). Returns
+    /// `Unavailable` when the contract has not been initialized.
+    pub fn get_health_status(env: Env) -> HealthStatus {
+        if !env.storage().persistent().has(&initialized_key(&env)) {
+            return HealthStatus::Unavailable;
+        }
+        let rl_key = make_storage_key(&env, &[b"RL_CONFIG"]);
+        if env.storage().persistent().has(&rl_key) {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        }
+    }
+
+    /// Metadata freshness report for a given anchor.
+    ///
+    /// Returns the cache state together with the age of the entry in seconds
+    /// (zero when missing). Callers can use this to detect stale or expired
+    /// metadata without triggering a panic.
+    pub fn get_metadata_freshness(env: Env, anchor: Address) -> MetadataFreshnessReport {
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        match env.storage().temporary().get::<_, MetadataCache>(&key) {
+            None => MetadataFreshnessReport {
+                anchor,
+                state: MetadataCacheState::Missing,
+                age_seconds: 0,
+                needs_refresh: false,
+            },
+            Some(entry) => {
+                let now = env.ledger().timestamp();
+                let age = now.saturating_sub(entry.cached_at);
+                let state = if age <= entry.ttl_seconds {
+                    MetadataCacheState::Fresh
+                } else if age <= entry.ttl_seconds.saturating_add(entry.stale_ttl_seconds) {
+                    MetadataCacheState::Stale
+                } else {
+                    MetadataCacheState::Expired
+                };
+                MetadataFreshnessReport {
+                    anchor,
+                    state,
+                    age_seconds: age,
+                    needs_refresh: entry.needs_refresh || state != MetadataCacheState::Fresh,
+                }
+            }
+        }
+    }
+
+    /// Rate limiter health for a given attestor.
+    ///
+    /// Returns the current submission count, window start ledger, configured
+    /// limits, and whether the attestor is currently throttled.
+    pub fn get_rate_limiter_health(env: Env, attestor: Address) -> RateLimiterHealth {
+        let config = RateLimiter::get_config(&env);
+        let state = RateLimiter::get_state(&env, &attestor);
+        let current_ledger = env.ledger().sequence();
+        let window_expired = state.window_start_ledger.saturating_add(config.window_length) <= current_ledger;
+        let effective_count = if window_expired { 0 } else { state.submission_count };
+        RateLimiterHealth {
+            attestor,
+            submission_count: effective_count,
+            max_submissions: config.max_submissions,
+            window_length: config.window_length,
+            window_start_ledger: state.window_start_ledger,
+            is_throttled: !window_expired && effective_count >= config.max_submissions,
+        }
     }
 
     /// Append `operation_name` to the `RequestContext` stored under `root_id_bytes`.
