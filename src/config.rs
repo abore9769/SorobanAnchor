@@ -31,7 +31,29 @@ pub struct RuntimeConfig {
     pub storage: Option<StorageConfig>,
     pub security: Option<SecurityConfig>,
     pub monitoring: Option<MonitoringConfig>,
+    /// Optional proxy configuration for HTTP-based anchor discovery and webhook delivery.
+    pub proxy: Option<ProxyConfig>,
 }
+
+/// Proxy settings embedded in the runtime configuration file.
+///
+/// When present, all outbound HTTP requests (stellar.toml discovery, webhook
+/// delivery, SEP-6 status checks) route through the specified proxy.
+///
+/// # Example (JSON)
+///
+/// ```json
+/// {
+///   "proxy": {
+///     "proxy_url": "http://proxy.corp.example.com:3128",
+///     "no_proxy": "localhost,127.0.0.1"
+///   }
+/// }
+/// ```
+///
+/// This is a re-export of [`http_client::ProxyConfig`] so that config files and
+/// the HTTP client share a single type.
+pub use crate::http_client::ProxyConfig;
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -354,4 +376,115 @@ fn validate_runtime_config(config: &RuntimeConfig) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    /// Minimal valid config JSON used as a base for proxy tests.
+    fn base_config_json(proxy_section: &str) -> String {
+        alloc::format!(
+            r#"{{
+                "contract": {{
+                    "name": "TestAnchor",
+                    "version": "1.0.0",
+                    "network": "testnet"
+                }},
+                "attestors": {{
+                    "registry": [{{
+                        "name": "attestor-1",
+                        "address": "GABC123",
+                        "role": "primary",
+                        "enabled": true
+                    }}]
+                }}
+                {proxy_section}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn test_config_without_proxy_parses_successfully() {
+        let json = base_config_json("");
+        let config = parse_runtime_config_str(&json, ConfigFormat::Json).unwrap();
+        assert!(config.proxy.is_none(), "proxy should be None when absent");
+    }
+
+    #[test]
+    fn test_config_with_proxy_url_parses_correctly() {
+        let proxy_section = r#","proxy": {"proxy_url": "http://proxy.corp.example.com:3128", "no_proxy": null}"#;
+        let json = base_config_json(proxy_section);
+        let config = parse_runtime_config_str(&json, ConfigFormat::Json).unwrap();
+        let proxy = config.proxy.expect("proxy should be Some");
+        assert_eq!(
+            proxy.proxy_url.as_deref(),
+            Some("http://proxy.corp.example.com:3128")
+        );
+        assert!(proxy.no_proxy.is_none());
+        assert!(proxy.is_configured());
+    }
+
+    #[test]
+    fn test_config_with_proxy_url_and_no_proxy_list() {
+        let proxy_section = r#","proxy": {"proxy_url": "http://proxy.corp.example.com:3128", "no_proxy": "localhost,127.0.0.1"}"#;
+        let json = base_config_json(proxy_section);
+        let config = parse_runtime_config_str(&json, ConfigFormat::Json).unwrap();
+        let proxy = config.proxy.expect("proxy should be Some");
+        assert_eq!(
+            proxy.proxy_url.as_deref(),
+            Some("http://proxy.corp.example.com:3128")
+        );
+        assert_eq!(proxy.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+    }
+
+    #[test]
+    fn test_config_with_null_proxy_fields() {
+        let proxy_section = r#","proxy": {"proxy_url": null, "no_proxy": null}"#;
+        let json = base_config_json(proxy_section);
+        let config = parse_runtime_config_str(&json, ConfigFormat::Json).unwrap();
+        let proxy = config.proxy.expect("proxy key present → Some");
+        assert!(proxy.proxy_url.is_none());
+        assert!(proxy.no_proxy.is_none());
+        assert!(!proxy.is_configured(), "null proxy_url means not configured");
+    }
+
+    #[test]
+    fn test_config_proxy_is_configured_helper() {
+        let configured = ProxyConfig {
+            proxy_url: Some("http://proxy.example.com:3128".to_string()),
+            no_proxy: None,
+        };
+        assert!(configured.is_configured());
+
+        let unconfigured = ProxyConfig::default();
+        assert!(!unconfigured.is_configured());
+    }
+
+    #[test]
+    fn test_config_toml_with_proxy() {
+        let toml_input = r#"
+[contract]
+name = "TestAnchor"
+version = "1.0.0"
+network = "testnet"
+
+[[attestors.registry]]
+name = "attestor-1"
+address = "GABC123"
+role = "primary"
+enabled = true
+
+[proxy]
+proxy_url = "http://proxy.corp.example.com:3128"
+no_proxy = "localhost"
+"#;
+        let config = parse_runtime_config_str(toml_input, ConfigFormat::Toml).unwrap();
+        let proxy = config.proxy.expect("proxy should be Some");
+        assert_eq!(
+            proxy.proxy_url.as_deref(),
+            Some("http://proxy.corp.example.com:3128")
+        );
+        assert_eq!(proxy.no_proxy.as_deref(), Some("localhost"));
+    }
 }

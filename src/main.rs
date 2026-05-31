@@ -391,6 +391,10 @@ enum Commands {
         #[arg(long)] tx_id: String,
         /// Anchor base URL (e.g. https://anchor.example.com)
         #[arg(long)] anchor_url: String,
+        /// Optional HTTP proxy URL for the request (e.g. http://proxy.corp.example.com:3128)
+        #[arg(long)] proxy_url: Option<String>,
+        /// Comma-separated list of hosts that bypass the proxy (e.g. localhost,127.0.0.1)
+        #[arg(long)] no_proxy: Option<String>,
     },
     /// Revoke an attestor
     Revoke {
@@ -435,6 +439,17 @@ enum Commands {
     Network {
         #[command(subcommand)]
         action: NetworkAction,
+    },
+    /// Fetch and display a stellar.toml from an anchor domain
+    Discover {
+        /// Anchor base URL (e.g. https://anchor.example.com)
+        #[arg(long)] anchor_url: String,
+        /// Optional HTTP proxy URL (e.g. http://proxy.corp.example.com:3128)
+        #[arg(long)] proxy_url: Option<String>,
+        /// Comma-separated no-proxy bypass list (e.g. localhost,127.0.0.1)
+        #[arg(long)] no_proxy: Option<String>,
+        /// Request timeout in seconds (default: 30)
+        #[arg(long, default_value = "30")] timeout: u64,
     },
 }
 
@@ -848,9 +863,23 @@ fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, so
     }
 }
 
-fn status(tx_id: &str, anchor_url: &str) {
+fn status(tx_id: &str, anchor_url: &str, proxy_url: Option<&str>, no_proxy: Option<&str>) {
     let url = format!("{}/sep6/transaction?id={}", anchor_url.trim_end_matches('/'), tx_id);
-    let resp = reqwest::blocking::get(&url)
+
+    // Build a proxy-aware client.
+    let proxy_cfg = anchorkit::ProxyConfig {
+        proxy_url: proxy_url.map(|s| s.to_string()),
+        no_proxy: no_proxy.map(|s| s.to_string()),
+    };
+    let client = anchorkit::build_client(
+        if proxy_cfg.is_configured() { Some(&proxy_cfg) } else { None },
+        30,
+    )
+    .unwrap_or_else(|e| { eprintln!("error: failed to build HTTP client: {e}"); std::process::exit(1); });
+
+    let resp = client
+        .get(&url)
+        .send()
         .unwrap_or_else(|e| { eprintln!("error: request failed: {e}"); std::process::exit(1); });
 
     if !resp.status().is_success() {
@@ -1257,6 +1286,48 @@ fn check_network_connectivity_url(url: &str) -> CheckResult {
     }
 }
 
+// ── Discover command ──────────────────────────────────────────────────────────
+
+fn discover(anchor_url: &str, proxy_url: Option<&str>, no_proxy: Option<&str>, timeout: u64) {
+    let proxy_cfg = anchorkit::ProxyConfig {
+        proxy_url: proxy_url.map(|s| s.to_string()),
+        no_proxy: no_proxy.map(|s| s.to_string()),
+    };
+    let proxy = if proxy_cfg.is_configured() { Some(&proxy_cfg) } else { None };
+
+    match anchorkit::fetch_stellar_toml_with_proxy(anchor_url, proxy, timeout) {
+        Ok(toml) => {
+            let output = serde_json::json!({
+                "network_passphrase": toml.network_passphrase,
+                "transfer_server": toml.transfer_server,
+                "transfer_server_sep0024": toml.transfer_server_sep0024,
+                "kyc_server": toml.kyc_server,
+                "web_auth_endpoint": toml.web_auth_endpoint,
+                "signing_key": toml.signing_key,
+                "direct_payment_server": toml.direct_payment_server,
+                "anchor_quote_server": toml.anchor_quote_server,
+                "supported_assets": toml.supported_assets,
+                "capabilities": {
+                    "sep6": toml.supports_sep6(),
+                    "sep10": toml.supports_sep10(),
+                    "sep24": toml.supports_sep24(),
+                    "sep31": toml.supports_sep31(),
+                    "sep38": toml.supports_sep38(),
+                    "sep10_complete": toml.is_sep10_complete(),
+                }
+            });
+            match serde_json::to_string_pretty(&output) {
+                Ok(s) => println!("{s}"),
+                Err(e) => { eprintln!("error: failed to serialize output: {e}"); std::process::exit(1); }
+            }
+        }
+        Err(e) => {
+            eprintln!("error: anchor discovery failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 // ── Keystore (AES-256-GCM encrypted credential store) ─────────────────────────
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
@@ -1444,8 +1515,8 @@ fn main() {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
             quote(&from, &to, amount, &cid, &cmd_net, &source);
         }
-        Commands::Status { tx_id, anchor_url } => {
-            status(&tx_id, &anchor_url);
+        Commands::Status { tx_id, anchor_url, proxy_url, no_proxy } => {
+            status(&tx_id, &anchor_url, proxy_url.as_deref(), no_proxy.as_deref());
         }
         Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
             let cid = require_contract_id(global_contract_id, contract_id, "revoke");
@@ -1461,6 +1532,9 @@ fn main() {
         }
         Commands::Network { action } => {
             network_cmd(action);
+        }
+        Commands::Discover { anchor_url, proxy_url, no_proxy, timeout } => {
+            discover(&anchor_url, proxy_url.as_deref(), no_proxy.as_deref(), timeout);
         }
         Commands::Credentials { action } => {
             match action {
