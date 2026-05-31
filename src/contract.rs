@@ -479,6 +479,104 @@ impl CacheConfig {
 }
 
 // ---------------------------------------------------------------------------
+// #348 — Anchor health and service readiness types
+// ---------------------------------------------------------------------------
+
+/// Readiness snapshot for an anchor, indicating which services are available.
+#[contracttype]
+#[derive(Clone)]
+pub struct AnchorReadinessReport {
+    pub anchor: Address,
+    /// True when the anchor is a registered attestor.
+    pub is_registered: bool,
+    /// True when the anchor has the deposit service configured.
+    pub deposit_ready: bool,
+    /// True when the anchor has the withdrawal service configured.
+    pub withdrawal_ready: bool,
+    /// True when the anchor has the quote service configured and holds a
+    /// currently valid (non-expired) quote.
+    pub quote_ready: bool,
+    /// True when the anchor has the KYC service configured.
+    pub kyc_ready: bool,
+    /// Ledger timestamp when this report was generated.
+    pub checked_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// #350 — Read-only diagnostic types
+// ---------------------------------------------------------------------------
+
+/// Read-only snapshot of the rate limiter state for a specific attestor.
+#[contracttype]
+#[derive(Clone)]
+pub struct RateLimiterDiagnostics {
+    pub attestor: Address,
+    /// Submissions recorded in the current window.
+    pub submission_count: u32,
+    /// Ledger sequence number when the current window started.
+    pub window_start_ledger: u32,
+    /// Maximum submissions allowed per window.
+    pub max_submissions: u32,
+    /// Length of the sliding window in ledgers.
+    pub window_length: u32,
+    /// True when the attestor has reached the per-window limit.
+    pub is_at_limit: bool,
+    /// Ledger timestamp when this snapshot was taken.
+    pub checked_at: u64,
+}
+
+/// Read-only snapshot of the metadata and capabilities cache for an anchor.
+#[contracttype]
+#[derive(Clone)]
+pub struct CacheDiagnostics {
+    pub anchor: Address,
+    /// True when a metadata entry is present in the cache.
+    pub metadata_cached: bool,
+    /// Seconds elapsed since the metadata entry was cached (0 if absent).
+    pub metadata_age_seconds: u64,
+    /// Configured TTL for the metadata entry (0 if absent).
+    pub metadata_ttl_seconds: u64,
+    /// True when a capabilities entry is present in the cache.
+    pub capabilities_cached: bool,
+    /// Seconds elapsed since the capabilities entry was cached (0 if absent).
+    pub capabilities_age_seconds: u64,
+    /// Configured TTL for the capabilities entry (0 if absent).
+    pub capabilities_ttl_seconds: u64,
+    /// Ledger timestamp when this snapshot was taken.
+    pub checked_at: u64,
+}
+
+/// Read-only snapshot of session counters.
+#[contracttype]
+#[derive(Clone)]
+pub struct SessionDiagnostics {
+    /// Total number of sessions created since contract initialization.
+    pub total_sessions_created: u64,
+    /// Ledger timestamp when this snapshot was taken.
+    pub checked_at: u64,
+}
+
+/// Aggregated read-only health snapshot for the contract's key subsystems.
+#[contracttype]
+#[derive(Clone)]
+pub struct ContractDiagnostics {
+    /// True when the contract has been initialized.
+    pub is_initialized: bool,
+    /// Total attestations submitted since initialization.
+    pub total_attestations: u64,
+    /// Total quotes submitted since initialization.
+    pub total_quotes: u64,
+    /// Total sessions created since initialization.
+    pub total_sessions: u64,
+    /// Active rate limit: max submissions per window.
+    pub rate_limit_max_submissions: u32,
+    /// Active rate limit: window length in ledgers.
+    pub rate_limit_window_length: u32,
+    /// Ledger timestamp when this snapshot was taken.
+    pub checked_at: u64,
+}
+
+// ---------------------------------------------------------------------------
 // #247 — on-chain schema versioning
 //
 // Each persistent contract type carries a `schema_version: u32` field.
@@ -3137,6 +3235,7 @@ impl AnchorKitContract {
         initiator: Address,
     ) -> TransactionStateRecord {
         let now = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
         let mut history = soroban_sdk::Vec::new(&env);
         history.push_back((TransactionState::Pending, now));
         let record = TransactionStateRecord {
@@ -3145,8 +3244,10 @@ impl AnchorKitContract {
             initiator,
             timestamp: now,
             last_updated: now,
+            last_updated_ledger: current_ledger,
             error_message: None,
             state_history: history,
+            recovery_metadata: None,
         };
         let key = (symbol_short!("TXSTATE"), transaction_id);
         env.storage().persistent().set(&key, &record);
@@ -3374,5 +3475,211 @@ impl AnchorKitContract {
         env.storage()
             .temporary()
             .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Anchor health and service readiness (#348)
+    // -----------------------------------------------------------------------
+
+    /// Return a readiness snapshot for `anchor`, aggregating registration status
+    /// and per-service availability. Does not mutate any contract state.
+    pub fn get_anchor_readiness(env: Env, anchor: Address) -> AnchorReadinessReport {
+        let now = env.ledger().timestamp();
+        let is_registered = Self::is_attestor(env.clone(), anchor.clone());
+
+        let xdr = anchor.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
+        let services_opt: Option<AnchorServices> = env
+            .storage()
+            .persistent()
+            .get(&make_storage_key(&env, &[b"SERVICES", &raw]));
+
+        let deposit_ready = services_opt
+            .as_ref()
+            .map(|s| s.services.contains(&SERVICE_DEPOSITS))
+            .unwrap_or(false);
+        let withdrawal_ready = services_opt
+            .as_ref()
+            .map(|s| s.services.contains(&SERVICE_WITHDRAWALS))
+            .unwrap_or(false);
+        let kyc_ready = services_opt
+            .as_ref()
+            .map(|s| s.services.contains(&SERVICE_KYC))
+            .unwrap_or(false);
+
+        let advertises_quotes = services_opt
+            .as_ref()
+            .map(|s| s.services.contains(&SERVICE_QUOTES))
+            .unwrap_or(false);
+        let quote_ready = if advertises_quotes {
+            let lq_key = make_storage_key(&env, &[b"LATESTQ", &raw]);
+            if let Some(quote_id) = env.storage().persistent().get::<_, u64>(&lq_key) {
+                let q_key = make_storage_key(&env, &[b"QUOTE", &raw, &quote_id.to_be_bytes()]);
+                env.storage()
+                    .persistent()
+                    .get::<_, Quote>(&q_key)
+                    .map(|q| q.valid_until > now)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        AnchorReadinessReport {
+            anchor,
+            is_registered,
+            deposit_ready,
+            withdrawal_ready,
+            quote_ready,
+            kyc_ready,
+            checked_at: now,
+        }
+    }
+
+    /// Return `true` when `anchor` has the deposit service configured.
+    /// Does not require the anchor to hold an active quote.
+    pub fn is_deposit_ready(env: Env, anchor: Address) -> bool {
+        let xdr = anchor.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
+        env.storage()
+            .persistent()
+            .get::<_, AnchorServices>(&make_storage_key(&env, &[b"SERVICES", &raw]))
+            .map(|s| s.services.contains(&SERVICE_DEPOSITS))
+            .unwrap_or(false)
+    }
+
+    /// Return `true` when `anchor` advertises the quote service AND holds a
+    /// currently valid (non-expired) quote on-chain.
+    pub fn is_quote_ready(env: Env, anchor: Address) -> bool {
+        let now = env.ledger().timestamp();
+        let xdr = anchor.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
+        let advertises = env
+            .storage()
+            .persistent()
+            .get::<_, AnchorServices>(&make_storage_key(&env, &[b"SERVICES", &raw]))
+            .map(|s| s.services.contains(&SERVICE_QUOTES))
+            .unwrap_or(false);
+        if !advertises {
+            return false;
+        }
+        let lq_key = make_storage_key(&env, &[b"LATESTQ", &raw]);
+        if let Some(quote_id) = env.storage().persistent().get::<_, u64>(&lq_key) {
+            let q_key = make_storage_key(&env, &[b"QUOTE", &raw, &quote_id.to_be_bytes()]);
+            env.storage()
+                .persistent()
+                .get::<_, Quote>(&q_key)
+                .map(|q| q.valid_until > now)
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Read-only diagnostics (#350)
+    // -----------------------------------------------------------------------
+
+    /// Return a rate-limiter snapshot for `attestor`. Does not consume a
+    /// submission slot or modify any state.
+    pub fn get_rate_limiter_diagnostics(env: Env, attestor: Address) -> RateLimiterDiagnostics {
+        let config = RateLimiter::get_config(&env);
+        let state = RateLimiter::get_state(&env, &attestor);
+        let is_at_limit = state.submission_count >= config.max_submissions;
+        RateLimiterDiagnostics {
+            attestor,
+            submission_count: state.submission_count,
+            window_start_ledger: state.window_start_ledger,
+            max_submissions: config.max_submissions,
+            window_length: config.window_length,
+            is_at_limit,
+            checked_at: env.ledger().timestamp(),
+        }
+    }
+
+    /// Return cache freshness information for `anchor`. Does not modify any
+    /// cache entries.
+    pub fn get_cache_diagnostics(env: Env, anchor: Address) -> CacheDiagnostics {
+        let now = env.ledger().timestamp();
+        let meta_key = (symbol_short!("METACACHE"), anchor.clone());
+        let (metadata_cached, metadata_age_seconds, metadata_ttl_seconds) =
+            if let Some(entry) = env
+                .storage()
+                .temporary()
+                .get::<_, MetadataCache>(&meta_key)
+            {
+                let age = now.saturating_sub(entry.cached_at);
+                (true, age, entry.ttl_seconds)
+            } else {
+                (false, 0u64, 0u64)
+            };
+
+        let cap_key = (symbol_short!("CAPCACHE"), anchor.clone());
+        let (capabilities_cached, capabilities_age_seconds, capabilities_ttl_seconds) =
+            if let Some(entry) = env
+                .storage()
+                .temporary()
+                .get::<_, CapabilitiesCache>(&cap_key)
+            {
+                let age = now.saturating_sub(entry.cached_at);
+                (true, age, entry.ttl_seconds)
+            } else {
+                (false, 0u64, 0u64)
+            };
+
+        CacheDiagnostics {
+            anchor,
+            metadata_cached,
+            metadata_age_seconds,
+            metadata_ttl_seconds,
+            capabilities_cached,
+            capabilities_age_seconds,
+            capabilities_ttl_seconds,
+            checked_at: now,
+        }
+    }
+
+    /// Return session creation counters. Does not modify any session state.
+    pub fn get_session_diagnostics(env: Env) -> SessionDiagnostics {
+        let scnt_key = make_storage_key(&env, &[b"SCNT"]);
+        let total_sessions_created: u64 = env
+            .storage()
+            .instance()
+            .get(&scnt_key)
+            .unwrap_or(0u64);
+        SessionDiagnostics {
+            total_sessions_created,
+            checked_at: env.ledger().timestamp(),
+        }
+    }
+
+    /// Return an aggregated health snapshot for the contract's key subsystems.
+    /// Does not modify any contract state.
+    pub fn get_contract_diagnostics(env: Env) -> ContractDiagnostics {
+        let now = env.ledger().timestamp();
+        let is_initialized = env.storage().persistent().has(&initialized_key(&env));
+
+        let ck = soroban_sdk::vec![&env, symbol_short!("COUNTER")];
+        let total_attestations: u64 = env.storage().instance().get(&ck).unwrap_or(0u64);
+
+        let qcnt_key = make_storage_key(&env, &[b"QCNT"]);
+        let total_quotes: u64 = env.storage().instance().get(&qcnt_key).unwrap_or(0u64);
+
+        let scnt_key = make_storage_key(&env, &[b"SCNT"]);
+        let total_sessions: u64 = env.storage().instance().get(&scnt_key).unwrap_or(0u64);
+
+        let config = RateLimiter::get_config(&env);
+
+        ContractDiagnostics {
+            is_initialized,
+            total_attestations,
+            total_quotes,
+            total_sessions,
+            rate_limit_max_submissions: config.max_submissions,
+            rate_limit_window_length: config.window_length,
+            checked_at: now,
+        }
     }
 }

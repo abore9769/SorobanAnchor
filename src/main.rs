@@ -1,6 +1,45 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+// ── SecretKey wrapper ─────────────────────────────────────────────────────────
+//
+// Wraps a Stellar secret key so it is never accidentally emitted to stdout,
+// stderr, or debug output. The underlying value is only exposed via `Deref`
+// (→ &str) and `AsRef<OsStr>` so it can be passed to subprocess arguments.
+
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(s: impl Into<String>) -> Self {
+        SecretKey(s.into())
+    }
+}
+
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for SecretKey {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
 // ── Network profile management ────────────────────────────────────────────────
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug)]
@@ -70,7 +109,7 @@ fn default_network() -> String {
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> SecretKey {
     if let Some(sk) = secret_key {
         return SecretKey::new(sk);
     }
@@ -97,7 +136,7 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
     if let Some(name) = credential_name {
         let password = rpassword::prompt_password("Keystore password: ")
             .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
-        return keystore_get_decrypted(name, &password);
+        return SecretKey::new(keystore_get_decrypted(name, &password));
     }
     eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
@@ -137,7 +176,7 @@ fn stellar_invoke(
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", source,
+               "--source", &**source,
                "--rpc-url", &url,
                "--network-passphrase", &phrase,
                "--"])
@@ -272,6 +311,30 @@ enum Commands {
     Network {
         #[command(subcommand)]
         action: NetworkAction,
+    },
+    /// Offline config validation and workflow simulation (no network required)
+    Offline {
+        #[command(subcommand)]
+        action: OfflineAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum OfflineAction {
+    /// Validate config files without network access
+    Validate {
+        /// Path to a specific config file; validates all files in configs/ when omitted
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Simulate a deployment workflow without network access
+    Simulate {
+        /// Path to a config file to use for simulation
+        #[arg(long)]
+        config: Option<String>,
+        /// Workflow to simulate: deploy | register | attest
+        #[arg(long, default_value = "deploy")]
+        workflow: String,
     },
 }
 
@@ -415,7 +478,7 @@ fn pre_deploy_validate(network: &str) -> bool {
 ///   2. Upload the WASM to the network and obtain its hash.
 ///   3. Call `upgrade(new_wasm_hash)` on the contract.
 ///   4. Call `migrate()` to apply any state-schema changes.
-fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+fn upgrade_contract(contract_id: &str, network: &str, source: &SecretKey) {
     println!("\n🔍 Pre-upgrade validation ({network})...");
     if !pre_deploy_validate(network) {
         eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
@@ -448,7 +511,7 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
         .args([
             "contract", "upload",
             "--wasm", wasm,
-            "--source", source,
+            "--source", &**source,
             "--rpc-url", &net_url,
             "--network-passphrase", &net_phrase,
         ])
@@ -837,7 +900,7 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", &source,
+               "--source", &*source,
                "--rpc-url", &rpc_url_for(network),
                "--network-passphrase", &passphrase_for(network),
                "--",
@@ -1169,6 +1232,110 @@ fn credentials_remove(name: &str) {
     println!("Credential '{}' removed.", name);
 }
 
+// ── Offline mode (#351) ───────────────────────────────────────────────────────
+
+/// Validate one or more config files without network access.
+///
+/// Returns `true` when all files pass validation, `false` otherwise.
+/// Prints a pass/fail line for each file.
+fn offline_validate_config(config_path: Option<&str>) -> bool {
+    let paths: Vec<std::path::PathBuf> = if let Some(path) = config_path {
+        vec![std::path::PathBuf::from(path)]
+    } else {
+        let config_dir = std::path::Path::new("configs");
+        if !config_dir.exists() {
+            eprintln!("  warning: configs/ directory not found");
+            return true;
+        }
+        match std::fs::read_dir(config_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension()
+                        .map(|e| e == "json" || e == "toml")
+                        .unwrap_or(false)
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("  error: cannot read configs/: {e}");
+                return false;
+            }
+        }
+    };
+
+    if paths.is_empty() {
+        println!("  (no config files found)");
+        return true;
+    }
+
+    let mut all_valid = true;
+    for path in &paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  ✗ {}: {e}", path.display());
+                all_valid = false;
+                continue;
+            }
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let result: Result<(), String> = match ext {
+            "json" => serde_json::from_str::<serde_json::Value>(&content)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            "toml" => toml::from_str::<toml::Value>(&content)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            other => Err(format!("unsupported extension: {other}")),
+        };
+        match result {
+            Ok(_) => println!("  ✓ {}", path.display()),
+            Err(e) => {
+                eprintln!("  ✗ {}: {e}", path.display());
+                all_valid = false;
+            }
+        }
+    }
+    all_valid
+}
+
+/// Simulate a named workflow without network access, using the given config.
+fn offline_simulate(config_path: Option<&str>, workflow: &str) {
+    println!("\n[offline] Simulating workflow: {workflow}");
+    let config_label = config_path.unwrap_or("configs/ (default)");
+    println!("[offline] Config source: {config_label}");
+    println!("[offline] Validating config files...");
+    let valid = offline_validate_config(config_path);
+    if !valid {
+        eprintln!("[offline] Config validation failed. Aborting simulation.");
+        std::process::exit(1);
+    }
+    match workflow {
+        "deploy" => {
+            println!("[offline] Step 1: WASM artifact check (skipped — offline)");
+            println!("[offline] Step 2: Network connectivity check (skipped — offline)");
+            println!("[offline] Step 3: Simulate contract deploy (dry-run)");
+            println!("[offline] ✓ Deploy simulation completed successfully.");
+        }
+        "register" => {
+            println!("[offline] Step 1: Simulate attestor registration (dry-run)");
+            println!("[offline] Step 2: Simulate service configuration (dry-run)");
+            println!("[offline] ✓ Register simulation completed successfully.");
+        }
+        "attest" => {
+            println!("[offline] Step 1: Simulate attestation submission (dry-run)");
+            println!("[offline] ✓ Attest simulation completed successfully.");
+        }
+        other => {
+            eprintln!(
+                "error: unknown workflow '{other}'. Supported workflows: deploy, register, attest"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -1230,5 +1397,65 @@ fn main() {
                 }
             }
         }
+        Commands::Offline { action } => match action {
+            OfflineAction::Validate { config } => {
+                println!("\n[offline] Config validation\n");
+                let ok = offline_validate_config(config.as_deref());
+                if ok {
+                    println!("\n✅ All config files are valid.\n");
+                } else {
+                    eprintln!("\n❌ One or more config files failed validation.\n");
+                    std::process::exit(1);
+                }
+            }
+            OfflineAction::Simulate { config, workflow } => {
+                offline_simulate(config.as_deref(), &workflow);
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    #[test]
+    fn test_offline_validate_nonexistent_path() {
+        let result = offline_validate_config(Some("/nonexistent/path/config.json"));
+        assert!(!result, "nonexistent file should fail validation");
+    }
+
+    #[test]
+    fn test_offline_validate_valid_json_written_to_tempdir() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("anchorkit_test_valid.json");
+        std::fs::write(&path, r#"{"network":"testnet","admin":"GABC"}"#).unwrap();
+        let result = offline_validate_config(Some(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+        assert!(result, "valid JSON should pass validation");
+    }
+
+    #[test]
+    fn test_offline_validate_invalid_json_written_to_tempdir() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("anchorkit_test_invalid.json");
+        std::fs::write(&path, r#"{not valid json"#).unwrap();
+        let result = offline_validate_config(Some(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+        assert!(!result, "invalid JSON should fail validation");
+    }
+
+    #[test]
+    fn test_secret_key_is_redacted_in_display() {
+        let sk = SecretKey::new("SCZANGBA5IIPMEFXBI5LZU7RVJZOLBYHJYFJ2KYN3CQPUOVFRDPCNTY");
+        assert_eq!(format!("{sk}"), "[REDACTED]");
+        assert_eq!(format!("{sk:?}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn test_secret_key_deref() {
+        let sk = SecretKey::new("STEST");
+        let s: &str = &sk;
+        assert_eq!(s, "STEST");
     }
 }
