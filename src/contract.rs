@@ -660,6 +660,58 @@ pub struct ContractDiagnostics {
 }
 
 // ---------------------------------------------------------------------------
+// Anchor health metrics types
+// ---------------------------------------------------------------------------
+
+/// Accumulated endpoint health counters for a single anchor.
+///
+/// Written by [`AnchorKitContract::record_health_event`] and read by
+/// [`AnchorKitContract::get_anchor_health`].
+///
+/// `uptime_bps` is derived on read: `success_count * 10_000 / total_calls`
+/// (basis points, 0–10 000). Returns 0 when `total_calls == 0`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnchorHealthMetrics {
+    pub anchor: Address,
+    /// Total successful endpoint calls recorded.
+    pub success_count: u64,
+    /// Total failed endpoint calls recorded.
+    pub failure_count: u64,
+    /// Total calls (`success_count + failure_count`).
+    pub total_calls: u64,
+    /// Uptime in basis points (0–10 000). 10 000 = 100 %.
+    pub uptime_bps: u32,
+    /// Ledger timestamp of the most recent recorded event (0 if none).
+    pub last_event_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Proof-of-possession types
+// ---------------------------------------------------------------------------
+
+/// On-chain record of an anchor's proof-of-possession for an endpoint.
+///
+/// The anchor submits a SHA-256 hash of `challenge || endpoint` (where
+/// `challenge` is a nonce the anchor fetches from its own stellar.toml or
+/// metadata endpoint). The contract stores the hash; callers verify by
+/// recomputing it off-chain and calling
+/// [`AnchorKitContract::verify_endpoint_proof`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnchorProofRecord {
+    pub anchor: Address,
+    /// The endpoint URL this proof covers.
+    pub endpoint: String,
+    /// SHA-256(challenge_bytes || endpoint_bytes) submitted by the anchor.
+    pub proof_hash: BytesN<32>,
+    /// Ledger timestamp when the proof was registered.
+    pub registered_at: u64,
+    /// True once the proof has been successfully verified by a caller.
+    pub verified: bool,
+}
+
+// ---------------------------------------------------------------------------
 // #247 — on-chain schema versioning
 //
 // Each persistent contract type carries a `schema_version: u32` field.
@@ -4892,6 +4944,219 @@ impl AnchorKitContract {
             total_sessions_created,
             checked_at: env.ledger().timestamp(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Anchor health metrics
+    // -----------------------------------------------------------------------
+
+    /// Storage key for an anchor's health metric counters.
+    fn health_metrics_key(env: &Env, anchor: &Address) -> BytesN<32> {
+        let xdr = anchor.clone().to_xdr(env);
+        let raw = xdr_to_vec(&xdr);
+        make_storage_key(env, &[b"HLTHCNT", &raw])
+    }
+
+    /// Record a single endpoint health event for `anchor`.
+    ///
+    /// Pass `success = true` for a successful call (discovery, quote fetch,
+    /// capability check) and `false` for a failure. Counters are accumulated
+    /// persistently so uptime percentages survive across ledgers.
+    ///
+    /// Admin-only — callers that integrate AnchorKit into a monitoring loop
+    /// should call this after every outbound anchor interaction.
+    pub fn record_health_event(env: Env, anchor: Address, success: bool) {
+        Self::require_admin(&env);
+        let key = Self::health_metrics_key(&env, &anchor);
+        let now = env.ledger().timestamp();
+
+        let mut metrics: AnchorHealthMetrics = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(AnchorHealthMetrics {
+                anchor: anchor.clone(),
+                success_count: 0,
+                failure_count: 0,
+                total_calls: 0,
+                uptime_bps: 0,
+                last_event_at: 0,
+            });
+
+        if success {
+            metrics.success_count += 1;
+        } else {
+            metrics.failure_count += 1;
+        }
+        metrics.total_calls = metrics.success_count + metrics.failure_count;
+        metrics.uptime_bps = if metrics.total_calls == 0 {
+            0
+        } else {
+            (metrics.success_count.saturating_mul(10_000) / metrics.total_calls) as u32
+        };
+        metrics.last_event_at = now;
+
+        env.storage().persistent().set(&key, &metrics);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("health"), symbol_short!("event"), anchor),
+            (success, metrics.uptime_bps),
+        );
+    }
+
+    /// Return the accumulated health metrics for `anchor`.
+    ///
+    /// Returns a zeroed [`AnchorHealthMetrics`] when no events have been
+    /// recorded yet (never panics).
+    pub fn get_anchor_health(env: Env, anchor: Address) -> AnchorHealthMetrics {
+        let key = Self::health_metrics_key(&env, &anchor);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(AnchorHealthMetrics {
+                anchor: anchor.clone(),
+                success_count: 0,
+                failure_count: 0,
+                total_calls: 0,
+                uptime_bps: 0,
+                last_event_at: 0,
+            })
+    }
+
+    /// Reset all health counters for `anchor` to zero. Admin-only.
+    ///
+    /// Useful after a maintenance window or anchor migration where historical
+    /// failure counts should not skew the new baseline.
+    pub fn reset_anchor_health(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let key = Self::health_metrics_key(&env, &anchor);
+        let now = env.ledger().timestamp();
+        let metrics = AnchorHealthMetrics {
+            anchor: anchor.clone(),
+            success_count: 0,
+            failure_count: 0,
+            total_calls: 0,
+            uptime_bps: 0,
+            last_event_at: now,
+        };
+        env.storage().persistent().set(&key, &metrics);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Proof-of-possession for anchor endpoints
+    // -----------------------------------------------------------------------
+
+    /// Storage key for an anchor's proof-of-possession record.
+    fn pop_key(env: &Env, anchor: &Address) -> BytesN<32> {
+        let xdr = anchor.clone().to_xdr(env);
+        let raw = xdr_to_vec(&xdr);
+        make_storage_key(env, &[b"ANCHPOP", &raw])
+    }
+
+    /// Register a proof-of-possession for `anchor`'s `endpoint`.
+    ///
+    /// The anchor computes `proof_hash = SHA-256(challenge_bytes || endpoint_bytes)`
+    /// where `challenge_bytes` is a nonce the anchor controls (e.g. a value
+    /// published in its `stellar.toml` under `ANCHOR_PROOF_CHALLENGE`).
+    /// Storing the hash on-chain binds the anchor's Stellar identity to the
+    /// endpoint URL without revealing the raw challenge.
+    ///
+    /// The anchor must authorize this call (`anchor.require_auth()`).
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AttestorNotRegistered`] when `anchor` is not
+    /// a registered attestor.
+    /// Panics with [`ErrorCode::InvalidEndpointFormat`] when `endpoint` fails
+    /// HTTPS domain validation.
+    pub fn register_endpoint_proof(
+        env: Env,
+        anchor: Address,
+        endpoint: String,
+        proof_hash: BytesN<32>,
+    ) {
+        anchor.require_auth();
+        Self::check_attestor(&env, &anchor);
+
+        // Validate the endpoint URL before storing.
+        let endpoint_str = Self::soroban_string_to_rust_string(&env, &endpoint);
+        crate::validate_anchor_domain(&endpoint_str)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::InvalidEndpointFormat));
+
+        let now = env.ledger().timestamp();
+        let record = AnchorProofRecord {
+            anchor: anchor.clone(),
+            endpoint,
+            proof_hash,
+            registered_at: now,
+            verified: false,
+        };
+        let key = Self::pop_key(&env, &anchor);
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("pop"), symbol_short!("registered"), anchor),
+            now,
+        );
+    }
+
+    /// Verify a proof-of-possession by comparing `proof_hash` against the
+    /// stored record for `anchor`.
+    ///
+    /// Returns `true` and marks the record as `verified = true` when the
+    /// supplied hash matches the stored one. Returns `false` on mismatch or
+    /// when no proof has been registered.
+    ///
+    /// This is a pure verification call — it does **not** require admin auth
+    /// so that off-chain monitors can call it freely.
+    pub fn verify_endpoint_proof(
+        env: Env,
+        anchor: Address,
+        proof_hash: BytesN<32>,
+    ) -> bool {
+        let key = Self::pop_key(&env, &anchor);
+        let mut record: AnchorProofRecord = match env.storage().persistent().get(&key) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        if record.proof_hash != proof_hash {
+            env.events().publish(
+                (symbol_short!("pop"), symbol_short!("failed"), anchor),
+                env.ledger().timestamp(),
+            );
+            return false;
+        }
+
+        // Mark as verified and persist.
+        record.verified = true;
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("pop"), symbol_short!("verified"), anchor),
+            env.ledger().timestamp(),
+        );
+        true
+    }
+
+    /// Return the stored proof-of-possession record for `anchor`, or `None`
+    /// when no proof has been registered.
+    pub fn get_endpoint_proof(env: Env, anchor: Address) -> Option<AnchorProofRecord> {
+        env.storage()
+            .persistent()
+            .get(&Self::pop_key(&env, &anchor))
     }
 
     /// Return an aggregated health snapshot for the contract's key subsystems.
