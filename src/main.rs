@@ -1,3 +1,10 @@
+#![cfg(feature = "std")]
+//! CLI binary for AnchorKit.
+//!
+//! This binary is only available when building with the `std` feature (the default).
+//! For WASM builds, disable default features:
+//!   cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
@@ -139,6 +146,16 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
     eprintln!("  --keypair-file <PATH>");
     eprintln!("  --credential-name <NAME>  (use: anchorkit credentials add --name <NAME>)");
     std::process::exit(1);
+}
+
+fn normalize_stellar_public_address(field: &str, address: &str) -> String {
+    match normalize_stellar_account_id(address) {
+        Ok(normalized) => normalized,
+        Err(err) => {
+            eprintln!("error: invalid {field}: {0}", err.message);
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── RPC helpers ───────────────────────────────────────────────────────────────
@@ -307,8 +324,24 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
-    /// Show active environment: contract ID, network, profiles, and recent deployments
-    Env,
+    /// Query contract health, metadata freshness, and rate limiter status
+    Health {
+        /// Contract ID to query (or set ANCHOR_CONTRACT_ID)
+        #[arg(long)]
+        contract_id: String,
+        #[arg(long, default_value = "testnet")]
+        network: String,
+        #[arg(long)]
+        secret_key: Option<String>,
+        #[arg(long)]
+        keypair_file: Option<String>,
+        /// Anchor address to check metadata freshness for (optional)
+        #[arg(long)]
+        anchor: Option<String>,
+        /// Attestor address to check rate limiter health for (optional)
+        #[arg(long)]
+        attestor: Option<String>,
+    },
     /// Manage custom network profiles
     Network {
         #[command(subcommand)]
@@ -642,6 +675,8 @@ fn register(
     address: &str, services: &[String], contract_id: &str,
     network: &str, source: &SecretKey, sep10_token: &str, sep10_issuer: &str,
 ) {
+    let address = normalize_stellar_public_address("attestor address", address);
+    let sep10_issuer = normalize_stellar_public_address("SEP-10 issuer address", sep10_issuer);
     let service_ids = parse_services(services)
         .iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
@@ -649,14 +684,14 @@ fn register(
     // subprocess argument to the Stellar CLI and is never echoed to stdout.
     stellar_invoke(contract_id, source, network, &[
         "register_attestor",
-        "--attestor", address,
+        "--attestor", &address,
         "--sep10_token", sep10_token,
-        "--sep10_issuer", sep10_issuer,
+        "--sep10_issuer", &sep10_issuer,
         "--public_key", "0000000000000000000000000000000000000000000000000000000000000000",
     ]);
     stellar_invoke(contract_id, source, network, &[
         "configure_services",
-        "--anchor", address,
+        "--anchor", &address,
         "--services", &service_ids,
     ]);
     println!("Attestor {address} registered and services configured.");
@@ -666,6 +701,8 @@ fn attest(
     subject: &str, payload_hash: &str, contract_id: &str,
     network: &str, source: &SecretKey, issuer: &str, session_id: Option<u64>,
 ) {
+    let subject = normalize_stellar_public_address("subject address", subject);
+    let issuer = normalize_stellar_public_address("issuer address", issuer);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
@@ -678,7 +715,7 @@ fn attest(
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation_with_session",
             "--session_id", &session_str,
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,  // placeholder — replace with real sig
@@ -686,7 +723,7 @@ fn attest(
     } else {
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation",
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,  // placeholder — replace with real sig
@@ -757,7 +794,7 @@ fn status(tx_id: &str, anchor_url: &str) {
 fn revoke(address: &str, contract_id: &str, network: &str, source: &SecretKey) {
     stellar_invoke(contract_id, source, network, &[
         "revoke_attestor",
-        "--attestor", address,
+        "--attestor", &address,
     ]);
     println!("{{\"revoked\": true, \"address\": \"{address}\"}}");
 }
@@ -986,49 +1023,60 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
-// ── Env command ───────────────────────────────────────────────────────────────
+// ── Health check command (#268) ───────────────────────────────────────────────
 
-fn env_info() {
-    println!("Active environment");
-    match std::env::var("ANCHOR_CONTRACT_ID").ok().filter(|s| !s.is_empty()) {
-        Some(id) => println!("  Contract ID : {} (from ANCHOR_CONTRACT_ID)", id),
-        None     => println!("  Contract ID : (not set — use --contract-id or export ANCHOR_CONTRACT_ID=<ID>)"),
-    }
-    let network_via_env = std::env::var("STELLAR_NETWORK").ok().filter(|s| !s.is_empty());
-    let active_network = network_via_env.as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(default_network);
-    let network_src = if network_via_env.is_some() { "(from STELLAR_NETWORK)" } else { "(default)" };
-    println!("  Network     : {} {}", active_network, network_src);
+fn health_check(contract_id: &str, network: &str, source: &SecretKey, anchor: Option<&str>, attestor: Option<&str>) {
+    println!("\n🏥 AnchorKit Health Check\n");
 
-    println!("\nNetwork profiles");
-    println!("  {:<16} {:<45} {}", "NAME", "RPC URL", "PASSPHRASE");
-    let builtins = [
-        ("testnet",   "https://soroban-testnet.stellar.org",  "Test SDF Network ; September 2015"),
-        ("mainnet",   "https://horizon.stellar.org",           "Public Global Stellar Network ; September 2015"),
-        ("futurenet", "https://rpc-futurenet.stellar.org",     "Test SDF Future Network ; October 2022"),
-    ];
-    for (name, url, phrase) in &builtins {
-        println!("  {:<16} {:<45} {} (built-in)", name, url, phrase);
-    }
-    for p in &load_network_profiles() {
-        let marker = if p.is_default { " (default)" } else { "" };
-        println!("  {:<16} {:<45} {}{}", p.name, p.rpc_url, p.network_passphrase, marker);
+    // 1. Overall service health
+    let status_raw = stellar_invoke(contract_id, source, network, &["get_health_status"]);
+    let status_label = match status_raw.trim().trim_matches('"') {
+        "0" | "Healthy"     => "\x1b[32m✓ Healthy\x1b[0m",
+        "1" | "Degraded"    => "\x1b[33m⚠ Degraded\x1b[0m",
+        _                   => "\x1b[31m✗ Unavailable\x1b[0m",
+    };
+    println!("  Service Status : {status_label}");
+
+    // 2. Metadata freshness (optional — only when --anchor is supplied)
+    if let Some(anchor_addr) = anchor {
+        let freshness_raw = stellar_invoke(contract_id, source, network, &[
+            "get_metadata_freshness",
+            "--anchor", anchor_addr,
+        ]);
+        // Parse the returned struct fields from JSON-like output
+        let state_label = if freshness_raw.contains("\"Fresh\"") || freshness_raw.contains("\"state\":0") {
+            "\x1b[32mFresh\x1b[0m"
+        } else if freshness_raw.contains("\"Stale\"") || freshness_raw.contains("\"state\":2") {
+            "\x1b[33mStale — refresh recommended\x1b[0m"
+        } else if freshness_raw.contains("\"Expired\"") || freshness_raw.contains("\"state\":3") {
+            "\x1b[31mExpired — must refresh\x1b[0m"
+        } else {
+            "\x1b[31mMissing — no cache entry\x1b[0m"
+        };
+        println!("  Metadata Cache : {state_label}");
+        println!("  Anchor         : {anchor_addr}");
     }
 
-    println!("\nRecent deployments (.anchorkit/deployments.json)");
-    let deployments = load_deployments();
-    if deployments.is_empty() {
-        println!("  (none)");
-    } else {
-        println!("  {:<52} {:<12} {:<14} {}", "CONTRACT ID", "NETWORK", "TIMESTAMP", "INIT");
-        for d in deployments.iter().rev().take(5) {
-            let display_id = &d.contract_id[..d.contract_id.len().min(52)];
-            println!("  {:<52} {:<12} {:<14} {}",
-                display_id, d.network, d.timestamp,
-                if d.initialized { "yes" } else { "no" });
+    // 3. Rate limiter health (optional — only when --attestor is supplied)
+    if let Some(attestor_addr) = attestor {
+        let rl_raw = stellar_invoke(contract_id, source, network, &[
+            "get_rate_limiter_health",
+            "--attestor", attestor_addr,
+        ]);
+        let throttled = rl_raw.contains("\"is_throttled\":true") || rl_raw.contains("is_throttled: true");
+        let rl_label = if throttled {
+            "\x1b[31m✗ Throttled\x1b[0m"
+        } else {
+            "\x1b[32m✓ OK\x1b[0m"
+        };
+        println!("  Rate Limiter   : {rl_label}");
+        println!("  Attestor       : {attestor_addr}");
+        if throttled {
+            eprintln!("\n  ⚠  Attestor has reached the submission limit for the current window.");
         }
     }
+
+    println!();
 }
 
 // ── Network command ───────────────────────────────────────────────────────────
@@ -1307,8 +1355,9 @@ fn main() {
         Commands::Doctor { fix } => {
             doctor(&network, fix);
         }
-        Commands::Env => {
-            env_info();
+        Commands::Health { contract_id, network: cmd_net, secret_key, keypair_file, anchor, attestor } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+            health_check(&contract_id, &cmd_net, &source, anchor.as_deref(), attestor.as_deref());
         }
         Commands::Network { action } => {
             network_cmd(action);
