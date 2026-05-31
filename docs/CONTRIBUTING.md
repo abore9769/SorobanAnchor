@@ -2,16 +2,6 @@
 
 Thank you for contributing to AnchorKit! This guide explains our coding standards and how to ensure your code meets project requirements before submitting a pull request.
 
-## Quick Start
-
-Before committing code, run the quality checks:
-
-```bash
-make check
-```
-
-This runs formatting checks, linting, and tests. All must pass before submitting a PR.
-
 ## Code Quality Standards
 
 AnchorKit enforces consistent code formatting and quality through automated tools:
@@ -20,61 +10,41 @@ AnchorKit enforces consistent code formatting and quality through automated tool
 - **clippy** — Linting and best practices (configured in `.clippy.toml`)
 - **cargo test** — Unit and integration tests
 
-## Local Quality Targets
+## Pre-Commit Validation
 
-### Formatting (rustfmt)
+Before committing or pushing code, run the complete validation suite:
 
 ```bash
-# Auto-fix code formatting
-make fmt
+make check
+```
 
-# Check formatting without modifying files
+This runs:
+1. `cargo fmt --all -- --check` — Verify formatting
+2. `cargo clippy --all-targets --all-features -- -D warnings` — Lint checks
+3. `cargo test` — All tests
+
+### Individual Checks
+
+If you prefer to run checks individually:
+
+```bash
+# Check formatting (without modifying files)
 make fmt-check
 
-# Auto-fix WASM-specific code
-make fmt-wasm
-```
+# Auto-fix formatting issues
+make fmt
 
-### Linting (clippy)
-
-```bash
-# Run clippy on all targets (strict mode)
+# Run linting checks
 make lint
 
-# Run clippy on all targets with all features
-make lint-all
+# Run tests
+make test
 
-# Run clippy on native targets only
-make lint-native
+# Build release binary
+make build
 
-# Run clippy on WASM target
-make lint-wasm
-```
-
-### Combined Checks
-
-```bash
-# Run all checks (fmt-check, lint, test) - run before committing
-make check
-
-# Run WASM quality checks
-make check-wasm
-```
-
-### Using Quality Check Scripts
-
-Alternatively, use the provided scripts:
-
-```bash
-# Unix/Linux/macOS
-bash scripts/quality-check.sh all      # All targets
-bash scripts/quality-check.sh native   # Native only
-bash scripts/quality-check.sh wasm     # WASM only
-
-# Windows
-scripts\quality-check.bat all          # All targets
-scripts\quality-check.bat native       # Native only
-scripts\quality-check.bat wasm         # WASM only
+# Build WASM target
+make wasm
 ```
 
 ## Formatting Rules

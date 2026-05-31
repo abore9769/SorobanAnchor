@@ -1,11 +1,14 @@
 WASM_TARGET := wasm32-unknown-unknown
 WASM_OUT    := target/$(WASM_TARGET)/release/anchorkit.wasm
+VERSION     := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+DIST_DIR    := dist
 
-.PHONY: build test wasm lint fmt fmt-check fmt-wasm lint-all lint-native lint-wasm check help
+.PHONY: build test wasm lint \
+        integration-test integration-test-live \
+        release release-validate \
+        clean-dist
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Build targets
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Core build targets ────────────────────────────────────────────────────────
 
 build:
 	cargo build --release
@@ -17,85 +20,38 @@ wasm:
 	cargo build --release --target $(WASM_TARGET) --no-default-features --features wasm
 	@ls -lh $(WASM_OUT)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Formatting targets (rustfmt)
-# ─────────────────────────────────────────────────────────────────────────────
-
-## fmt: Auto-fix code formatting for all targets
+# Formatting
 fmt:
 	cargo fmt --all
 
-## fmt-check: Check code formatting without modifying files
 fmt-check:
 	cargo fmt --all -- --check
 
-## fmt-wasm: Auto-fix formatting for WASM-specific code
-fmt-wasm:
-	cargo fmt -- src/contract.rs src/deterministic_hash.rs
+# Linting
+lint:
+	cargo clippy -- -D warnings
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Linting targets (clippy)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Integration test harness ──────────────────────────────────────────────────
 
-## lint: Run clippy on all targets with all features (strict mode)
-lint: lint-all
+## Run the CLI integration test harness (local simulation, no network required).
+integration-test:
+	cargo test --test cli_integration_harness -- --nocapture
 
-## lint-all: Run clippy on all targets with all features
-lint-all:
-	cargo clippy --all-targets --all-features -- -D warnings
+## Run the CLI integration test harness against a live testnet.
+## Requires: ANCHOR_CONTRACT_ID, ANCHOR_ADMIN_SECRET
+integration-test-live:
+	SOROBAN_ANCHOR_INTEGRATION=testnet cargo test --test cli_integration_harness -- --nocapture
 
-## lint-native: Run clippy on native targets only
-lint-native:
-	cargo clippy --lib --bins --tests --examples -- -D warnings
+# ── Release packaging ─────────────────────────────────────────────────────────
 
-## lint-wasm: Run clippy on WASM target
-lint-wasm:
-	cargo clippy --target $(WASM_TARGET) --no-default-features --features wasm -- -D warnings
+## Build and bundle all release artifacts into dist/anchorkit-<VERSION>.tar.gz
+release:
+	@bash scripts/package_release.sh $(VERSION)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Combined validation targets
-# ─────────────────────────────────────────────────────────────────────────────
+## Validate the release bundle produced by `make release`.
+release-validate:
+	@bash scripts/validate_bundle.sh $(DIST_DIR)/anchorkit-$(VERSION).tar.gz
 
-## check: Run all quality checks (fmt-check, lint, test) - run before committing
-check: fmt-check lint test
-	@echo "✓ All quality checks passed!"
-
-## check-wasm: Run quality checks for WASM target
-check-wasm: fmt-check lint-wasm
-	@echo "✓ WASM quality checks passed!"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Help target
-# ─────────────────────────────────────────────────────────────────────────────
-
-## help: Show this help message
-help:
-	@echo "AnchorKit Build Targets"
-	@echo ""
-	@echo "Build:"
-	@echo "  make build          Build release binary"
-	@echo "  make test           Run all tests"
-	@echo "  make wasm           Build WASM target"
-	@echo ""
-	@echo "Formatting (rustfmt):"
-	@echo "  make fmt            Auto-fix code formatting"
-	@echo "  make fmt-check      Check formatting without modifying"
-	@echo "  make fmt-wasm       Auto-fix WASM-specific code"
-	@echo ""
-	@echo "Linting (clippy):"
-	@echo "  make lint           Run clippy on all targets (strict)"
-	@echo "  make lint-all       Run clippy on all targets with all features"
-	@echo "  make lint-native    Run clippy on native targets only"
-	@echo "  make lint-wasm      Run clippy on WASM target"
-	@echo ""
-	@echo "Quality Checks:"
-	@echo "  make check          Run all checks (fmt-check, lint, test)"
-	@echo "  make check-wasm     Run WASM quality checks"
-	@echo ""
-	@echo "Other:"
-	@echo "  make help           Show this help message"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make check          # Before committing"
-	@echo "  make fmt            # Auto-fix formatting issues"
-	@echo "  make lint-wasm      # Check WASM-specific code"
+## Remove the dist/ directory.
+clean-dist:
+	rm -rf $(DIST_DIR)
