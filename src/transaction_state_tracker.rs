@@ -29,6 +29,71 @@ impl StorageBudgetMonitor {
         self.entry_count = self.entry_count.saturating_sub(1);
         self.approx_bytes = self.approx_bytes.saturating_sub(size_bytes);
     }
+
+    /// Return current byte usage as a percentage of `max_bytes`, capped at 100.
+    /// Returns 100 when `max_bytes` is zero.
+    pub fn usage_percent(&self, max_bytes: u64) -> u64 {
+        if max_bytes == 0 {
+            return 100;
+        }
+        (self.approx_bytes.saturating_mul(100) / max_bytes).min(100)
+    }
+
+    /// Classify current usage against warning and critical byte thresholds.
+    pub fn get_status(&self, warning_bytes: u64, critical_bytes: u64) -> BudgetStatus {
+        if self.approx_bytes >= critical_bytes {
+            BudgetStatus::Critical
+        } else if self.approx_bytes >= warning_bytes {
+            BudgetStatus::Warning
+        } else {
+            BudgetStatus::Ok
+        }
+    }
+
+    /// Return `Some(BudgetAlert)` when current usage exceeds either
+    /// `threshold_entries` or `threshold_bytes`; `None` otherwise.
+    pub fn check_alert(&self, threshold_entries: u64, threshold_bytes: u64) -> Option<BudgetAlert> {
+        if self.entry_count >= threshold_entries || self.approx_bytes >= threshold_bytes {
+            let status = if self.approx_bytes >= threshold_bytes.saturating_mul(2) {
+                BudgetStatus::Critical
+            } else {
+                BudgetStatus::Warning
+            };
+            Some(BudgetAlert {
+                status,
+                entry_count: self.entry_count,
+                approx_bytes: self.approx_bytes,
+                threshold_bytes,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Return `true` when byte usage is at or above `threshold_pct`% of `max_bytes`.
+    pub fn is_near_limit(&self, threshold_pct: u64, max_bytes: u64) -> bool {
+        self.usage_percent(max_bytes) >= threshold_pct
+    }
+}
+
+/// Priority level of a storage budget alert.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BudgetStatus {
+    /// Usage is within safe operating range.
+    Ok,
+    /// Usage has crossed the warning threshold.
+    Warning,
+    /// Usage has crossed the critical threshold — immediate action required.
+    Critical,
+}
+
+/// Alert emitted when storage budget usage crosses a configured threshold.
+#[derive(Clone, Debug)]
+pub struct BudgetAlert {
+    pub status: BudgetStatus,
+    pub entry_count: u64,
+    pub approx_bytes: u64,
+    pub threshold_bytes: u64,
 }
 
 /// The lifecycle states a tracked transaction can occupy.
@@ -237,6 +302,46 @@ pub struct RecoveryMetadata {
     pub retry_count: u32,
 }
 
+/// Soroban-compatible optional wrapper for [`RecoveryMetadata`].
+///
+/// `Option<RecoveryMetadata>` cannot be used directly in `#[contracttype]`
+/// structs because Soroban's XDR layer does not automatically derive
+/// `IntoVal`/`TryFromVal` for `Option<UserDefinedType>`. This enum is the
+/// on-chain equivalent of `Option<RecoveryMetadata>` and provides the same
+/// ergonomic API via inherent methods.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptRecovery {
+    None,
+    Some(RecoveryMetadata),
+}
+
+impl OptRecovery {
+    pub fn is_some(&self) -> bool { matches!(self, OptRecovery::Some(_)) }
+    pub fn is_none(&self) -> bool { matches!(self, OptRecovery::None) }
+
+    pub fn unwrap(self) -> RecoveryMetadata {
+        match self {
+            OptRecovery::Some(m) => m,
+            OptRecovery::None => panic!("called unwrap() on OptRecovery::None"),
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut RecoveryMetadata> {
+        match self {
+            OptRecovery::Some(m) => Some(m),
+            OptRecovery::None => None,
+        }
+    }
+
+    pub fn into_option(self) -> Option<RecoveryMetadata> {
+        match self {
+            OptRecovery::Some(m) => Some(m),
+            OptRecovery::None => None,
+        }
+    }
+}
+
 /// A snapshot of a tracked transaction's current state.
 ///
 /// Stored in Soroban persistent storage (production) or an in-memory cache
@@ -256,7 +361,7 @@ pub struct TransactionStateRecord {
     pub state_history: Vec<(TransactionState, u64)>,
     /// Recovery metadata, populated when the transaction enters the
     /// [`Failed`](TransactionState::Failed) state.
-    pub recovery_metadata: Option<RecoveryMetadata>,
+    pub recovery_metadata: OptRecovery,
 }
 
 /// Audit entry for a single transition attempt (success or failure).
@@ -380,7 +485,7 @@ impl TransactionStateTracker {
             last_updated_ledger: current_ledger,
             error_message: None,
             state_history: history,
-            recovery_metadata: None,
+            recovery_metadata: OptRecovery::None,
         };
 
         if self.is_dev_mode {
@@ -576,7 +681,7 @@ impl TransactionStateTracker {
                         let reason = error_message
                             .clone()
                             .unwrap_or_else(|| String::from_str(env, "unspecified failure"));
-                        record.recovery_metadata = Some(RecoveryMetadata {
+                        record.recovery_metadata = OptRecovery::Some(RecoveryMetadata {
                             failure_reason: reason,
                             last_updated_ledger: current_ledger,
                             failed_from_state: from_state,
@@ -639,7 +744,7 @@ impl TransactionStateTracker {
                 let reason = error_message
                     .clone()
                     .unwrap_or_else(|| String::from_str(env, "unspecified failure"));
-                record.recovery_metadata = Some(RecoveryMetadata {
+                record.recovery_metadata = OptRecovery::Some(RecoveryMetadata {
                     failure_reason: reason,
                     last_updated_ledger: current_ledger,
                     failed_from_state: from_state,
@@ -939,7 +1044,7 @@ impl TransactionStateTracker {
         env: &Env,
     ) -> Result<Option<RecoveryMetadata>, String> {
         let record = self.get_transaction_state(transaction_id, env)?;
-        Ok(record.and_then(|r| r.recovery_metadata))
+        Ok(record.and_then(|r| r.recovery_metadata.into_option()))
     }
 
     /// Returns `true` when the transaction is in the [`Failed`](TransactionState::Failed)
@@ -1639,5 +1744,103 @@ mod tests {
         monitor.remove_entry(128);
         assert_eq!(monitor.entry_count, 1);
         assert_eq!(monitor.approx_bytes, 256);
+    }
+
+    // ── StorageBudgetMonitor alerting tests (#349) ───────────────────────────
+
+    #[test]
+    fn test_budget_usage_percent_empty() {
+        let monitor = StorageBudgetMonitor::new();
+        assert_eq!(monitor.usage_percent(1000), 0);
+    }
+
+    #[test]
+    fn test_budget_usage_percent_zero_max() {
+        let monitor = StorageBudgetMonitor::new();
+        assert_eq!(monitor.usage_percent(0), 100);
+    }
+
+    #[test]
+    fn test_budget_usage_percent_partial() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(500);
+        assert_eq!(monitor.usage_percent(1000), 50);
+    }
+
+    #[test]
+    fn test_budget_usage_percent_capped_at_100() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(2000);
+        assert_eq!(monitor.usage_percent(1000), 100);
+    }
+
+    #[test]
+    fn test_budget_status_ok() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(100);
+        assert_eq!(monitor.get_status(500, 900), BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn test_budget_status_warning() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(600);
+        assert_eq!(monitor.get_status(500, 900), BudgetStatus::Warning);
+    }
+
+    #[test]
+    fn test_budget_status_critical() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(950);
+        assert_eq!(monitor.get_status(500, 900), BudgetStatus::Critical);
+    }
+
+    #[test]
+    fn test_budget_no_alert_below_threshold() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(100);
+        assert!(monitor.check_alert(10, 1000).is_none());
+    }
+
+    #[test]
+    fn test_budget_alert_on_entry_count() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(10);
+        monitor.record_entry(10);
+        monitor.record_entry(10);
+        let alert = monitor.check_alert(3, 10_000).unwrap();
+        assert_eq!(alert.entry_count, 3);
+        assert_eq!(alert.status, BudgetStatus::Warning);
+    }
+
+    #[test]
+    fn test_budget_alert_on_bytes() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(800);
+        let alert = monitor.check_alert(100, 500).unwrap();
+        assert_eq!(alert.approx_bytes, 800);
+        assert_eq!(alert.threshold_bytes, 500);
+    }
+
+    #[test]
+    fn test_budget_alert_critical_when_double_threshold() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(1001);
+        let alert = monitor.check_alert(100, 500).unwrap();
+        assert_eq!(alert.status, BudgetStatus::Critical);
+    }
+
+    #[test]
+    fn test_budget_is_near_limit_false() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(400);
+        assert!(!monitor.is_near_limit(80, 1000));
+    }
+
+    #[test]
+    fn test_budget_is_near_limit_true() {
+        let mut monitor = StorageBudgetMonitor::new();
+        monitor.record_entry(850);
+        assert!(monitor.is_near_limit(80, 1000));
     }
 }

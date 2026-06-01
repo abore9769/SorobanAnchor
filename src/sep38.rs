@@ -5,6 +5,7 @@
 
 extern crate alloc;
 use alloc::string::String;
+use alloc::vec::Vec as AllocVec;
 
 use crate::errors::Error;
 use crate::errors::normalize_asset_code;
@@ -154,28 +155,11 @@ fn validate_quote_fields(raw: &RawFirmQuote, current_timestamp: u64) -> Result<u
 
 /// Normalizes a raw `/prices` response from an anchor.
 ///
-/// Extracts and passes through `buy_asset`, `sell_asset`, and `price` fields.
-/// Currently performs no field-level validation; all fields are accepted as-is.
-///
-/// # Arguments
-///
-/// * `raw` - A [`RawPrice`] populated from the anchor's `/prices` endpoint.
-///
-/// # Returns
-///
-/// A normalised [`Price`] on success.
-///
 /// # Errors
 ///
-/// Currently always returns `Ok(...)`. Future versions may validate that
-/// `price` is a valid decimal string.
-///
-/// # Examples
-///
-/// ```rust
-/// use anchorkit::sep38::{fetch_prices, RawPrice};
-///
-/// Returns `Err(Error::invalid_quote())` if `price` is not a positive decimal string.
+/// Returns `Err(Error::invalid_quote())` if `price` is not a positive decimal string
+/// or is zero. Returns `Err(Error::invalid_asset_code(...))` if `buy_asset` or
+/// `sell_asset` contains invalid characters or exceeds 12 characters.
 pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
     if !is_valid_positive_decimal(&raw.price) {
         return Err(Error::invalid_quote());
@@ -210,6 +194,337 @@ pub fn request_firm_quote(raw: RawFirmQuote, current_timestamp: u64) -> Result<F
 /// Returns `true` if `expires_at <= current_timestamp`.
 pub fn is_quote_expired(quote: &FirmQuote, current_timestamp: u64) -> bool {
     quote.expires_at <= current_timestamp
+}
+
+// ── Issue #292: QuoteConstraints — firm quote price and volume validation ─────
+
+/// Optional price and volume constraints for validating a SEP-38 firm quote.
+///
+/// All fields are optional; `None` means "no constraint on this dimension".
+#[derive(Clone, Debug)]
+pub struct QuoteConstraints {
+    pub min_price: Option<f64>,
+    pub max_price: Option<f64>,
+    pub min_sell_amount: Option<f64>,
+    pub max_sell_amount: Option<f64>,
+    pub min_buy_amount: Option<f64>,
+    pub max_buy_amount: Option<f64>,
+}
+
+impl QuoteConstraints {
+    /// A constraint set with no restrictions on any field.
+    pub fn unconstrained() -> Self {
+        QuoteConstraints {
+            min_price: None,
+            max_price: None,
+            min_sell_amount: None,
+            max_sell_amount: None,
+            min_buy_amount: None,
+            max_buy_amount: None,
+        }
+    }
+}
+
+fn parse_amount_f64(s: &str) -> Result<f64, Error> {
+    s.parse::<f64>().map_err(|_| Error::invalid_quote())
+}
+
+fn check_range(value: f64, min: Option<f64>, max: Option<f64>) -> Result<(), Error> {
+    if let Some(lo) = min {
+        if value < lo {
+            return Err(Error::invalid_quote());
+        }
+    }
+    if let Some(hi) = max {
+        if value > hi {
+            return Err(Error::invalid_quote());
+        }
+    }
+    Ok(())
+}
+
+/// Validate a raw firm quote against expiry, field correctness, and optional
+/// price/volume constraints.
+///
+/// Calls [`request_firm_quote`] first, then applies the constraints. Any
+/// out-of-range field causes `Err(Error::invalid_quote())`.
+pub fn validate_firm_quote_with_constraints(
+    raw: RawFirmQuote,
+    current_timestamp: u64,
+    constraints: &QuoteConstraints,
+) -> Result<FirmQuote, Error> {
+    let quote = request_firm_quote(raw, current_timestamp)?;
+
+    let price = parse_amount_f64(&quote.price)?;
+    check_range(price, constraints.min_price, constraints.max_price)?;
+
+    let sell = parse_amount_f64(&quote.sell_amount)?;
+    check_range(sell, constraints.min_sell_amount, constraints.max_sell_amount)?;
+
+    let buy = parse_amount_f64(&quote.buy_amount)?;
+    check_range(buy, constraints.min_buy_amount, constraints.max_buy_amount)?;
+
+    Ok(quote)
+}
+
+// ── Issue #293: QuoteCache — off-chain TTL cache with invalidation ────────────
+
+/// A single entry in the off-chain SEP-38 quote cache.
+#[derive(Clone, Debug)]
+pub struct CachedQuoteEntry {
+    pub key: String,
+    pub quote: FirmQuote,
+    /// Unix timestamp (seconds) when the entry was inserted.
+    pub cached_at: u64,
+    /// How many seconds after `cached_at` the entry is considered fresh.
+    pub ttl_seconds: u64,
+}
+
+/// In-memory off-chain cache for SEP-38 firm quotes with TTL-based expiry and
+/// explicit invalidation.
+///
+/// Entries are keyed by an arbitrary `String` (e.g. anchor ID or asset pair).
+/// A `get` call returns `None` for both unknown keys and stale (past-TTL) entries.
+#[derive(Debug, Default)]
+pub struct QuoteCache {
+    entries: AllocVec<CachedQuoteEntry>,
+}
+
+impl QuoteCache {
+    pub fn new() -> Self {
+        QuoteCache {
+            entries: AllocVec::new(),
+        }
+    }
+
+    /// Insert or replace the quote stored under `key`.
+    pub fn insert(&mut self, key: String, quote: FirmQuote, now: u64, ttl_seconds: u64) {
+        let entry = CachedQuoteEntry {
+            key: key.clone(),
+            quote,
+            cached_at: now,
+            ttl_seconds,
+        };
+        if let Some(pos) = self.entries.iter().position(|e| e.key == key) {
+            self.entries[pos] = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// Return the cached quote for `key` if it has not yet expired; `None` otherwise.
+    pub fn get(&self, key: &str, now: u64) -> Option<&FirmQuote> {
+        self.entries
+            .iter()
+            .find(|e| e.key == key && now < e.cached_at.saturating_add(e.ttl_seconds))
+            .map(|e| &e.quote)
+    }
+
+    /// Explicitly remove the entry for `key`. Returns `true` if it existed.
+    pub fn invalidate(&mut self, key: &str) -> bool {
+        if let Some(pos) = self.entries.iter().position(|e| e.key == key) {
+            self.entries.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove all entries whose TTL has expired. Returns the number evicted.
+    pub fn evict_stale(&mut self, now: u64) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| now < e.cached_at.saturating_add(e.ttl_seconds));
+        before - self.entries.len()
+    }
+
+    /// Total number of entries currently held (including stale ones).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// ── Issue #294: QuoteComparator — best-of-route aggregator ───────────────────
+
+/// Weights for scoring a firm quote across cost and expiry dimensions.
+///
+/// A fully normalized comparator has `cost_weight + expiry_weight = 1.0`.
+pub struct QuoteComparator {
+    /// Weight applied to the cost dimension (lower price → higher score).
+    pub cost_weight: f64,
+    /// Weight applied to the expiry margin (longer until expiry → higher score).
+    pub expiry_weight: f64,
+}
+
+impl QuoteComparator {
+    pub fn new(cost_weight: f64, expiry_weight: f64) -> Self {
+        QuoteComparator {
+            cost_weight,
+            expiry_weight,
+        }
+    }
+
+    /// Compute a normalized score in [0.0, 1.0] for a single quote.
+    ///
+    /// - `cost_score = 1 - price / max_price` (cheaper is better).
+    /// - `expiry_score = (expires_at - now) / max_expiry_margin` (more time is better).
+    pub fn score(
+        &self,
+        quote: &FirmQuote,
+        now: u64,
+        max_price: f64,
+        max_expiry_margin: u64,
+    ) -> f64 {
+        let price: f64 = quote.price.parse().unwrap_or(0.0);
+        let cost_score = if max_price > 0.0 {
+            (1.0_f64 - price / max_price).max(0.0)
+        } else {
+            1.0
+        };
+        let expiry_margin = quote.expires_at.saturating_sub(now);
+        let expiry_score = if max_expiry_margin > 0 {
+            (expiry_margin as f64 / max_expiry_margin as f64).min(1.0)
+        } else {
+            0.0
+        };
+        self.cost_weight * cost_score + self.expiry_weight * expiry_score
+    }
+}
+
+/// A firm quote paired with its normalized composite score.
+#[derive(Clone, Debug)]
+pub struct ScoredQuote {
+    pub score: f64,
+    pub quote: FirmQuote,
+}
+
+/// Select the best non-expired quote from `quotes` using `comparator`.
+///
+/// Expired quotes are excluded before scoring. Returns `None` when `quotes` is
+/// empty or every entry has already expired.
+pub fn select_best_quote<'a>(
+    quotes: &'a [FirmQuote],
+    comparator: &QuoteComparator,
+    now: u64,
+) -> Option<&'a FirmQuote> {
+    let active: AllocVec<&FirmQuote> = quotes
+        .iter()
+        .filter(|q| !is_quote_expired(q, now))
+        .collect();
+
+    if active.is_empty() {
+        return None;
+    }
+
+    let max_price = active
+        .iter()
+        .filter_map(|q| q.price.parse::<f64>().ok())
+        .fold(0.0_f64, f64::max);
+
+    let max_expiry = active
+        .iter()
+        .map(|q| q.expires_at.saturating_sub(now))
+        .max()
+        .unwrap_or(0);
+
+    let mut best: Option<(f64, &FirmQuote)> = None;
+    for q in active.iter() {
+        let score = comparator.score(q, now, max_price, max_expiry);
+        match best {
+            None => {
+                best = Some((score, q));
+            }
+            Some((best_score, _)) if score > best_score => {
+                best = Some((score, q));
+            }
+            _ => {}
+        }
+    }
+
+    best.map(|(_, q)| q)
+}
+
+// ── Issue #295: AnchorFeeHistory — historical fee and spread estimation ───────
+
+/// A single historical fee and spread observation for an anchor.
+#[derive(Clone, Debug)]
+pub struct FeeObservation {
+    pub fee_bps: u32,
+    pub spread_bps: u32,
+    /// Unix timestamp (seconds) when this observation was recorded.
+    pub observed_at: u64,
+}
+
+/// Tracks historical fee and spread observations for a single anchor within a
+/// configurable retention window.
+///
+/// Observations older than `retention_seconds` are evicted automatically when
+/// a new one is recorded or when a query method is called.
+pub struct AnchorFeeHistory {
+    observations: AllocVec<FeeObservation>,
+    retention_seconds: u64,
+}
+
+impl AnchorFeeHistory {
+    pub fn new(retention_seconds: u64) -> Self {
+        AnchorFeeHistory {
+            observations: AllocVec::new(),
+            retention_seconds,
+        }
+    }
+
+    /// Record a new fee/spread observation, evicting entries outside the window.
+    pub fn record(&mut self, fee_bps: u32, spread_bps: u32, now: u64) {
+        let cutoff = now.saturating_sub(self.retention_seconds);
+        self.observations.retain(|o| o.observed_at >= cutoff);
+        self.observations.push(FeeObservation {
+            fee_bps,
+            spread_bps,
+            observed_at: now,
+        });
+    }
+
+    fn active<'a>(&'a self, now: u64) -> AllocVec<&'a FeeObservation> {
+        let cutoff = now.saturating_sub(self.retention_seconds);
+        self.observations
+            .iter()
+            .filter(|o| o.observed_at >= cutoff)
+            .collect()
+    }
+
+    /// Average fee in basis points over the retention window, or `None` if empty.
+    pub fn average_fee_bps(&self, now: u64) -> Option<f64> {
+        let obs = self.active(now);
+        if obs.is_empty() {
+            return None;
+        }
+        let sum: u64 = obs.iter().map(|o| o.fee_bps as u64).sum();
+        Some(sum as f64 / obs.len() as f64)
+    }
+
+    /// Average spread in basis points over the retention window, or `None` if empty.
+    pub fn average_spread_bps(&self, now: u64) -> Option<f64> {
+        let obs = self.active(now);
+        if obs.is_empty() {
+            return None;
+        }
+        let sum: u64 = obs.iter().map(|o| o.spread_bps as u64).sum();
+        Some(sum as f64 / obs.len() as f64)
+    }
+
+    /// Estimated total round-trip cost (fee + spread) in bps, or `None` if empty.
+    pub fn estimated_cost_bps(&self, now: u64) -> Option<f64> {
+        Some(self.average_fee_bps(now)? + self.average_spread_bps(now)?)
+    }
+
+    /// Number of observations within the current retention window.
+    pub fn observation_count(&self, now: u64) -> usize {
+        self.active(now).len()
+    }
 }
 
 #[cfg(test)]
@@ -425,5 +740,298 @@ mod tests {
         raw.sell_asset = "TOOLONGCODE13".to_string();
         let err = request_firm_quote(raw, 1000).unwrap_err();
         assert_eq!(err.code, crate::errors::ErrorCode::InvalidAssetCode);
+    }
+
+    // ── Test helpers ─────────────────────────────────────────────────────────
+
+    fn make_quote(id: &str, expires_at: u64) -> FirmQuote {
+        FirmQuote {
+            id: id.to_string(),
+            expires_at,
+            price: "0.15".to_string(),
+            sell_amount: "1000".to_string(),
+            buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
+        }
+    }
+
+    fn make_quote_with_price(id: &str, expires_at: u64, price: &str) -> FirmQuote {
+        FirmQuote {
+            id: id.to_string(),
+            expires_at,
+            price: price.to_string(),
+            sell_amount: "1000".to_string(),
+            buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
+        }
+    }
+
+    fn unconstrained() -> QuoteConstraints {
+        QuoteConstraints::unconstrained()
+    }
+
+    // ── #292: validate_firm_quote_with_constraints ────────────────────────────
+
+    #[test]
+    fn test_constraints_unconstrained_passes() {
+        let raw = valid_raw("2000");
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &unconstrained()).is_ok());
+    }
+
+    #[test]
+    fn test_constraints_price_below_min_rejected() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            min_price: Some(1.0),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_err());
+    }
+
+    #[test]
+    fn test_constraints_price_above_max_rejected() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            max_price: Some(0.10),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_err());
+    }
+
+    #[test]
+    fn test_constraints_price_within_range_passes() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            min_price: Some(0.10),
+            max_price: Some(0.20),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_ok());
+    }
+
+    #[test]
+    fn test_constraints_sell_amount_too_small_rejected() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            min_sell_amount: Some(2000.0),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_err());
+    }
+
+    #[test]
+    fn test_constraints_sell_amount_too_large_rejected() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            max_sell_amount: Some(500.0),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_err());
+    }
+
+    #[test]
+    fn test_constraints_buy_amount_too_small_rejected() {
+        let raw = valid_raw("2000");
+        let c = QuoteConstraints {
+            min_buy_amount: Some(500.0),
+            ..unconstrained()
+        };
+        assert!(validate_firm_quote_with_constraints(raw, 1000, &c).is_err());
+    }
+
+    #[test]
+    fn test_constraints_stale_quote_rejected_before_range_check() {
+        // expires_at=500, now=1000 → stale, should fail regardless of constraints
+        let raw = valid_raw("500");
+        let err = validate_firm_quote_with_constraints(raw, 1000, &unconstrained()).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::StaleQuote);
+    }
+
+    // ── #293: QuoteCache ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_hit() {
+        let mut cache = QuoteCache::new();
+        let q = make_quote("q1", 3000);
+        cache.insert("anchor1".to_string(), q.clone(), 1000, 600);
+        assert_eq!(cache.get("anchor1", 1500), Some(&q));
+    }
+
+    #[test]
+    fn test_cache_miss_unknown_key() {
+        let cache = QuoteCache::new();
+        assert_eq!(cache.get("unknown", 1000), None);
+    }
+
+    #[test]
+    fn test_cache_stale_entry_not_returned() {
+        let mut cache = QuoteCache::new();
+        cache.insert("anchor1".to_string(), make_quote("q1", 3000), 1000, 100);
+        // now=1101 > cached_at(1000) + ttl(100) = 1100
+        assert_eq!(cache.get("anchor1", 1101), None);
+    }
+
+    #[test]
+    fn test_cache_invalidate_removes_entry() {
+        let mut cache = QuoteCache::new();
+        cache.insert("anchor1".to_string(), make_quote("q1", 3000), 1000, 600);
+        assert!(cache.invalidate("anchor1"));
+        assert_eq!(cache.get("anchor1", 1000), None);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_cache_invalidate_missing_key_returns_false() {
+        let mut cache = QuoteCache::new();
+        assert!(!cache.invalidate("no_such_key"));
+    }
+
+    #[test]
+    fn test_cache_evict_stale_removes_expired_entries() {
+        let mut cache = QuoteCache::new();
+        cache.insert("a1".to_string(), make_quote("q1", 3000), 1000, 100);
+        cache.insert("a2".to_string(), make_quote("q2", 3000), 1000, 600);
+        let evicted = cache.evict_stale(1200);
+        assert_eq!(evicted, 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("a2", 1200).is_some());
+    }
+
+    #[test]
+    fn test_cache_replace_existing_key() {
+        let mut cache = QuoteCache::new();
+        cache.insert("a1".to_string(), make_quote("q1", 3000), 1000, 600);
+        let q2 = make_quote("q2", 4000);
+        cache.insert("a1".to_string(), q2.clone(), 1100, 600);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get("a1", 1200), Some(&q2));
+    }
+
+    // ── #294: select_best_quote ───────────────────────────────────────────────
+
+    #[test]
+    fn test_select_best_quote_cheapest_wins_with_cost_weight() {
+        let cheap = make_quote_with_price("cheap", 5000, "0.10");
+        let expensive = make_quote_with_price("exp", 5000, "0.90");
+        let cmp = QuoteComparator::new(1.0, 0.0);
+        let best = select_best_quote(&[cheap.clone(), expensive], &cmp, 1000).unwrap();
+        assert_eq!(best.id, "cheap");
+    }
+
+    #[test]
+    fn test_select_best_quote_longer_expiry_wins_with_expiry_weight() {
+        let soon = make_quote("soon", 1100);
+        let later = make_quote("later", 5000);
+        let cmp = QuoteComparator::new(0.0, 1.0);
+        let best = select_best_quote(&[soon, later.clone()], &cmp, 1000).unwrap();
+        assert_eq!(best.id, "later");
+    }
+
+    #[test]
+    fn test_select_best_quote_all_expired_returns_none() {
+        let q1 = make_quote("q1", 500);
+        let q2 = make_quote("q2", 800);
+        let cmp = QuoteComparator::new(0.5, 0.5);
+        assert!(select_best_quote(&[q1, q2], &cmp, 1000).is_none());
+    }
+
+    #[test]
+    fn test_select_best_quote_empty_slice_returns_none() {
+        let cmp = QuoteComparator::new(0.5, 0.5);
+        assert!(select_best_quote(&[], &cmp, 1000).is_none());
+    }
+
+    #[test]
+    fn test_select_best_quote_skips_expired_picks_live() {
+        let expired = make_quote("expired", 500);
+        let live = make_quote("live", 5000);
+        let cmp = QuoteComparator::new(0.5, 0.5);
+        let best = select_best_quote(&[expired, live.clone()], &cmp, 1000).unwrap();
+        assert_eq!(best.id, "live");
+    }
+
+    #[test]
+    fn test_select_best_quote_balanced_weights() {
+        // Same expiry, different prices — cheaper should win under 50/50 weights
+        let cheap = make_quote_with_price("cheap", 3000, "0.10");
+        let expensive = make_quote_with_price("exp", 3000, "0.90");
+        let cmp = QuoteComparator::new(0.5, 0.5);
+        let best = select_best_quote(&[expensive, cheap.clone()], &cmp, 1000).unwrap();
+        assert_eq!(best.id, "cheap");
+    }
+
+    // ── #295: AnchorFeeHistory ────────────────────────────────────────────────
+
+    #[test]
+    fn test_fee_history_average_fee_bps() {
+        let mut h = AnchorFeeHistory::new(3600);
+        h.record(100, 10, 1000);
+        h.record(200, 20, 1500);
+        let avg = h.average_fee_bps(2000).unwrap();
+        assert!((avg - 150.0).abs() < 1e-6, "expected 150.0, got {}", avg);
+    }
+
+    #[test]
+    fn test_fee_history_average_spread_bps() {
+        let mut h = AnchorFeeHistory::new(3600);
+        h.record(100, 10, 1000);
+        h.record(100, 20, 1500);
+        let avg = h.average_spread_bps(2000).unwrap();
+        assert!((avg - 15.0).abs() < 1e-6, "expected 15.0, got {}", avg);
+    }
+
+    #[test]
+    fn test_fee_history_estimated_cost_bps() {
+        let mut h = AnchorFeeHistory::new(3600);
+        h.record(100, 50, 1000);
+        let cost = h.estimated_cost_bps(2000).unwrap();
+        assert!((cost - 150.0).abs() < 1e-6, "expected 150.0, got {}", cost);
+    }
+
+    #[test]
+    fn test_fee_history_empty_returns_none() {
+        let h = AnchorFeeHistory::new(3600);
+        assert!(h.average_fee_bps(1000).is_none());
+        assert!(h.average_spread_bps(1000).is_none());
+        assert!(h.estimated_cost_bps(1000).is_none());
+    }
+
+    #[test]
+    fn test_fee_history_evicts_observations_outside_retention_window() {
+        let mut h = AnchorFeeHistory::new(100);
+        h.record(100, 10, 1000);
+        // Second observation at 1200; cutoff = 1200 - 100 = 1100, so first is evicted
+        h.record(200, 20, 1200);
+        let avg = h.average_fee_bps(1200).unwrap();
+        assert!((avg - 200.0).abs() < 1e-6, "expected 200.0, got {}", avg);
+    }
+
+    #[test]
+    fn test_fee_history_observation_count() {
+        let mut h = AnchorFeeHistory::new(3600);
+        h.record(100, 10, 1000);
+        h.record(200, 20, 1500);
+        assert_eq!(h.observation_count(2000), 2);
+    }
+
+    #[test]
+    fn test_fee_history_stale_observation_excluded_from_query() {
+        let mut h = AnchorFeeHistory::new(100);
+        // Directly push a stale observation (won't be evicted since no record() call clears it)
+        h.observations.push(FeeObservation {
+            fee_bps: 999,
+            spread_bps: 999,
+            observed_at: 500,
+        });
+        h.observations.push(FeeObservation {
+            fee_bps: 50,
+            spread_bps: 10,
+            observed_at: 1950,
+        });
+        // now=2000, cutoff=1900; observation at 500 is stale, 1950 is active
+        let avg = h.average_fee_bps(2000).unwrap();
+        assert!((avg - 50.0).abs() < 1e-6, "expected 50.0, got {}", avg);
     }
 }
