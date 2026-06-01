@@ -2232,6 +2232,9 @@ impl AnchorKitContract {
     /// - the service list is empty, contains duplicates, or contains a code the
     ///   current version does not recognise (`InvalidServiceType`)
     ///
+    /// Services are stored in deterministic sorted order (ascending) regardless
+    /// of submission order, ensuring consistent storage and event emission (#258).
+    ///
     /// On success the record is stored stamped with `version` so capability
     /// discovery is explicit. Re-configuring overwrites the previous record,
     /// which is how an anchor migrates to a newer version.
@@ -2287,7 +2290,12 @@ impl AnchorKitContract {
         if services.is_empty() {
             panic_with_error!(&env, ErrorCode::InvalidServiceType);
         }
+        
+        // Validate and normalize services: check for duplicates, validate codes,
+        // and sort deterministically for consistent storage and event emission.
         let mut seen = Vec::new(&env);
+        let mut normalized = Vec::new(&env);
+        
         for s in services.iter() {
             if seen.contains(&s) {
                 panic_with_error!(&env, ErrorCode::InvalidServiceType);
@@ -2296,10 +2304,16 @@ impl AnchorKitContract {
                 panic_with_error!(&env, ErrorCode::InvalidServiceType);
             }
             seen.push_back(s);
+            normalized.push_back(s);
         }
+        
+        // Sort services deterministically (ascending order) for consistent storage
+        // and predictable behavior regardless of submission order.
+        Self::sort_services(&env, &mut normalized);
+        
         let record = AnchorServices {
             anchor: anchor.clone(),
-            services: services.clone(),
+            services: normalized,
             service_capability_version: version,
         };
         let key = make_storage_key(&env, &[b"SERVICES", &raw]);
@@ -4861,6 +4875,23 @@ impl AnchorKitContract {
     /// current [`SERVICE_CAPABILITY_VERSION`] (#239).
     fn is_known_service_code(code: u32) -> bool {
         code >= SERVICE_DEPOSITS && code <= MAX_KNOWN_SERVICE_CODE
+    }
+
+    /// Sort services in ascending order for deterministic storage.
+    /// This ensures consistent behavior regardless of submission order.
+    fn sort_services(_env: &Env, services: &mut Vec<u32>) {
+        // Simple bubble sort for small vectors (typically 1-4 elements)
+        let len = services.len();
+        for i in 0..len {
+            for j in 0..len - i - 1 {
+                let a = services.get(j).unwrap();
+                let b = services.get(j + 1).unwrap();
+                if a > b {
+                    services.set(j, b);
+                    services.set(j + 1, a);
+                }
+            }
+        }
     }
 
     /// Returns `true` iff `anchor` has configured services that include

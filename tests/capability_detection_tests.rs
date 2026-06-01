@@ -320,4 +320,125 @@ mod capability_detection_tests {
             SERVICE_CAPABILITY_VERSION
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Deterministic sorting (#258)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_services_sorted_deterministically() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        // Submit services in reverse order
+        client.configure_services(
+            &anchor,
+            &services(&env, &[SERVICE_KYC, SERVICE_QUOTES, SERVICE_WITHDRAWALS, SERVICE_DEPOSITS]),
+        );
+
+        // Verify they are stored in sorted order
+        let record = client.get_supported_services(&anchor);
+        assert_eq!(record.services.len(), 4);
+        assert_eq!(record.services.get(0).unwrap(), SERVICE_DEPOSITS);
+        assert_eq!(record.services.get(1).unwrap(), SERVICE_WITHDRAWALS);
+        assert_eq!(record.services.get(2).unwrap(), SERVICE_QUOTES);
+        assert_eq!(record.services.get(3).unwrap(), SERVICE_KYC);
+    }
+
+    #[test]
+    fn test_services_sorted_regardless_of_input_order() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        { 
+            let sk1 = SigningKey::generate(&mut OsRng); 
+            register_attestor_with_sep10(&env, &client, &anchor1, &anchor1, &sk1);
+            let sk2 = SigningKey::generate(&mut OsRng);
+            register_attestor_with_sep10(&env, &client, &anchor2, &anchor2, &sk2);
+        }
+
+        // Configure anchor1 with services in one order
+        client.configure_services(
+            &anchor1,
+            &services(&env, &[SERVICE_QUOTES, SERVICE_DEPOSITS, SERVICE_WITHDRAWALS]),
+        );
+
+        // Configure anchor2 with same services in different order
+        client.configure_services(
+            &anchor2,
+            &services(&env, &[SERVICE_WITHDRAWALS, SERVICE_QUOTES, SERVICE_DEPOSITS]),
+        );
+
+        // Both should have identical sorted service lists
+        let record1 = client.get_supported_services(&anchor1);
+        let record2 = client.get_supported_services(&anchor2);
+        
+        assert_eq!(record1.services.len(), record2.services.len());
+        for i in 0..record1.services.len() {
+            assert_eq!(record1.services.get(i).unwrap(), record2.services.get(i).unwrap());
+        }
+        
+        // Verify the sorted order
+        assert_eq!(record1.services.get(0).unwrap(), SERVICE_DEPOSITS);
+        assert_eq!(record1.services.get(1).unwrap(), SERVICE_WITHDRAWALS);
+        assert_eq!(record1.services.get(2).unwrap(), SERVICE_QUOTES);
+    }
+
+    #[test]
+    fn test_single_service_remains_unchanged() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        client.configure_services(&anchor, &services(&env, &[SERVICE_QUOTES]));
+
+        let record = client.get_supported_services(&anchor);
+        assert_eq!(record.services.len(), 1);
+        assert_eq!(record.services.get(0).unwrap(), SERVICE_QUOTES);
+    }
+
+    #[test]
+    fn test_two_services_sorted() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        // Submit in reverse order
+        client.configure_services(&anchor, &services(&env, &[SERVICE_WITHDRAWALS, SERVICE_DEPOSITS]));
+
+        let record = client.get_supported_services(&anchor);
+        assert_eq!(record.services.len(), 2);
+        assert_eq!(record.services.get(0).unwrap(), SERVICE_DEPOSITS);
+        assert_eq!(record.services.get(1).unwrap(), SERVICE_WITHDRAWALS);
+    }
+
+    #[test]
+    fn test_reconfigure_maintains_sorting() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        // Initial configuration in random order
+        client.configure_services(&anchor, &services(&env, &[SERVICE_QUOTES, SERVICE_DEPOSITS]));
+        
+        let record1 = client.get_supported_services(&anchor);
+        assert_eq!(record1.services.get(0).unwrap(), SERVICE_DEPOSITS);
+        assert_eq!(record1.services.get(1).unwrap(), SERVICE_QUOTES);
+
+        // Reconfigure with different services in random order
+        client.configure_services(&anchor, &services(&env, &[SERVICE_KYC, SERVICE_WITHDRAWALS, SERVICE_DEPOSITS]));
+        
+        let record2 = client.get_supported_services(&anchor);
+        assert_eq!(record2.services.len(), 3);
+        assert_eq!(record2.services.get(0).unwrap(), SERVICE_DEPOSITS);
+        assert_eq!(record2.services.get(1).unwrap(), SERVICE_WITHDRAWALS);
+        assert_eq!(record2.services.get(2).unwrap(), SERVICE_KYC);
+    }
 }
+
