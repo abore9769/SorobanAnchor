@@ -21,6 +21,26 @@ pub const MAX_JWT_LIFETIME: u64 = 86_400;
 /// Default clock skew tolerance in seconds.
 pub const DEFAULT_CLOCK_SKEW: u64 = 60;
 
+trait Ed25519VerifyResult {
+    fn into_verify_result(self) -> Result<(), ()>;
+}
+
+impl Ed25519VerifyResult for () {
+    fn into_verify_result(self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+impl<T, E> Ed25519VerifyResult for Result<T, E> {
+    fn into_verify_result(self) -> Result<(), ()> {
+        self.map(|_| ()).map_err(|_| ())
+    }
+}
+
+fn check_ed25519_verify<R: Ed25519VerifyResult>(result: R) -> Result<(), ()> {
+    result.into_verify_result()
+}
+
 fn decode_base64url_char(c: u8) -> Option<u8> {
     match c {
         b'A'..=b'Z' => Some(c - b'A'),
@@ -337,7 +357,7 @@ pub fn verify_sep10_jwt(
 
     let pk: BytesN<32> = anchor_public_key.clone().try_into().map_err(|_| ())?;
     let sig: BytesN<64> = sig_bytes.clone().try_into().map_err(|_| ())?;
-    env.crypto().ed25519_verify(&pk, &signing_input, &sig);
+    check_ed25519_verify(env.crypto().ed25519_verify(&pk, &signing_input, &sig))?;
 
     let payload_dec = base64url_decode(payload_b64).map_err(|_| ())?;
     let exp = parse_json_exp(&payload_dec)?;
@@ -439,6 +459,19 @@ mod tests {
         let sig = signing_key.sign(signing_input.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
         format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn mutate_jwt_signature(jwt: &str) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let parts = jwt.split('.').collect::<std::vec::Vec<_>>();
+        assert_eq!(parts.len(), 3);
+
+        let mut sig = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        sig[0] ^= 1;
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
+
+        format!("{}.{}.{}", parts[0], parts[1], sig_b64)
     }
 
     fn build_jwt_full(
@@ -550,6 +583,27 @@ mod tests {
         let sub_str: std::string::String = sub.to_string();
         let jwt = build_jwt(&signing_key, sub_str.as_str(), 2_000);
         let token = String::from_str(&env, jwt.as_str());
+
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn verify_rejects_mutated_signature() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub = attestor.to_string();
+        let sub_str: std::string::String = sub.to_string();
+        let jwt = build_jwt(&signing_key, sub_str.as_str(), 2_000);
+        let tampered_jwt = mutate_jwt_signature(jwt.as_str());
+        let token = String::from_str(&env, tampered_jwt.as_str());
 
         env.as_contract(&contract_id, || {
             assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
