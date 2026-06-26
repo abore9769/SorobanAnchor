@@ -30,7 +30,6 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Proof-of-possession helpers

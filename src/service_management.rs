@@ -196,7 +196,7 @@ impl ServiceManager {
         if let Some(snapshot) = Self::get_snapshot(env, snapshot_id) {
             let state_key = (soroban_sdk::Symbol::new(env, "SVC_STATE"), &snapshot.anchor);
 
-            let mut state = ServiceToggleState {
+            let state = ServiceToggleState {
                 anchor: snapshot.anchor.clone(),
                 enabled_services: snapshot.services.clone(),
                 disabled_services: Vec::new(env),

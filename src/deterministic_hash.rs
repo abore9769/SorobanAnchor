@@ -159,30 +159,6 @@ pub fn verify_payload_hash(stored: &BytesN<32>, expected: &BytesN<32>) -> bool {
     stored == expected
 }
 
-/// Verify two raw-byte hash values received from an external source.
-///
-/// Unlike [`verify_payload_hash`], this function accepts untyped [`Bytes`] as
-/// inputs (e.g. values decoded from on-chain storage before type assertion or
-/// passed in through contract call arguments). It returns `false` — never
-/// panics — when either input has a length other than 32 or when the digests
-/// differ. This makes it safe to call with untrusted external data.
-///
-/// # Arguments
-///
-/// * `stored` - The raw bytes of a hash previously stored on-chain.
-/// * `expected` - The raw bytes of the recomputed hash.
-///
-/// # Returns
-///
-/// `true` only when both inputs are exactly 32 bytes and are equal; `false`
-/// in all other cases.
-pub fn verify_hash_bytes(stored: &Bytes, expected: &Bytes) -> bool {
-    if stored.len() != 32 || expected.len() != 32 {
-        return false;
-    }
-    stored == expected
-}
-
 #[cfg(test)]
 mod deterministic_hash_tests {
     use super::*;
@@ -281,54 +257,4 @@ mod deterministic_hash_tests {
         assert_ne!(h1, h3, "different subjects must yield different hashes");
     }
 
-    #[test]
-    fn test_verify_hash_bytes_match() {
-        let env = Env::default();
-        let subject = Address::generate(&env);
-        let data = Bytes::from_slice(&env, b"payment_confirmed");
-        let ts: u64 = 1_700_000_000;
-
-        let hash: BytesN<32> = compute_payload_hash(&env, &subject, ts, &data);
-        let as_bytes: Bytes = hash.into();
-        assert!(verify_hash_bytes(&as_bytes, &as_bytes));
-    }
-
-    #[test]
-    fn test_verify_hash_bytes_mismatch() {
-        let env = Env::default();
-        let subject = Address::generate(&env);
-        let data = Bytes::from_slice(&env, b"payment_confirmed");
-        let ts: u64 = 1_700_000_000;
-
-        let h1: Bytes = compute_payload_hash(&env, &subject, ts, &data).into();
-        let h2: Bytes = compute_payload_hash(&env, &subject, ts + 1, &data).into();
-        assert!(!verify_hash_bytes(&h1, &h2));
-    }
-
-    #[test]
-    fn test_verify_hash_bytes_wrong_length_returns_false() {
-        let env = Env::default();
-        // 16-byte input — too short to be a SHA-256 digest.
-        let short = Bytes::from_slice(&env, &[0u8; 16]);
-        // 33-byte input — one byte too long.
-        let long = Bytes::from_slice(&env, &[0u8; 33]);
-        let ok = Bytes::from_slice(&env, &[0u8; 32]);
-
-        assert!(!verify_hash_bytes(&short, &ok), "short stored must return false");
-        assert!(!verify_hash_bytes(&ok, &short), "short expected must return false");
-        assert!(!verify_hash_bytes(&long, &ok), "long stored must return false");
-        assert!(!verify_hash_bytes(&ok, &long), "long expected must return false");
-        assert!(!verify_hash_bytes(&short, &long), "both wrong lengths must return false");
-    }
-
-    #[test]
-    fn test_verify_hash_bytes_empty_inputs_return_false() {
-        let env = Env::default();
-        let empty = Bytes::new(&env);
-        let ok = Bytes::from_slice(&env, &[0u8; 32]);
-
-        assert!(!verify_hash_bytes(&empty, &ok));
-        assert!(!verify_hash_bytes(&ok, &empty));
-        assert!(!verify_hash_bytes(&empty, &empty));
-    }
 }

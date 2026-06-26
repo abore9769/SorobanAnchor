@@ -7,8 +7,7 @@
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use std::fs::{self, File};
-use std::io::{self, ErrorKind, Read};
+use std::io::Read;
 use anchorkit::normalize_stellar_account_id;
 
 // ── SecretKey wrapper ─────────────────────────────────────────────────────────

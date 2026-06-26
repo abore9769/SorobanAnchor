@@ -36,7 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "2700a48d70dc193519ffe44beb1892e829c78e089ce869334b6a27a5554e3cee"
+                  "bytes": "7914e773c3883937060499884454e129a6534736d153469ff079a0fad9757381"
                 }
               ]
             }
@@ -58,13 +58,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.lFteVkJQcmVz-7kA33fRlTR3ohv9RaVaaWxIe81yBr0TO1qezPVr6BEtbSODKyeY5lnZh4yaeHgoLzl9Dg6WCA"
+                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0._zHiy2xOOOr8QGdvCVbgmxaswmW0OmfQwJmER5gDv-BQAuEk3OO0aie5joSZpY4WRZia8pkO3lt1eZjZPPNmBw"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "2700a48d70dc193519ffe44beb1892e829c78e089ce869334b6a27a5554e3cee"
+                  "bytes": "7914e773c3883937060499884454e129a6534736d153469ff079a0fad9757381"
                 }
               ]
             }
@@ -126,7 +126,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "2700a48d70dc193519ffe44beb1892e829c78e089ce869334b6a27a5554e3cee"
+                  "bytes": "7914e773c3883937060499884454e129a6534736d153469ff079a0fad9757381"
                 }
               }
             },
@@ -195,6 +195,18 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ATCNT"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
                         }
                       }
                     ]
@@ -434,7 +446,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "2700a48d70dc193519ffe44beb1892e829c78e089ce869334b6a27a5554e3cee"
+                  "bytes": "7914e773c3883937060499884454e129a6534736d153469ff079a0fad9757381"
                 }
               ]
             }
@@ -488,13 +500,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.lFteVkJQcmVz-7kA33fRlTR3ohv9RaVaaWxIe81yBr0TO1qezPVr6BEtbSODKyeY5lnZh4yaeHgoLzl9Dg6WCA"
+                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0._zHiy2xOOOr8QGdvCVbgmxaswmW0OmfQwJmER5gDv-BQAuEk3OO0aie5joSZpY4WRZia8pkO3lt1eZjZPPNmBw"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "2700a48d70dc193519ffe44beb1892e829c78e089ce869334b6a27a5554e3cee"
+                  "bytes": "7914e773c3883937060499884454e129a6534736d153469ff079a0fad9757381"
                 }
               ]
             }
@@ -652,7 +664,7 @@
                   "bytes": "813ca5285c28ccee5cab8b10ebda9c908fd6d78ed9dc94cc65ea6cb67a7f13ae"
                 },
                 {
-                  "bytes": "f2b62f15030fa38d78fc5f85e99c8288a33585f73a083c7dddbbbe44cced6ded1b2e2e98c968c743509443adbca72e9fcfa69a8fa0e41291cc14baff1d7a880f"
+                  "bytes": "7d64ef9a2fac3b6bc233e6bf7e048b8d01f57b11738ff8a3bddda07231cdb42081048423014165bdb01628568654bee4fb65791cb6ed19f8ccf3dc9e051b3a0e"
                 }
               ]
             }
@@ -783,7 +795,7 @@
                       "bytes": "813ca5285c28ccee5cab8b10ebda9c908fd6d78ed9dc94cc65ea6cb67a7f13ae"
                     },
                     {
-                      "bytes": "f2b62f15030fa38d78fc5f85e99c8288a33585f73a083c7dddbbbe44cced6ded1b2e2e98c968c743509443adbca72e9fcfa69a8fa0e41291cc14baff1d7a880f"
+                      "bytes": "7d64ef9a2fac3b6bc233e6bf7e048b8d01f57b11738ff8a3bddda07231cdb42081048423014165bdb01628568654bee4fb65791cb6ed19f8ccf3dc9e051b3a0e"
                     }
                   ]
                 }
