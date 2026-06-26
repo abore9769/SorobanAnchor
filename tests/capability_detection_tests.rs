@@ -462,7 +462,8 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
 
         let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         let result = client.try_configure_services_versioned(
@@ -481,7 +482,8 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
 
         let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
 
@@ -512,7 +514,8 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
 
         let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         let result = client.try_configure_services_versioned(
@@ -531,7 +534,8 @@ mod capability_detection_tests {
         let env = make_env();
         let (client, _) = setup(&env);
         let anchor = Address::generate(&env);
-        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
 
         let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         let result = client.try_configure_services_versioned(
