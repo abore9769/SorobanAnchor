@@ -6033,6 +6033,8 @@ impl AnchorKitContract {
     /// should call this after every outbound anchor interaction.
     pub fn record_health_event(env: Env, anchor: Address, success: bool) {
         Self::require_admin(&env);
+        anchor.require_auth();
+        Self::check_attestor(&env, &anchor);
         let key = Self::health_metrics_key(&env, &anchor);
         let now = env.ledger().timestamp();
 

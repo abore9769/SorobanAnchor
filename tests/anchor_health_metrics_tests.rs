@@ -16,7 +16,7 @@
 mod anchor_health_metrics_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Env,
+        Address, BytesN, Env,
     };
 
     use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
@@ -52,6 +52,12 @@ mod anchor_health_metrics_tests {
         (client, admin)
     }
 
+    fn register_test_attestor(client: &AnchorKitContractClient, env: &Env, anchor: &Address, admin: &Address) {
+        let session_id = client.create_session(admin);
+        let pk = BytesN::from_array(env, &[0xABu8; 32]);
+        client.register_attestor_with_session(admin, &session_id, anchor, &pk);
+    }
+
     // -----------------------------------------------------------------------
     // Initial state
     // -----------------------------------------------------------------------
@@ -79,8 +85,9 @@ mod anchor_health_metrics_tests {
     fn record_success_increments_success_count() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         client.record_health_event(&anchor, &true);
 
@@ -95,8 +102,9 @@ mod anchor_health_metrics_tests {
     fn record_failure_increments_failure_count() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         client.record_health_event(&anchor, &false);
 
@@ -111,8 +119,9 @@ mod anchor_health_metrics_tests {
     fn uptime_bps_computed_correctly_for_mixed_events() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         // 9 successes, 1 failure → 90 % = 9000 bps
         for _ in 0..9 {
@@ -131,8 +140,9 @@ mod anchor_health_metrics_tests {
     fn uptime_bps_100_percent_all_success() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         for _ in 0..5 {
             client.record_health_event(&anchor, &true);
@@ -146,8 +156,9 @@ mod anchor_health_metrics_tests {
     fn uptime_bps_0_percent_all_failure() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         for _ in 0..5 {
             client.record_health_event(&anchor, &false);
@@ -161,8 +172,9 @@ mod anchor_health_metrics_tests {
     fn last_event_at_reflects_ledger_timestamp() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         client.record_health_event(&anchor, &true);
         assert_eq!(client.get_anchor_health(&anchor).last_event_at, 1000);
@@ -176,8 +188,9 @@ mod anchor_health_metrics_tests {
     fn counters_accumulate_across_multiple_calls() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         for _ in 0..3 {
             client.record_health_event(&anchor, &true);
@@ -202,8 +215,9 @@ mod anchor_health_metrics_tests {
     fn reset_anchor_health_zeroes_all_counters() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         for _ in 0..5 {
             client.record_health_event(&anchor, &true);
@@ -226,8 +240,9 @@ mod anchor_health_metrics_tests {
     fn counters_accumulate_correctly_after_reset() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor, &admin);
 
         for _ in 0..10 {
             client.record_health_event(&anchor, &false);
@@ -252,9 +267,11 @@ mod anchor_health_metrics_tests {
     fn different_anchors_have_independent_health_stores() {
         let env = make_env();
         set_ledger(&env, 1000);
-        let (client, _) = deploy(&env);
+        let (client, admin) = deploy(&env);
         let anchor_a = Address::generate(&env);
         let anchor_b = Address::generate(&env);
+        register_test_attestor(&client, &env, &anchor_a, &admin);
+        register_test_attestor(&client, &env, &anchor_b, &admin);
 
         for _ in 0..4 {
             client.record_health_event(&anchor_a, &true);
