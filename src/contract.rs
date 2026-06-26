@@ -4170,7 +4170,7 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .get::<_, AuditLog>(&make_storage_key(&env, &[b"AUDIT", &log_id.to_be_bytes()]))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AuditLogNotFound))
     }
 
     pub fn get_session_audit_logs(env: Env, session_id: u64, limit: u64) -> Vec<AuditLog> {
@@ -5523,7 +5523,7 @@ impl AnchorKitContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::AttestationNotFound));
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::TransactionNotFound));
 
         let from_state = record.state;
         if !from_state.is_valid_transition(new_state) {

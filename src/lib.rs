@@ -27,7 +27,7 @@
 //! |--------|-----|---------|
 //! | [`sep6`] | SEP-6 | Non-interactive deposit / withdrawal |
 //! | [`sep24`] | SEP-24 | Interactive deposit / withdrawal |
-//! | `sep38` (internal) | SEP-38 | Anchor RFQ / firm quotes |
+//! | [`sep38`] | SEP-38 | Anchor RFQ / firm quotes |
 //!
 //! ### Cross-cutting utilities
 //! | Module | Purpose |
