@@ -69,6 +69,8 @@ base64 = { version = "0.22" }
 rpassword = { version = "7.3", optional = true }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = "2"
+stellar-strkey = "0.0.9"
 
 [build-dependencies]
 serde_json = "1"
@@ -78,7 +80,6 @@ jsonschema = "0.17"
 [dev-dependencies]
 soroban-sdk = { version = "21.7.0", features = ["testutils"] }
 base64 = "0.22"
-ed25519-dalek = "2"
 rand = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 jsonschema = "0.17"

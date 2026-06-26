@@ -5041,6 +5041,20 @@ impl AnchorKitContract {
             }
         }
 
+        // Enforce KYC check (#439)
+        if options.require_kyc {
+            let kyc_status = Self::get_kyc_status(env.clone(), options.subject.clone());
+            if kyc_status != KycStatus::Approved {
+                match kyc_status {
+                    KycStatus::Pending      => panic_with_error!(&env, ErrorCode::KycPending),
+                    KycStatus::Rejected     => panic_with_error!(&env, ErrorCode::KycRejected),
+                    KycStatus::Expired      => panic_with_error!(&env, ErrorCode::ComplianceNotMet),
+                    KycStatus::NotSubmitted => panic_with_error!(&env, ErrorCode::KycNotFound),
+                    _ => panic_with_error!(&env, ErrorCode::ComplianceNotMet),
+                }
+            }
+        }
+
         // Apply strategy: pick best candidate
         let strategy_sym = options.strategy.get(0)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NoQuotesAvailable));

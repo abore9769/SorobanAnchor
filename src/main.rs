@@ -1046,6 +1046,18 @@ fn parse_services(services: &[String]) -> Vec<u32> {
     }).collect()
 }
 
+fn derive_ed25519_public_key_hex(source: &str) -> String {
+    use stellar_strkey::Strkey;
+    let strkey = Strkey::from_string(source)
+        .unwrap_or_else(|e| { eprintln!("error: invalid secret key '{}': {e}", source); std::process::exit(1); });
+    let seed = match strkey {
+        Strkey::PrivateKeyEd25519(k) => k.0,
+        _ => { eprintln!("error: expected an Ed25519 secret key (starts with 'S')"); std::process::exit(1); }
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    signing_key.verifying_key().as_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 fn register(
     address: &str, services: &[String], contract_id: &str,
     network: &str, source: &SecretKey, sep10_token: &str, sep10_issuer: &str,
@@ -1055,14 +1067,13 @@ fn register(
     let service_ids = parse_services(services)
         .iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
-    // SECURITY: sep10_token is a bearer token.  It is passed only as a
-    // subprocess argument to the Stellar CLI and is never echoed to stdout.
+    let pk_hex = derive_ed25519_public_key_hex(source);
     stellar_invoke(contract_id, source, network, &[
         "register_attestor",
         "--attestor", &address,
         "--sep10_token", sep10_token,
-        "--sep10_issuer", &sep10_issuer,
-        "--public_key", "0000000000000000000000000000000000000000000000000000000000000000",
+        "--sep10_issuer", sep10_issuer,
+        "--public_key", &pk_hex,
     ]);
     stellar_invoke(contract_id, source, network, &[
         "configure_services",
@@ -1116,7 +1127,7 @@ fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, so
         "--quote_asset", to,
         "--amount", &amount_str,
         "--operation_type", "1",   // 1 = deposit
-        "--strategy", "lowest_fee",
+        "--strategy", "LowestFee",
         "--min_reputation", "0",
         "--max_anchors", "10",
         "--require_kyc", "false",
@@ -1310,7 +1321,7 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
                "--rpc-url", &rpc_url_for(network),
                "--network-passphrase", &passphrase_for(network),
                "--",
-               "get_attestor_count"])
+               "is_initialized"])
         .output();
 
     match output {
