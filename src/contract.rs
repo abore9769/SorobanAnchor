@@ -1238,7 +1238,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let admin = Address::random(&env);
+    /// let admin = Address::generate(&env);
     /// AnchorKitContract::initialize(env, admin);
     /// ```
     pub fn initialize(env: Env, admin: Address) {
@@ -1278,10 +1278,7 @@ impl AnchorKitContract {
     /// assert!(initialized);
     /// ```
     pub fn is_initialized(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&symbol_short!("INITED"))
-            .unwrap_or(false)
+        env.storage().persistent().has(&initialized_key(&env))
     }
 
     /// Retrieve the current admin address.
@@ -2049,8 +2046,8 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
-    /// let issuer = Address::random(&env);
+    /// let attestor = Address::generate(&env);
+    /// let issuer = Address::generate(&env);
     /// let token = String::from_str(&env, "eyJ...");
     /// let pubkey = BytesN::from_array(&env, &[0u8; 32]);
     /// AnchorKitContract::register_attestor(env, attestor, token, issuer, pubkey);
@@ -2124,7 +2121,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// AnchorKitContract::revoke_attestor(env, attestor);
     /// ```
     pub fn revoke_attestor(env: Env, attestor: Address) {
@@ -2174,7 +2171,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let is_registered = AnchorKitContract::is_attestor(env, attestor);
     /// ```
     pub fn is_attestor(env: Env, attestor: Address) -> bool {
@@ -2242,7 +2239,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let profile = AnchorKitContract::get_attestor_profile(env, attestor);
     /// println!("Endpoint: {}", profile.endpoint);
     /// ```
@@ -2290,7 +2287,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let endpoint = String::from_str(&env, "https://api.example.com");
     /// AnchorKitContract::set_endpoint(env, attestor, endpoint);
     /// ```
@@ -2333,7 +2330,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let endpoint = AnchorKitContract::get_endpoint(env, attestor);
     /// ```
     pub fn get_endpoint(env: Env, attestor: Address) -> String {
@@ -2377,7 +2374,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let webhook = String::from_str(&env, "https://api.example.com/webhooks");
     /// AnchorKitContract::register_webhook(env, attestor, webhook);
     /// ```
@@ -2423,7 +2420,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let webhook = AnchorKitContract::get_webhook_url(env, attestor);
     /// ```
     pub fn get_webhook_url(env: Env, attestor: Address) -> String {
@@ -2476,7 +2473,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = Vec::from_array(&env, [1u32, 3u32]); // deposits + quotes
     /// AnchorKitContract::configure_services(env, anchor, services);
     /// ```
@@ -2537,7 +2534,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = Vec::from_array(&env, [1u32, 2u32]); // deposits + withdrawals
     /// AnchorKitContract::configure_services_versioned(env, anchor, services, 1);
     /// ```
@@ -2671,7 +2668,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let version = AnchorKitContract::get_service_capability_version(env, anchor);
     /// ```
     pub fn get_service_capability_version(env: Env, anchor: Address) -> u32 {
@@ -2706,7 +2703,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = AnchorKitContract::get_supported_services(env, anchor);
     /// ```
     pub fn get_supported_services(env: Env, anchor: Address) -> AnchorServices {
@@ -2772,7 +2769,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let supports_deposits = AnchorKitContract::supports_service(env, anchor, 1);
     /// ```
     pub fn supports_service(env: Env, anchor: Address, service: u32) -> bool {
