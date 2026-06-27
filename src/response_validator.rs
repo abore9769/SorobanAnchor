@@ -316,6 +316,10 @@ fn crc16_xmodem(input: &[u8]) -> u16 {
 ///
 /// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any string
 /// field is empty.
+fn is_valid_positive_decimal(s: &str) -> bool {
+    s.parse::<f64>().map(|v| v > 0.0).unwrap_or(false)
+}
+
 pub fn validate_sep38_quote_response(
     id: &str,
     expires_at: &str,
@@ -341,6 +345,18 @@ pub fn validate_sep38_quote_response(
     }
     if fee.is_empty() {
         return Err(Error::validation_error("fee is empty"));
+    }
+    if !is_valid_positive_decimal(price) {
+        return Err(Error::validation_error("price must be a positive number"));
+    }
+    if !is_valid_positive_decimal(sell_amount) {
+        return Err(Error::validation_error("sell_amount must be a positive number"));
+    }
+    if !is_valid_positive_decimal(buy_amount) {
+        return Err(Error::validation_error("buy_amount must be a positive number"));
+    }
+    if !is_valid_positive_decimal(fee) {
+        return Err(Error::validation_error("fee must be a positive number"));
     }
 
     Ok(Sep38QuoteResponse {

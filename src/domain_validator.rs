@@ -82,8 +82,8 @@ pub fn validate_anchor_domain(domain: &str) -> Result<(), AnchorKitError> {
         return Err(AnchorKitError::invalid_endpoint_format());
     }
 
-    // Check minimum length for valid HTTPS URL ("https://a.b" = 11 chars)
-    if domain.len() < 10 {
+    // Check minimum length for valid HTTPS URL ("https://a.b" = 12 chars)
+    if domain.len() < 12 {
         return Err(AnchorKitError::invalid_endpoint_format());
     }
 
