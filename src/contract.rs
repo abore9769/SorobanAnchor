@@ -1445,7 +1445,7 @@ impl AnchorKitContract {
         Self::require_admin(&env);
 
         let now = env.ledger().timestamp();
-        let old_version = Self::get_version(env.clone());
+        let old_version = Self::get_version_internal(&env);
 
         let old_hash_key = make_storage_key(&env, &[b"OLDHASH"]);
         let old_wasm_hash: BytesN<32> = env
@@ -2072,12 +2072,12 @@ impl AnchorKitContract {
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);
         
         // Check capacity
-        let config = Self::get_capacity_config(env.clone());
-        let current_count = Self::get_attestor_count(env.clone());
+        let config = Self::get_capacity_config_internal(&env);
+        let current_count = Self::get_attestor_count_internal(&env);
         if current_count >= config.max_attestors {
             panic_with_error!(&env, ErrorCode::AttestorCapacityExceeded);
         }
-        
+
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
         let key = make_storage_key(&env, &[b"ATTESTOR", &raw]);
@@ -2152,7 +2152,7 @@ impl AnchorKitContract {
         env.storage().persistent().remove(&pk_key);
         
         // Decrement count
-        let current_count = Self::get_attestor_count(env.clone());
+        let current_count = Self::get_attestor_count_internal(&env);
         if current_count > 0 {
             env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count - 1));
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
@@ -2259,9 +2259,7 @@ impl AnchorKitContract {
     /// println!("Endpoint: {}", profile.endpoint);
     /// ```
     pub fn get_attestor_profile(env: Env, attestor: Address) -> AttestorProfile {
-        if !Self::is_attestor(env.clone(), attestor.clone()) {
-            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
-        }
+        Self::check_attestor(&env, &attestor);
         Self::load_or_init_profile(&env, &attestor)
     }
 
@@ -2349,12 +2347,10 @@ impl AnchorKitContract {
     /// let endpoint = AnchorKitContract::get_endpoint(env, attestor);
     /// ```
     pub fn get_endpoint(env: Env, attestor: Address) -> String {
-        if !Self::is_attestor(env.clone(), attestor.clone()) {
-            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
-        }
+        Self::check_attestor(&env, &attestor);
         let profile = Self::load_or_init_profile(&env, &attestor);
         if profile.endpoint.len() == 0 {
-            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
+            panic_with_error!(&env, ErrorCode::EndpointNotSet);
         }
         profile.endpoint
     }
@@ -2439,12 +2435,10 @@ impl AnchorKitContract {
     /// let webhook = AnchorKitContract::get_webhook_url(env, attestor);
     /// ```
     pub fn get_webhook_url(env: Env, attestor: Address) -> String {
-        if !Self::is_attestor(env.clone(), attestor.clone()) {
-            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
-        }
+        Self::check_attestor(&env, &attestor);
         let profile = Self::load_or_init_profile(&env, &attestor);
         if profile.webhook_url.len() == 0 {
-            panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
+            panic_with_error!(&env, ErrorCode::WebhookUrlNotSet);
         }
         profile.webhook_url
     }
@@ -2741,7 +2735,7 @@ impl AnchorKitContract {
     ///
     /// Vector of active service type codes.
     pub fn get_active_services(env: Env, anchor: Address) -> Vec<u32> {
-        let record = Self::get_supported_services(env.clone(), anchor);
+        let record = Self::get_supported_services_internal(&env, &anchor);
         let mut active = Vec::new(&env);
         for service in record.services.iter() {
             if !Self::is_service_retired(&record, service) {
@@ -2810,7 +2804,7 @@ impl AnchorKitContract {
     ///
     /// `Option<ServiceRetirementInfo>` with retirement metadata if found.
     pub fn get_service_retirement_info(env: Env, anchor: Address, service: u32) -> Option<ServiceRetirementInfo> {
-        let record = Self::get_supported_services(env, anchor);
+        let record = Self::get_supported_services_internal(&env, &anchor);
         for retirement in record.service_retirements.iter() {
             if retirement.service_code == service {
                 return Some(retirement);
@@ -3000,7 +2994,7 @@ impl AnchorKitContract {
         Self::check_timestamp(&env, timestamp);
 
         if require_kyc {
-            let kyc_status = Self::get_kyc_status(env.clone(), subject.clone());
+            let kyc_status = Self::get_kyc_status_internal(&env, &subject);
             if kyc_status != KycStatus::Approved {
                 match kyc_status {
                     KycStatus::Pending => panic_with_error!(&env, ErrorCode::KycPending),
@@ -4338,15 +4332,15 @@ impl AnchorKitContract {
         
         // Check capacity only if adding a new entry
         if !entry_exists {
-            let config = Self::get_capacity_config(env.clone());
-            let current_count = Self::get_cache_count(env.clone());
+            let config = Self::get_capacity_config_internal(&env);
+            let current_count = Self::get_cache_count_internal(&env);
             if current_count >= config.max_cache_entries {
                 panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
             }
         }
-        
+
         let now = env.ledger().timestamp();
-        let cfg = Self::get_cache_config(env.clone());
+        let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
         let entry = MetadataCache {
             metadata,
@@ -4358,10 +4352,10 @@ impl AnchorKitContract {
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
-        
+
         // Increment count if new entry
         if !entry_exists {
-            let current_count = Self::get_cache_count(env.clone());
+            let current_count = Self::get_cache_count_internal(&env);
             env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         }
@@ -4408,15 +4402,15 @@ impl AnchorKitContract {
         
         // Check capacity only if adding a new entry
         if !entry_exists {
-            let config = Self::get_capacity_config(env.clone());
-            let current_count = Self::get_cache_count(env.clone());
+            let config = Self::get_capacity_config_internal(&env);
+            let current_count = Self::get_cache_count_internal(&env);
             if current_count >= config.max_cache_entries {
                 panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
             }
         }
-        
+
         let now = env.ledger().timestamp();
-        let cfg = Self::get_cache_config(env.clone());
+        let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
         let stale = Self::effective_ttl(stale_ttl_seconds, cfg.swr_ttl_seconds);
         let entry = MetadataCache {
@@ -4430,10 +4424,10 @@ impl AnchorKitContract {
         let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
-        
+
         // Increment count if new entry
         if !entry_exists {
-            let current_count = Self::get_cache_count(env.clone());
+            let current_count = Self::get_cache_count_internal(&env);
             env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         }
@@ -4476,7 +4470,7 @@ impl AnchorKitContract {
     ) {
         Self::require_admin(&env);
         let now = env.ledger().timestamp();
-        let cfg = Self::get_cache_config(env.clone());
+        let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
         let stale = Self::effective_ttl(stale_ttl_seconds, cfg.swr_ttl_seconds);
         let entry = MetadataCache {
@@ -4586,24 +4580,24 @@ impl AnchorKitContract {
         
         // Check capacity only if adding a new entry
         if !entry_exists {
-            let config = Self::get_capacity_config(env.clone());
-            let current_count = Self::get_cache_count(env.clone());
+            let config = Self::get_capacity_config_internal(&env);
+            let current_count = Self::get_cache_count_internal(&env);
             if current_count >= config.max_cache_entries {
                 panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
             }
         }
-        
+
         let now = env.ledger().timestamp();
-        let cfg = Self::get_cache_config(env.clone());
+        let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.capabilities_ttl_seconds);
         let entry = CapabilitiesCache { toml_url, capabilities, cached_at: now, ttl_seconds: ttl };
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
-        
+
         // Increment count if new entry
         if !entry_exists {
-            let current_count = Self::get_cache_count(env.clone());
+            let current_count = Self::get_cache_count_internal(&env);
             env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         }
@@ -5005,7 +4999,7 @@ impl AnchorKitContract {
         let mut candidates: Vec<Quote> = Vec::new(&env);
         for anchor in anchors.iter() {
             // #296: Skip blacklisted anchors
-            if Self::is_anchor_blacklisted(env.clone(), anchor.clone()) {
+            if Self::is_anchor_blacklisted_internal(&env, &anchor) {
                 continue;
             }
 
@@ -5079,7 +5073,7 @@ impl AnchorKitContract {
 
         // Enforce KYC check (#439)
         if options.require_kyc {
-            let kyc_status = Self::get_kyc_status(env.clone(), options.subject.clone());
+            let kyc_status = Self::get_kyc_status_internal(&env, &options.subject);
             if kyc_status != KycStatus::Approved {
                 match kyc_status {
                     KycStatus::Pending      => panic_with_error!(&env, ErrorCode::KycPending),
@@ -5308,7 +5302,7 @@ impl AnchorKitContract {
             validate_asset_info(&env, &asset);
         }
         let now = env.ledger().timestamp();
-        let cfg = Self::get_cache_config(env.clone());
+        let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.capabilities_ttl_seconds);
         let cached = CachedToml {
             toml: toml_data,
@@ -5385,7 +5379,7 @@ impl AnchorKitContract {
     }
 
     pub fn get_anchor_assets(env: Env, anchor: Address) -> Vec<String> {
-        let toml = Self::get_anchor_toml(env.clone(), anchor);
+        let toml = Self::get_anchor_toml_internal(&env, &anchor);
         let mut assets = Vec::new(&env);
         for asset in toml.currencies.iter() {
             assets.push_back(asset.code.clone());
@@ -5398,7 +5392,7 @@ impl AnchorKitContract {
         anchor: Address,
         asset_code: String,
     ) -> AssetInfo {
-        let toml = Self::get_anchor_toml(env.clone(), anchor);
+        let toml = Self::get_anchor_toml_internal(&env, &anchor);
         for asset in toml.currencies.iter() {
             if asset.code == asset_code {
                 return asset;
@@ -5548,6 +5542,24 @@ impl AnchorKitContract {
         Self::advance_transaction_state_internal(&env, transaction_id, TransactionState::Failed, Some(error_message))
     }
 
+    /// Return the full state-transition history for a transaction record.
+    ///
+    /// Each entry is `(state, ledger_timestamp)` in chronological order.
+    /// Panics with [`ErrorCode::AttestationNotFound`] if no record exists for
+    /// `transaction_id`.
+    pub fn get_txn_state_history(
+        env: Env,
+        transaction_id: u64,
+    ) -> soroban_sdk::Vec<(TransactionState, u64)> {
+        let key = (symbol_short!("TXSTATE"), transaction_id);
+        let record: TransactionStateRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound));
+        record.state_history
+    }
+
     fn advance_transaction_state_internal(
         env: &Env,
         transaction_id: u64,
@@ -5604,7 +5616,7 @@ impl AnchorKitContract {
     pub fn set_rate_limit_config(env: Env, max_submissions: u32, window_length: u32) {
         Self::require_admin(&env);
         let config = crate::rate_limiter::RateLimitConfig { max_submissions, window_length };
-        RateLimiter::update_config(&env, &Self::get_admin(env.clone()), &config)
+        RateLimiter::update_config(&env, &Self::get_admin_internal(&env), &config)
             .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
     }
 
@@ -5734,6 +5746,117 @@ impl AnchorKitContract {
         {
             panic_with_error!(env, ErrorCode::AttestorNotRegistered);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Private &Env helpers — avoid env.clone() at internal call sites
+    // ------------------------------------------------------------------
+
+    fn get_version_internal(env: &Env) -> ContractVersion {
+        env.storage()
+            .instance()
+            .get::<_, ContractVersion>(&Self::version_key(env))
+            .unwrap_or(ContractVersion { major: 0, minor: 1, patch: 0, upgraded_at: 0 })
+    }
+
+    fn get_admin_internal(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&admin_key(env))
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::NotInitialized))
+    }
+
+    fn get_capacity_config_internal(env: &Env) -> CapacityConfig {
+        env.storage()
+            .instance()
+            .get::<_, CapacityConfig>(&Self::capacity_config_key(env))
+            .unwrap_or_else(CapacityConfig::default_config)
+    }
+
+    fn get_attestor_count_internal(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&Self::attestor_count_key(env))
+            .unwrap_or(0)
+    }
+
+    fn get_cache_count_internal(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&Self::cache_count_key(env))
+            .unwrap_or(0)
+    }
+
+    fn get_cache_config_internal(env: &Env) -> CacheConfig {
+        env.storage()
+            .instance()
+            .get::<_, CacheConfig>(&Self::cache_config_key(env))
+            .unwrap_or_else(CacheConfig::default_config)
+    }
+
+    fn is_attestor_internal(env: &Env, attestor: &Address) -> bool {
+        let xdr = attestor.clone().to_xdr(env);
+        let raw = xdr_to_vec(&xdr);
+        env.storage()
+            .persistent()
+            .get::<_, bool>(&make_storage_key(env, &[b"ATTESTOR", &raw]))
+            .unwrap_or(false)
+    }
+
+    fn get_supported_services_internal(env: &Env, anchor: &Address) -> AnchorServices {
+        let xdr = anchor.clone().to_xdr(env);
+        let raw = xdr_to_vec(&xdr);
+        env.storage()
+            .persistent()
+            .get::<_, AnchorServices>(&make_storage_key(env, &[b"SERVICES", &raw]))
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::ServicesNotConfigured))
+    }
+
+    fn get_kyc_status_internal(env: &Env, subject: &Address) -> KycStatus {
+        let key = kyc_record_key(env, subject);
+        if !env.storage().persistent().has(&key) {
+            return KycStatus::NotSubmitted;
+        }
+        let record: KycRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::KycNotFound));
+        if let Some(expiry) = record.expiry {
+            if env.ledger().timestamp() > expiry {
+                return KycStatus::Expired;
+            }
+        }
+        match record.status {
+            0 => KycStatus::NotSubmitted,
+            1 => KycStatus::Pending,
+            2 => KycStatus::Approved,
+            3 => KycStatus::Rejected,
+            4 => KycStatus::Expired,
+            _ => KycStatus::NotSubmitted,
+        }
+    }
+
+    fn is_anchor_blacklisted_internal(env: &Env, anchor: &Address) -> bool {
+        let key = anchor_blacklist_key(env, anchor);
+        env.storage()
+            .persistent()
+            .get::<_, AnchorBlacklistEntry>(&key)
+            .is_some()
+    }
+
+    fn get_anchor_toml_internal(env: &Env, anchor: &Address) -> StellarToml {
+        let key = (symbol_short!("TOMLCACHE"), anchor.clone());
+        let cached: CachedToml = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::CacheNotFound));
+        let now = env.ledger().timestamp();
+        if cached.cached_at + cached.ttl_seconds <= now {
+            panic_with_error!(env, ErrorCode::CacheExpired);
+        }
+        cached.toml
     }
 
     fn soroban_string_to_rust_string(env: &Env, value: &String) -> RustString {
@@ -5948,7 +6071,7 @@ impl AnchorKitContract {
     /// and per-service availability. Does not mutate any contract state.
     pub fn get_anchor_readiness(env: Env, anchor: Address) -> AnchorReadinessReport {
         let now = env.ledger().timestamp();
-        let is_registered = Self::is_attestor(env.clone(), anchor.clone());
+        let is_registered = Self::is_attestor_internal(&env, &anchor);
 
         let xdr = anchor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);

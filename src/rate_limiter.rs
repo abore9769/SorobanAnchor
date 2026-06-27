@@ -632,6 +632,123 @@ mod tests {
     /// If the stored window_start_ledger is somehow *ahead* of the current ledger
     /// (sequence anomaly), the window must be treated as NOT expired so that the
     /// existing submission count is preserved and the rate-limit cannot be bypassed.
+    /// count == max_submissions is the exact rejection threshold: max-1 succeeds,
+    /// max is rejected.  Isolates the off-by-one boundary in the >= check.
+    #[test]
+    fn test_at_limit_exact_last_allowed_then_rejected() {
+        let env = Env::default();
+        let attestor = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 3, window_length: 100 };
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        // Submissions 1 through max_submissions-1 must all succeed.
+        for _ in 0..2 {
+            assert!(env.as_contract(&contract_id, &|| {
+                RateLimiter::check_and_increment(&env, &attestor, &config)
+            }).is_ok());
+        }
+
+        // The max_submissions-th call is the LAST allowed — must succeed.
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_ok(), "submission at count == max_submissions-1 must succeed");
+
+        // Now count == max_submissions; the next call must be rejected.
+        let result = env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        });
+        assert!(result.is_err(), "submission at count == max_submissions must be rejected");
+        assert_eq!(result.unwrap_err().code, ErrorCode::RateLimitExceeded);
+
+        // State must be capped — no overflow past max.
+        let state = env.as_contract(&contract_id, &|| RateLimiter::get_state(&env, &attestor));
+        assert_eq!(state.submission_count, 3, "count must not exceed max_submissions");
+    }
+
+    /// Every call after the limit (count > max_submissions) must still return
+    /// RateLimitExceeded and must not mutate the stored count.
+    #[test]
+    fn test_one_over_limit_state_stays_capped() {
+        let env = Env::default();
+        let attestor = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 2, window_length: 100 };
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        // Fill the window.
+        env.as_contract(&contract_id, &|| { RateLimiter::check_and_increment(&env, &attestor, &config).unwrap(); });
+        env.as_contract(&contract_id, &|| { RateLimiter::check_and_increment(&env, &attestor, &config).unwrap(); });
+
+        // count == max: first rejection (one-over).
+        let err1 = env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).unwrap_err();
+        assert_eq!(err1.code, ErrorCode::RateLimitExceeded);
+
+        // count still == max: second rejection (two-over) — state must not have changed.
+        let err2 = env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).unwrap_err();
+        assert_eq!(err2.code, ErrorCode::RateLimitExceeded);
+
+        let state = env.as_contract(&contract_id, &|| RateLimiter::get_state(&env, &attestor));
+        assert_eq!(state.submission_count, 2, "count must remain at max after over-limit calls");
+    }
+
+    /// A submission at ledger window_start + window_length - 1 (one before expiry)
+    /// must still be rejected, while one at window_start + window_length is in the
+    /// new window and must succeed.  Pins the exact >=/> boundary in is_window_expired.
+    #[test]
+    fn test_window_one_before_expiry_still_restricted() {
+        let env = Env::default();
+        let attestor = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 1, window_length: 10 };
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+
+        // Consume the sole slot at ledger 0.
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_ok());
+
+        // Advance to one ledger BEFORE the window expires (delta = window_length - 1 = 9).
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            sequence_number: 9,
+            timestamp: 900,
+            protocol_version: 21,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        // delta = 9 < window_length = 10 → still in old window → must be rejected.
+        let result = env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        });
+        assert!(result.is_err(), "submission at window_start + window_length - 1 must be rejected");
+        assert_eq!(result.unwrap_err().code, ErrorCode::RateLimitExceeded);
+
+        // Advance to exactly window_start + window_length (delta = 10 = window_length → expired).
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            sequence_number: 10,
+            timestamp: 1000,
+            protocol_version: 21,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6312000,
+        });
+
+        // New window → must succeed.
+        assert!(env.as_contract(&contract_id, &|| {
+            RateLimiter::check_and_increment(&env, &attestor, &config)
+        }).is_ok(), "submission at window_start + window_length must start a new window");
+    }
+
     #[test]
     fn test_window_not_expired_when_current_less_than_start() {
         // current < window_start → checked_sub underflows → None → false
