@@ -3297,6 +3297,11 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+        
+        // Store the actual quote
+        Self::submit_quote(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at);
+        
+        // Then store the span
         Self::store_span(
             &env, &request_id,
             String::from_str(&env, "submit_quote"),
@@ -3321,7 +3326,6 @@ impl AnchorKitContract {
     ///
     /// * `routing_reason` – Optional routing reason to attach to the span.
     ///   When `None` the behaviour is identical to [`quote_with_request_id`].
-    #[allow(unused_variables)]
     pub fn quote_with_request_id_and_reason(
         env: Env,
         request_id: RequestId,
@@ -3347,6 +3351,9 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+
+        // Store the actual quote
+        Self::submit_quote_with_reason(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at, routing_reason.clone());
 
         // Choose the operation label based on whether a reason was supplied so
         // the span is self-describing in audit queries.
