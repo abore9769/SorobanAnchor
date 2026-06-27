@@ -4537,17 +4537,16 @@ impl AnchorKitContract {
         entry.metadata
     }
 
-    pub fn refresh_metadata_cache(env: Env, anchor: Address) {
+    pub fn refresh_metadata_cache(env: Env, anchor: Address, new_metadata: AnchorMetadata, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("METACACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_metadata(env.clone(), anchor.clone(), new_metadata, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "metadata"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement metadata was available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "metadata cache refreshed successfully"),
         );
     }
 
@@ -4779,17 +4778,16 @@ impl AnchorKitContract {
         entry
     }
 
-    pub fn refresh_capabilities_cache(env: Env, anchor: Address) {
+    pub fn refresh_capabilities_cache(env: Env, anchor: Address, toml_url: String, capabilities: String, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("CAPCACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_capabilities(env.clone(), anchor.clone(), toml_url, capabilities, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "capabilities"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement capabilities were available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "capabilities cache refreshed successfully"),
         );
     }
 
