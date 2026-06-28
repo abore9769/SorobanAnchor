@@ -165,7 +165,7 @@ pub fn parse_stellar_toml(raw: &str) -> Result<ParsedStellarToml, AnchorKitError
         // Section header, e.g. `[[CURRENCIES]]`, `[DOCUMENTATION]`.
         if line.starts_with('[') {
             // Flush any in-progress currency before switching tables.
-            flush_currency(&mut current, &mut currencies);
+            flush_currency(&mut current, &mut currencies)?;
             let header = line.trim_matches(|c| c == '[' || c == ']').trim();
             if header.eq_ignore_ascii_case("CURRENCIES") {
                 section = Section::Currencies;
@@ -230,7 +230,7 @@ pub fn parse_stellar_toml(raw: &str) -> Result<ParsedStellarToml, AnchorKitError
         }
     }
     // Flush the final currency block, if any.
-    flush_currency(&mut current, &mut currencies);
+    flush_currency(&mut current, &mut currencies)?;
 
     // Derive the de-duplicated code list for backwards compatibility.
     let mut supported_assets: Vec<String> = Vec::new();
@@ -255,13 +255,21 @@ pub fn parse_stellar_toml(raw: &str) -> Result<ParsedStellarToml, AnchorKitError
 }
 
 /// Push `current` into `currencies` if it carries a non-empty asset code,
-/// leaving `current` as `None`. Currency blocks without a `code` are dropped.
-fn flush_currency(current: &mut Option<ParsedCurrency>, currencies: &mut Vec<ParsedCurrency>) {
+/// leaving `current` as `None`. Returns `Err` if a currency block is missing its `code` field.
+fn flush_currency(
+    current: &mut Option<ParsedCurrency>,
+    currencies: &mut Vec<ParsedCurrency>,
+) -> Result<(), AnchorKitError> {
     if let Some(c) = current.take() {
         if !c.code.is_empty() {
             currencies.push(c);
+        } else {
+            return Err(AnchorKitError::validation_error(
+                "CURRENCIES block missing code field",
+            ));
         }
     }
+    Ok(())
 }
 
 /// Extract (key, value) from a line of the form `KEY = "value"` or `KEY = value`.
