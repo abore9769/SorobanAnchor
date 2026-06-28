@@ -3353,6 +3353,11 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+        
+        // Store the actual quote
+        Self::submit_quote(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at);
+        
+        // Then store the span
         Self::store_span(
             &env, &request_id,
             String::from_str(&env, "submit_quote"),
@@ -3377,7 +3382,6 @@ impl AnchorKitContract {
     ///
     /// * `routing_reason` – Optional routing reason to attach to the span.
     ///   When `None` the behaviour is identical to [`quote_with_request_id`].
-    #[allow(unused_variables)]
     pub fn quote_with_request_id_and_reason(
         env: Env,
         request_id: RequestId,
@@ -3403,6 +3407,9 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+
+        // Store the actual quote
+        Self::submit_quote_with_reason(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at, routing_reason.clone());
 
         // Choose the operation label based on whether a reason was supplied so
         // the span is self-describing in audit queries.
@@ -4565,11 +4572,12 @@ impl AnchorKitContract {
         let now = env.ledger().timestamp();
         let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
+        let stale = cfg.swr_ttl_seconds;
         let entry = MetadataCache {
             metadata,
             cached_at: now,
             ttl_seconds: ttl,
-            stale_ttl_seconds: 0,
+            stale_ttl_seconds: stale,
             needs_refresh: false,
         };
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
@@ -4595,17 +4603,16 @@ impl AnchorKitContract {
         entry.metadata
     }
 
-    pub fn refresh_metadata_cache(env: Env, anchor: Address) {
+    pub fn refresh_metadata_cache(env: Env, anchor: Address, new_metadata: AnchorMetadata, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("METACACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_metadata(env.clone(), anchor.clone(), new_metadata, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "metadata"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement metadata was available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "metadata cache refreshed successfully"),
         );
     }
 
@@ -4837,17 +4844,16 @@ impl AnchorKitContract {
         entry
     }
 
-    pub fn refresh_capabilities_cache(env: Env, anchor: Address) {
+    pub fn refresh_capabilities_cache(env: Env, anchor: Address, toml_url: String, capabilities: String, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("CAPCACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_capabilities(env.clone(), anchor.clone(), toml_url, capabilities, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "capabilities"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement capabilities were available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "capabilities cache refreshed successfully"),
         );
     }
 
@@ -5882,7 +5888,8 @@ impl AnchorKitContract {
             session.session_ttl_seconds
         };
         let now = env.ledger().timestamp();
-        if now > session.created_at + ttl {
+        let expiry = session.created_at.saturating_add(ttl);
+        if now > expiry {
             panic_with_error!(env, ErrorCode::SessionExpired);
         }
         if session.closed {
