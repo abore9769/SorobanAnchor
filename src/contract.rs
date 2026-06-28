@@ -1151,6 +1151,10 @@ fn anchor_blacklist_key(env: &Env, anchor: &Address) -> BytesN<32> {
     make_storage_key(env, &[b"BLACKLIST", &raw])
 }
 
+fn blacklist_index_key(env: &Env) -> BytesN<32> {
+    make_storage_key(env, &[b"BLKIDX"])
+}
+
 fn anchor_cluster_key(env: &Env, cluster_id: &String) -> BytesN<32> {
     let xdr = cluster_id.clone().to_xdr(env);
     let raw = xdr_to_vec(&xdr);
@@ -1985,10 +1989,12 @@ impl AnchorKitContract {
         if new_public_key.len() != 32 {
             panic_with_error!(&env, ErrorCode::ValidationError);
         }
-        let storage_key = (symbol_short!("SEP10KEY"), issuer.clone());
+        let xdr = issuer.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
+        let storage_key = make_storage_key(&env, &[b"SEP10KEY", &raw]);
         // Preserve old key for graceful drain
         if let Some(old_key) = env.storage().persistent().get::<_, Bytes>(&storage_key) {
-            let old_key_storage = (symbol_short!("SEP10OLD"), issuer.clone());
+            let old_key_storage = make_storage_key(&env, &[b"SEP10OLD", &raw]);
             env.storage().persistent().set(&old_key_storage, &old_key);
             env.storage()
                 .persistent()
@@ -2006,9 +2012,11 @@ impl AnchorKitContract {
 
     /// Return the current SEP-10 verifying key for `issuer`, or `None` if not set.
     pub fn get_sep10_key(env: Env, issuer: Address) -> Option<Bytes> {
+        let xdr = issuer.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
         env.storage()
             .persistent()
-            .get(&(symbol_short!("SEP10KEY"), issuer))
+            .get(&make_storage_key(&env, &[b"SEP10KEY", &raw]))
     }
 
     /// Configure the maximum JWT length accepted by `verify_sep10_jwt` (issue #64).
@@ -3173,7 +3181,7 @@ impl AnchorKitContract {
             payload_hash.clone(),
             signature,
         );
-        env.storage().persistent().set(&used_key, &timestamp);
+        env.storage().persistent().set(&used_key, &id);
         env.storage()
             .persistent()
             .extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
@@ -3246,7 +3254,7 @@ impl AnchorKitContract {
             payload_hash.clone(),
             signature,
         );
-        env.storage().persistent().set(&used_key, &timestamp);
+        env.storage().persistent().set(&used_key, &id);
         env.storage()
             .persistent()
             .extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
@@ -3307,7 +3315,7 @@ impl AnchorKitContract {
             payload_hash.clone(), signature,
         );
 
-        env.storage().persistent().set(&used_key, &timestamp);
+        env.storage().persistent().set(&used_key, &id);
         env.storage().persistent().extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
         let now = env.ledger().timestamp();
@@ -4225,7 +4233,7 @@ impl AnchorKitContract {
             payload_hash.clone(), signature,
         );
 
-        env.storage().persistent().set(&used_key, &timestamp);
+        env.storage().persistent().set(&used_key, &id);
         env.storage().persistent().extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
         // Increment session nonce
@@ -5076,6 +5084,21 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        let idx_key = blacklist_index_key(&env);
+        let mut index: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !index.contains(&anchor) {
+            index.push_back(anchor.clone());
+        }
+        env.storage().persistent().set(&idx_key, &index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
         AdminAuditLog::log_action(
             &env,
             &Self::get_admin_internal(&env),
@@ -5104,6 +5127,24 @@ impl AnchorKitContract {
         Self::require_admin(&env);
         let key = anchor_blacklist_key(&env, &anchor);
         env.storage().persistent().remove(&key);
+
+        let idx_key = blacklist_index_key(&env);
+        let index: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_index: Vec<Address> = Vec::new(&env);
+        for entry in index.iter() {
+            if entry != anchor {
+                new_index.push_back(entry);
+            }
+        }
+        env.storage().persistent().set(&idx_key, &new_index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
         AdminAuditLog::log_action(
             &env,
             &Self::get_admin_internal(&env),
@@ -5134,6 +5175,15 @@ impl AnchorKitContract {
             .persistent()
             .get::<_, AnchorBlacklistEntry>(&key)
             .is_some()
+    }
+
+    /// Return the list of all currently blacklisted anchor addresses.
+    pub fn get_blacklisted_anchors(env: Env) -> Vec<Address> {
+        let idx_key = blacklist_index_key(&env);
+        env.storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // -----------------------------------------------------------------------
@@ -5223,6 +5273,74 @@ impl AnchorKitContract {
             .persistent()
             .get(&list_key)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Delete an anchor cluster by ID.
+    ///
+    /// Removes the cluster record from persistent storage and removes its ID
+    /// from the cluster list. Panics with `ValidationError` if the cluster
+    /// does not exist.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin privileges.
+    pub fn delete_anchor_cluster(env: Env, cluster_id: String) {
+        Self::require_admin(&env);
+        let key = anchor_cluster_key(&env, &cluster_id);
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+        env.storage().persistent().remove(&key);
+
+        let list_key = anchor_cluster_list_key(&env);
+        let cluster_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_ids: Vec<String> = Vec::new(&env);
+        for id in cluster_ids.iter() {
+            if id != cluster_id {
+                new_ids.push_back(id);
+            }
+        }
+        env.storage().persistent().set(&list_key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&list_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("cluster"), symbol_short!("deleted")),
+            cluster_id,
+        );
+    }
+
+    /// Replace the anchors list of an existing cluster.
+    ///
+    /// Updates the `anchors` field of the identified cluster in place.
+    /// Panics with `ValidationError` if the cluster does not exist.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin privileges.
+    pub fn update_anchor_cluster_anchors(env: Env, cluster_id: String, anchors: Vec<Address>) {
+        Self::require_admin(&env);
+        let key = anchor_cluster_key(&env, &cluster_id);
+        let mut cluster: AnchorCluster = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ValidationError));
+        cluster.anchors = anchors;
+        env.storage().persistent().set(&key, &cluster);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("cluster"), symbol_short!("updated")),
+            cluster_id,
+        );
     }
 
     pub fn route_transaction(env: Env, options: RoutingOptions) -> Quote {
