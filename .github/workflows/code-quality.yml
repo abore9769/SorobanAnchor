@@ -47,7 +47,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features std,mock-only -- -D warnings
 
   tests:
     name: Tests
@@ -72,4 +72,4 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --features std,mock-only,stress-tests

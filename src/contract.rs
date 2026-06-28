@@ -1,6 +1,6 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    xdr::ToXdr, Bytes, BytesN, Env, String, Symbol, Vec, IntoVal,
+    xdr::ToXdr, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 extern crate alloc;
 use alloc::string::String as RustString;
@@ -11,8 +11,7 @@ use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
 use crate::sep10_jwt;
 use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
-use crate::replay_detection;
-use crate::replay_detection::ReplayMetrics;
+use crate::replay_detection::{self, ReplayMetrics};
 use crate::admin_audit_log::AdminAuditLog;
 use crate::service_management::ServiceManager;
 
@@ -1081,6 +1080,10 @@ fn admin_key(env: &Env) -> BytesN<32> {
     make_storage_key(env, &[b"ADMIN"])
 }
 
+fn pending_admin_key(env: &Env) -> BytesN<32> {
+    make_storage_key(env, &[b"PENDADMIN"])
+}
+
 fn initialized_key(env: &Env) -> BytesN<32> {
     make_storage_key(env, &[b"INITIALIZED"])
 }
@@ -1317,6 +1320,46 @@ impl AnchorKitContract {
             .instance()
             .get::<_, Address>(&admin_key(&env))
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized))
+    }
+
+    /// Begin a two-step admin transfer by recording `new_admin` as the pending
+    /// admin. The transfer is not final until `new_admin` calls
+    /// [`accept_admin_transfer`](Self::accept_admin_transfer).
+    ///
+    /// Only the current admin may call this. Overwrites any previously pending
+    /// transfer without confirmation.
+    pub fn propose_admin_transfer(env: Env, new_admin: Address) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&pending_admin_key(&env), &new_admin);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("proposed")),
+            new_admin,
+        );
+    }
+
+    /// Complete a pending admin transfer. Must be called by the address that
+    /// was nominated via [`propose_admin_transfer`](Self::propose_admin_transfer).
+    ///
+    /// After this call the caller becomes the new admin and the pending-admin
+    /// slot is cleared.
+    ///
+    /// Panics with [`ErrorCode::NotInitialized`] when no transfer has been
+    /// proposed.
+    pub fn accept_admin_transfer(env: Env) {
+        let new_admin: Address = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&pending_admin_key(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
+        new_admin.require_auth();
+        env.storage().instance().set(&admin_key(&env), &new_admin);
+        env.storage().instance().remove(&pending_admin_key(&env));
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("accepted")),
+            new_admin,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1838,17 +1881,29 @@ impl AnchorKitContract {
     // Request ID generation
     // -----------------------------------------------------------------------
 
-    /// Generate a deterministic request ID: sha256(timestamp_u64_be || sequence_number_u32_be)[:16]
+    /// Generate a unique request ID: sha256(timestamp_u64_be || sequence_u32_be || counter_u64_be)[:16]
+    ///
+    /// A contract-level counter is included so that two calls within the same
+    /// ledger (same timestamp and sequence) always produce distinct IDs.
     pub fn generate_request_id(env: Env) -> RequestId {
         let ts = env.ledger().timestamp();
         let seq = env.ledger().sequence() as u32;
 
-        // Build input: 8-byte timestamp || 4-byte sequence number (big-endian)
+        // Increment a per-contract call counter to disambiguate same-ledger calls.
+        let counter_key = make_storage_key(&env, &[b"REQIDCNT"]);
+        let counter: u64 = env.storage().instance().get(&counter_key).unwrap_or(0u64);
+        env.storage().instance().set(&counter_key, &(counter + 1));
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+
+        // Build input: 8-byte timestamp || 4-byte sequence || 8-byte counter (big-endian)
         let mut input = Bytes::new(&env);
         for b in ts.to_be_bytes().iter() {
             input.push_back(*b);
         }
         for b in seq.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+        for b in counter.to_be_bytes().iter() {
             input.push_back(*b);
         }
 
@@ -3298,6 +3353,11 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+        
+        // Store the actual quote
+        Self::submit_quote(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at);
+        
+        // Then store the span
         Self::store_span(
             &env, &request_id,
             String::from_str(&env, "submit_quote"),
@@ -3322,7 +3382,6 @@ impl AnchorKitContract {
     ///
     /// * `routing_reason` – Optional routing reason to attach to the span.
     ///   When `None` the behaviour is identical to [`quote_with_request_id`].
-    #[allow(unused_variables)]
     pub fn quote_with_request_id_and_reason(
         env: Env,
         request_id: RequestId,
@@ -3348,6 +3407,9 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
         }
         let now = env.ledger().timestamp();
+
+        // Store the actual quote
+        Self::submit_quote_with_reason(env.clone(), anchor.clone(), from_asset, to_asset, amount, fee_bps, min_amount, max_amount, expires_at, routing_reason.clone());
 
         // Choose the operation label based on whether a reason was supplied so
         // the span is self-describing in audit queries.
@@ -3411,7 +3473,9 @@ impl AnchorKitContract {
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ValidationError));
 
         let span_index = ctx.next_span_index;
-        ctx.next_span_index += 1;
+        ctx.next_span_index = ctx.next_span_index
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::SessionOperationLimitExceeded));
 
         let now = env.ledger().timestamp();
         env.storage().temporary().set(&ctx_key, &ctx);
@@ -4508,11 +4572,12 @@ impl AnchorKitContract {
         let now = env.ledger().timestamp();
         let cfg = Self::get_cache_config_internal(&env);
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
+        let stale = cfg.swr_ttl_seconds;
         let entry = MetadataCache {
             metadata,
             cached_at: now,
             ttl_seconds: ttl,
-            stale_ttl_seconds: 0,
+            stale_ttl_seconds: stale,
             needs_refresh: false,
         };
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
@@ -4538,17 +4603,16 @@ impl AnchorKitContract {
         entry.metadata
     }
 
-    pub fn refresh_metadata_cache(env: Env, anchor: Address) {
+    pub fn refresh_metadata_cache(env: Env, anchor: Address, new_metadata: AnchorMetadata, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("METACACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_metadata(env.clone(), anchor.clone(), new_metadata, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "metadata"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement metadata was available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "metadata cache refreshed successfully"),
         );
     }
 
@@ -4780,17 +4844,16 @@ impl AnchorKitContract {
         entry
     }
 
-    pub fn refresh_capabilities_cache(env: Env, anchor: Address) {
+    pub fn refresh_capabilities_cache(env: Env, anchor: Address, toml_url: String, capabilities: String, ttl_seconds: u64) {
         Self::require_admin(&env);
-        let key = (symbol_short!("CAPCACHE"), anchor.clone());
-        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::cache_capabilities(env.clone(), anchor.clone(), toml_url, capabilities, ttl_seconds);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "capabilities"),
-            RefreshStatus::Failed,
-            had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement capabilities were available"),
+            RefreshStatus::Success,
+            true,
+            String::from_str(&env, "capabilities cache refreshed successfully"),
         );
     }
 
@@ -5148,7 +5211,7 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::CacheNotFound))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ValidationError))
     }
 
     /// List all anchor clusters.
@@ -5825,7 +5888,8 @@ impl AnchorKitContract {
             session.session_ttl_seconds
         };
         let now = env.ledger().timestamp();
-        if now > session.created_at + ttl {
+        let expiry = session.created_at.saturating_add(ttl);
+        if now > expiry {
             panic_with_error!(env, ErrorCode::SessionExpired);
         }
         if session.closed {
@@ -6771,6 +6835,14 @@ impl AnchorKitContract {
 
     /// Return an aggregated health snapshot for the contract's key subsystems.
     /// Does not modify any contract state.
+    ///
+    /// Key consistency (issue #489):
+    ///   - COUNTER: written by `next_attestation_id` as `vec![env, symbol_short!("COUNTER")]`
+    ///              and read here with the identical key — consistent.
+    ///   - QCNT:    written by `submit_quote` via `make_storage_key(&env, &[b"QCNT"])`
+    ///              and read here with the identical call — consistent.
+    ///   - SCNT:    written by `create_session` via `make_storage_key(&env, &[b"SCNT"])`
+    ///              and read here with the identical call — consistent.
     pub fn get_contract_diagnostics(env: Env) -> ContractDiagnostics {
         let now = env.ledger().timestamp();
         let is_initialized = env.storage().persistent().has(&initialized_key(&env));

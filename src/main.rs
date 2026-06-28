@@ -588,6 +588,9 @@ enum Commands {
         #[arg(long)] credential_name: Option<String>,
         #[arg(long)] issuer: String,
         #[arg(long)] session_id: Option<u64>,
+        /// Ed25519 secret key (Stellar 'S...' format) used to sign the payload.
+        /// If omitted, the transaction source key (--secret-key / --keypair-file) is used.
+        #[arg(long)] signing_key: Option<String>,
     },
     /// Get the best quote for a currency pair
     Quote {
@@ -1028,6 +1031,37 @@ fn derive_ed25519_public_key_hex(source: &str) -> String {
     signing_key.verifying_key().as_bytes().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Decode a lowercase hex string to bytes, returning an error on invalid input.
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err("odd-length hex string".to_string());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
+/// Produce a hex-encoded Ed25519 signature over `payload_hash` using `secret_key_str`.
+///
+/// `payload_hash` is decoded from hex if it is a valid even-length hex string;
+/// otherwise its UTF-8 bytes are signed directly.
+fn compute_ed25519_signature_hex(secret_key_str: &str, payload_hash: &str) -> String {
+    use stellar_strkey::Strkey;
+    use ed25519_dalek::Signer;
+    let strkey = Strkey::from_string(secret_key_str)
+        .unwrap_or_else(|e| { eprintln!("error: invalid signing key: {e}"); std::process::exit(1); });
+    let seed = match strkey {
+        Strkey::PrivateKeyEd25519(k) => k.0,
+        _ => { eprintln!("error: signing key must be an Ed25519 secret key (starts with 'S')"); std::process::exit(1); }
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let payload_bytes = decode_hex(payload_hash)
+        .unwrap_or_else(|_| payload_hash.as_bytes().to_vec());
+    let signature = signing_key.sign(&payload_bytes);
+    signature.to_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 fn register(
     address: &str, services: &[String], contract_id: &str,
     network: &str, source: &SecretKey, sep10_token: &str, sep10_issuer: &str,
@@ -1056,15 +1090,18 @@ fn register(
 fn attest(
     subject: &str, payload_hash: &str, contract_id: &str,
     network: &str, source: &SecretKey, issuer: &str, session_id: Option<u64>,
+    signing_key: Option<&str>,
 ) {
     let subject = normalize_stellar_public_address("subject address", subject);
     let issuer = normalize_stellar_public_address("issuer address", issuer);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
-    // NOTE: `--signature` should be a real Ed25519 signature over the payload.
-    // The placeholder below reuses `payload_hash` only for local/test use.
-    // Production callers must supply a proper signature via a dedicated flag.
+    // Use the dedicated signing key when provided; fall back to the transaction source key,
+    // which is the same key registered via `anchorkit register --public-key`.
+    let key_str = signing_key.unwrap_or_else(|| source.expose());
+    let signature = compute_ed25519_signature_hex(key_str, payload_hash);
+
     let session_str;
     let result = if let Some(sid) = session_id {
         session_str = sid.to_string();
@@ -1074,7 +1111,7 @@ fn attest(
             "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
-            "--signature", payload_hash,  // placeholder — replace with real sig
+            "--signature", &signature,
         ])
     } else {
         stellar_invoke(contract_id, source, network, &[
@@ -1082,7 +1119,7 @@ fn attest(
             "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
-            "--signature", payload_hash,  // placeholder — replace with real sig
+            "--signature", &signature,
         ])
     };
     println!("Attestation ID: {result}");
@@ -1869,13 +1906,13 @@ fn main() {
             );
             register(&address, &services, &cid, &net, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
+        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id, signing_key } => {
             let cid = require_contract_id(global_contract_id, contract_id, "attest");
             let source = resolve_source(
                 ephemeral_token.as_deref(), secret_key.as_deref(), keypair_file.as_deref(),
                 credential_name.as_deref(), no_interactive,
             );
-            attest(&subject, &payload_hash, &cid, &cmd_net, &source, &issuer, session_id);
+            attest(&subject, &payload_hash, &cid, &cmd_net, &source, &issuer, session_id, signing_key.as_deref());
         }
         Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
             let cid = require_contract_id(global_contract_id, contract_id, "quote");
