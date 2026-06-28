@@ -992,6 +992,14 @@ struct KycStatusChangedEvent {
     timestamp: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+struct KycEvent {
+    subject: Address,
+    submitted_at: u64,
+    data_hash: Bytes,
+}
+
 // ---------------------------------------------------------------------------
 // Contract upgrade types (#200)
 // Provides admin-controlled WASM upgrade with version tracking and audit events.
@@ -3699,12 +3707,18 @@ impl AnchorKitContract {
         env.storage().persistent().set(&data_key, &data_hash);
         env.storage().persistent().extend_ttl(&data_key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
-            (symbol_short!("kyc"), symbol_short!("submitted"), subject),
-            WebhookEvent {
-                event_type: String::from_str(&env, "kyc_submitted"),
-                transaction_id: 0, timestamp: now, payload_hash: data_hash,
+            (symbol_short!("kyc"), symbol_short!("submitted"), subject.clone()),
+            KycEvent {
+                subject: subject.clone(),
+                submitted_at: now,
+                data_hash,
             },
         );
+    }
+
+    pub fn get_kyc_data_hash(env: Env, subject: Address) -> Option<Bytes> {
+        let data_key = make_storage_key(&env, &[b"KYCDATA", &xdr_to_vec(&subject.clone().to_xdr(&env))]);
+        env.storage().persistent().get(&data_key)
     }
 
     /// Approve a pending KYC record.
@@ -5373,9 +5387,9 @@ impl AnchorKitContract {
         } else if strategy_sym == Symbol::new(&env, "WeightedScore") {
             // Issues #469, #470: use actual weights from options and properly scale fee to basis points
             // Normalize scores similar to route_anchors
-            let mut max_fee: u32 = 1;
-            let mut max_settlement: u64 = 1;
-            let mut max_reputation: u32 = 1;
+            let mut max_fee: u32 = 0;
+            let mut max_settlement: u64 = 0;
+            let mut max_reputation: u32 = 0;
             
             for q in candidates.iter() {
                 if q.fee_percentage > max_fee { max_fee = q.fee_percentage; }
@@ -5400,9 +5414,9 @@ impl AnchorKitContract {
                     average_settlement_time: u64::MAX,
                     total_volume: 0,
                 });
-                let fee_score = 1.0_f32 - (q.fee_percentage as f32 / max_fee as f32);
-                let speed_score = 1.0_f32 - (meta.average_settlement_time as f32 / max_settlement as f32);
-                let rep_score = meta.reputation_score as f32 / max_reputation as f32;
+                let fee_score = if max_fee == 0 { 1.0_f32 } else { 1.0_f32 - (q.fee_percentage as f32 / max_fee as f32) };
+                let speed_score = if max_settlement == 0 { 1.0_f32 } else { 1.0_f32 - (meta.average_settlement_time as f32 / max_settlement as f32) };
+                let rep_score = if max_reputation == 0 { 0.0_f32 } else { meta.reputation_score as f32 / max_reputation as f32 };
                 fw * fee_score + sw * speed_score + rw * rep_score
             };
             
@@ -5466,9 +5480,9 @@ impl AnchorKitContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         // First pass: find max values for normalisation
-        let mut max_fee: u32 = 1;
-        let mut max_settlement: u64 = 1;
-        let mut max_reputation: u32 = 1;
+        let mut max_fee: u32 = 0;
+        let mut max_settlement: u64 = 0;
+        let mut max_reputation: u32 = 0;
 
         for anchor in anchors.iter() {
             let meta: RoutingAnchorMeta = match anchor_meta_opt(&env, &anchor) {
@@ -5523,7 +5537,7 @@ impl AnchorKitContract {
                 max_settlement,
                 max_reputation,
             );
-            scored.push(((score * 1_000_000.0_f32) as u32, quote));
+            scored.push(((score.clamp(0.0, 1.0) * 1_000_000.0_f32) as u32, quote));
         }
 
         // Sort descending by score
