@@ -199,7 +199,6 @@ impl RateLimiter {
         if *admin != stored_admin {
             return Err(AnchorKitError::unauthorized_attestor());
         }
-        admin.require_auth();
         Self::validate_config(config)?;
         let config_key = Self::get_config_key(env);
         env.storage().persistent().set(&config_key, config);

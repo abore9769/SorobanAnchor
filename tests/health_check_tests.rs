@@ -17,10 +17,11 @@ use anchorkit::{RateLimiter, RateLimitConfig};
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn setup_env(env: &Env) -> AnchorKitContractClient<'_> {
+fn setup_env(env: &Env) -> (AnchorKitContractClient<'_>, Address) {
     env.mock_all_auths();
     let contract_id = env.register_contract(None, AnchorKitContract);
-    AnchorKitContractClient::new(env, &contract_id)
+    let client = AnchorKitContractClient::new(env, &contract_id);
+    (client, contract_id)
 }
 
 fn init_contract(env: &Env, client: &AnchorKitContractClient) -> Address {

@@ -28,49 +28,54 @@ pub struct HashTestVector {
     pub expected_hash: &'static str,
 }
 
+/// Fixed Stellar G-address used as the deterministic subject for all hash vectors.
+/// Using a fixed address ensures the expected_hash values are reproducible across runs.
+pub const FIXED_SUBJECT_STRKEY: &str =
+    "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
 /// Test vector with minimal data payload
 pub const VECTOR_1: HashTestVector = HashTestVector {
     name: "minimal_payload",
-    subject_xdr_hex: "0000000000000000000000000000000000000000000000000000000000000000",
+    subject_xdr_hex: FIXED_SUBJECT_STRKEY,
     timestamp: 1_700_000_000u64,
     data_payload: b"kyc_approved",
-    expected_hash: "a7f3c8e9d2b1f4a6c5e8d1b3a9f2c4e6b8d1a3c5e7f9b2d4a6c8e0f1a3b5d7",
+    expected_hash: "9a48e898185535c04451136437236010ae11b3e18cfbfecac5f3ef9c1182554f",
 };
 
 /// Test vector with longer data payload
 pub const VECTOR_2: HashTestVector = HashTestVector {
     name: "longer_payload",
-    subject_xdr_hex: "0000000000000000000000000000000000000000000000000000000000000001",
+    subject_xdr_hex: FIXED_SUBJECT_STRKEY,
     timestamp: 1_700_000_001u64,
     data_payload: b"payment_confirmed_with_extended_metadata",
-    expected_hash: "b8e4d9f0c3a2e5d7c9b1a3f6e8d0c2b4a6f8e1d3c5b7a9f2e4d6c8a0b2d4f6",
+    expected_hash: "a36a7bcd2b2524ca262c5f89bc46d689bbae0b70091bb515ecfc1a1086d22608",
 };
 
 /// Test vector with zero timestamp
 pub const VECTOR_3: HashTestVector = HashTestVector {
     name: "zero_timestamp",
-    subject_xdr_hex: "0000000000000000000000000000000000000000000000000000000000000002",
+    subject_xdr_hex: FIXED_SUBJECT_STRKEY,
     timestamp: 0u64,
     data_payload: b"genesis_attestation",
-    expected_hash: "c9f5e0a1d2b3c4f6e7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9",
+    expected_hash: "656d9a81b118c23a068f2d2f0f53e354a7d657246985f8fe5061a8086bdd3f89",
 };
 
 /// Test vector with maximum timestamp
 pub const VECTOR_4: HashTestVector = HashTestVector {
     name: "max_timestamp",
-    subject_xdr_hex: "0000000000000000000000000000000000000000000000000000000000000003",
+    subject_xdr_hex: FIXED_SUBJECT_STRKEY,
     timestamp: u64::MAX,
     data_payload: b"future_attestation",
-    expected_hash: "d0a6f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9",
+    expected_hash: "9602a96ddeb814dad4a03f268d5d08555884d8f7dbb411a05520c0e4998d4711",
 };
 
-/// Test vector with empty data payload
+/// Test vector with a non-empty data payload (empty payloads are rejected by the contract).
 pub const VECTOR_5: HashTestVector = HashTestVector {
-    name: "empty_payload",
-    subject_xdr_hex: "0000000000000000000000000000000000000000000000000000000000000004",
+    name: "non_empty_payload",
+    subject_xdr_hex: FIXED_SUBJECT_STRKEY,
     timestamp: 1_600_000_000u64,
-    data_payload: b"",
-    expected_hash: "e1b7c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+    data_payload: b"non_empty_payload",
+    expected_hash: "b612c9d737ce8433f95d72f3aebca9c8a4632fc2bde1abe8ab28cc82970580dd",
 };
 
 #[test]
@@ -372,33 +377,24 @@ fn test_validator_script_path() {
 mod cross_platform_hash_tests {
     use super::*;
     use anchorkit::compute_payload_hash;
-    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
-
-    /// Helper to convert hex string to bytes
-    fn hex_to_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("Invalid hex"))
-            .collect()
-    }
+    use soroban_sdk::{Address, Bytes, Env, String as SorobanString};
 
     /// Helper to convert bytes to hex string
     fn bytes_to_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
+    /// Create a deterministic Address from the vector's fixed strkey.
+    fn subject_from_vector(env: &Env, v: &HashTestVector) -> Address {
+        Address::from_string(&SorobanString::from_str(env, v.subject_xdr_hex))
+    }
+
     #[test]
     fn test_vector_1_minimal_payload() {
         let env = Env::default();
-
-        // Create a deterministic address from the XDR hex
-        let subject = Address::generate(&env);
+        let subject = subject_from_vector(&env, &VECTOR_1);
         let data = Bytes::from_slice(&env, VECTOR_1.data_payload);
-
-        let hash = compute_payload_hash(&env, &subject, VECTOR_1.timestamp, &data);
-        let hash_hex = bytes_to_hex(&hash.to_array());
-
-        // Verify the hash matches the expected value
+        let hash_hex = bytes_to_hex(&compute_payload_hash(&env, &subject, VECTOR_1.timestamp, &data).to_array());
         assert_eq!(
             hash_hex, VECTOR_1.expected_hash,
             "Vector '{}': hash mismatch. Got {}, expected {}",
@@ -409,13 +405,9 @@ mod cross_platform_hash_tests {
     #[test]
     fn test_vector_2_longer_payload() {
         let env = Env::default();
-
-        let subject = Address::generate(&env);
+        let subject = subject_from_vector(&env, &VECTOR_2);
         let data = Bytes::from_slice(&env, VECTOR_2.data_payload);
-
-        let hash = compute_payload_hash(&env, &subject, VECTOR_2.timestamp, &data);
-        let hash_hex = bytes_to_hex(&hash.to_array());
-
+        let hash_hex = bytes_to_hex(&compute_payload_hash(&env, &subject, VECTOR_2.timestamp, &data).to_array());
         assert_eq!(
             hash_hex, VECTOR_2.expected_hash,
             "Vector '{}': hash mismatch. Got {}, expected {}",
@@ -426,13 +418,9 @@ mod cross_platform_hash_tests {
     #[test]
     fn test_vector_3_zero_timestamp() {
         let env = Env::default();
-
-        let subject = Address::generate(&env);
+        let subject = subject_from_vector(&env, &VECTOR_3);
         let data = Bytes::from_slice(&env, VECTOR_3.data_payload);
-
-        let hash = compute_payload_hash(&env, &subject, VECTOR_3.timestamp, &data);
-        let hash_hex = bytes_to_hex(&hash.to_array());
-
+        let hash_hex = bytes_to_hex(&compute_payload_hash(&env, &subject, VECTOR_3.timestamp, &data).to_array());
         assert_eq!(
             hash_hex, VECTOR_3.expected_hash,
             "Vector '{}': hash mismatch. Got {}, expected {}",
@@ -443,13 +431,9 @@ mod cross_platform_hash_tests {
     #[test]
     fn test_vector_4_max_timestamp() {
         let env = Env::default();
-
-        let subject = Address::generate(&env);
+        let subject = subject_from_vector(&env, &VECTOR_4);
         let data = Bytes::from_slice(&env, VECTOR_4.data_payload);
-
-        let hash = compute_payload_hash(&env, &subject, VECTOR_4.timestamp, &data);
-        let hash_hex = bytes_to_hex(&hash.to_array());
-
+        let hash_hex = bytes_to_hex(&compute_payload_hash(&env, &subject, VECTOR_4.timestamp, &data).to_array());
         assert_eq!(
             hash_hex, VECTOR_4.expected_hash,
             "Vector '{}': hash mismatch. Got {}, expected {}",
@@ -458,15 +442,11 @@ mod cross_platform_hash_tests {
     }
 
     #[test]
-    fn test_vector_5_empty_payload() {
+    fn test_vector_5_non_empty_payload() {
         let env = Env::default();
-
-        let subject = Address::generate(&env);
+        let subject = subject_from_vector(&env, &VECTOR_5);
         let data = Bytes::from_slice(&env, VECTOR_5.data_payload);
-
-        let hash = compute_payload_hash(&env, &subject, VECTOR_5.timestamp, &data);
-        let hash_hex = bytes_to_hex(&hash.to_array());
-
+        let hash_hex = bytes_to_hex(&compute_payload_hash(&env, &subject, VECTOR_5.timestamp, &data).to_array());
         assert_eq!(
             hash_hex, VECTOR_5.expected_hash,
             "Vector '{}': hash mismatch. Got {}, expected {}",
@@ -477,27 +457,14 @@ mod cross_platform_hash_tests {
     #[test]
     fn test_all_vectors_deterministic_across_calls() {
         let env = Env::default();
-
-        // For each vector, verify that calling compute_payload_hash multiple times
-        // with the same inputs produces identical output
         for vector in &[&VECTOR_1, &VECTOR_2, &VECTOR_3, &VECTOR_4, &VECTOR_5] {
-            let subject = Address::generate(&env);
+            let subject = subject_from_vector(&env, vector);
             let data = Bytes::from_slice(&env, vector.data_payload);
-
             let hash1 = compute_payload_hash(&env, &subject, vector.timestamp, &data);
             let hash2 = compute_payload_hash(&env, &subject, vector.timestamp, &data);
             let hash3 = compute_payload_hash(&env, &subject, vector.timestamp, &data);
-
-            assert_eq!(
-                hash1, hash2,
-                "Vector '{}': hash not deterministic (call 1 vs 2)",
-                vector.name
-            );
-            assert_eq!(
-                hash2, hash3,
-                "Vector '{}': hash not deterministic (call 2 vs 3)",
-                vector.name
-            );
+            assert_eq!(hash1, hash2, "Vector '{}': not deterministic (1 vs 2)", vector.name);
+            assert_eq!(hash2, hash3, "Vector '{}': not deterministic (2 vs 3)", vector.name);
         }
     }
 
@@ -505,21 +472,18 @@ mod cross_platform_hash_tests {
     fn test_hash_vectors_are_distinct() {
         let env = Env::default();
         let vectors = [&VECTOR_1, &VECTOR_2, &VECTOR_3, &VECTOR_4, &VECTOR_5];
-
-        // Verify that different vectors produce different hashes
         for (i, v1) in vectors.iter().enumerate() {
             for (j, v2) in vectors.iter().enumerate() {
                 if i != j {
-                    let subject = Address::generate(&env);
-                    let data1 = Bytes::from_slice(&env, v1.data_payload);
-                    let data2 = Bytes::from_slice(&env, v2.data_payload);
-
-                    let hash1 = compute_payload_hash(&env, &subject, v1.timestamp, &data1);
-                    let hash2 = compute_payload_hash(&env, &subject, v2.timestamp, &data2);
-
+                    let s1 = subject_from_vector(&env, v1);
+                    let s2 = subject_from_vector(&env, v2);
+                    let d1 = Bytes::from_slice(&env, v1.data_payload);
+                    let d2 = Bytes::from_slice(&env, v2.data_payload);
+                    let h1 = compute_payload_hash(&env, &s1, v1.timestamp, &d1);
+                    let h2 = compute_payload_hash(&env, &s2, v2.timestamp, &d2);
                     assert_ne!(
-                        hash1, hash2,
-                        "Vectors '{}' and '{}' produced the same hash (should be distinct)",
+                        h1, h2,
+                        "Vectors '{}' and '{}' produced the same hash",
                         v1.name, v2.name
                     );
                 }
