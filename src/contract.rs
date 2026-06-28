@@ -984,6 +984,14 @@ struct WebhookEvent {
     payload_hash: Bytes,
 }
 
+#[contracttype]
+#[derive(Clone)]
+struct KycStatusChangedEvent {
+    subject: Address,
+    new_status: u32,
+    timestamp: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Contract upgrade types (#200)
 // Provides admin-controlled WASM upgrade with version tracking and audit events.
@@ -1028,7 +1036,7 @@ struct UpgradeEvent {
 // TTLs (in ledgers)
 // ---------------------------------------------------------------------------
 const PERSISTENT_TTL: u32 = 1_555_200;
-const SPAN_TTL: u32 = 17_280;
+const SPAN_TTL: u32 = 1_555_200;
 const INSTANCE_TTL: u32 = 518_400;
 
 /// Default session lifetime in seconds (1 hour). Used when session_ttl_seconds is zero.
@@ -3726,10 +3734,11 @@ impl AnchorKitContract {
             "Approved",
         );
         env.events().publish(
-            (symbol_short!("kyc"), symbol_short!("approved"), subject),
-            WebhookEvent {
-                event_type: String::from_str(&env, "kyc_approved"),
-                transaction_id: 0, timestamp: now, payload_hash: Bytes::new(&env),
+            (symbol_short!("kyc"), symbol_short!("approved"), subject.clone()),
+            KycStatusChangedEvent {
+                subject,
+                new_status: KycStatus::Approved as u32,
+                timestamp: now,
             },
         );
     }
@@ -3762,10 +3771,11 @@ impl AnchorKitContract {
             "Rejected",
         );
         env.events().publish(
-            (symbol_short!("kyc"), symbol_short!("rejected"), subject),
-            WebhookEvent {
-                event_type: String::from_str(&env, "kyc_rejected"),
-                transaction_id: 0, timestamp: now, payload_hash: reason_hash,
+            (symbol_short!("kyc"), symbol_short!("rejected"), subject.clone()),
+            KycStatusChangedEvent {
+                subject,
+                new_status: KycStatus::Rejected as u32,
+                timestamp: now,
             },
         );
     }
@@ -4974,6 +4984,22 @@ impl AnchorKitContract {
         history
     }
 
+    /// Deactivate an anchor (admin-only). Sets `is_active = false` without blacklisting.
+    pub fn deactivate_anchor(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let meta_key = anchor_meta_key(&env, &anchor);
+        let mut meta: RoutingAnchorMeta = env
+            .storage()
+            .persistent()
+            .get(&meta_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestorNotRegistered));
+        meta.is_active = false;
+        env.storage().persistent().set(&meta_key, &meta);
+        env.storage()
+            .persistent()
+            .extend_ttl(&meta_key, PERSISTENT_TTL, PERSISTENT_TTL);
+    }
+
     /// Reactivate a previously deactivated anchor (admin-only). Sets `is_active = true`.
     pub fn reactivate_anchor(env: Env, anchor: Address) {
         Self::require_admin(&env);
@@ -5135,19 +5161,24 @@ impl AnchorKitContract {
             created_at: env.ledger().timestamp(),
         };
         let key = anchor_cluster_key(&env, &cluster_id);
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, ErrorCode::AlreadyInitialized);
+        }
         env.storage().persistent().set(&key, &cluster);
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
 
-        // Add to cluster list
+        // Add to cluster list (deduplicated)
         let list_key = anchor_cluster_list_key(&env);
         let mut cluster_ids: Vec<String> = env
             .storage()
             .persistent()
             .get(&list_key)
             .unwrap_or_else(|| Vec::new(&env));
-        cluster_ids.push_back(cluster_id);
+        if !cluster_ids.contains(&cluster_id) {
+            cluster_ids.push_back(cluster_id);
+        }
         env.storage().persistent().set(&list_key, &cluster_ids);
         env.storage()
             .persistent()
