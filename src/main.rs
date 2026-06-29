@@ -678,6 +678,27 @@ enum Commands {
         #[command(subcommand)]
         action: OfflineAction,
     },
+    /// Verify an on-chain attestation by ID or payload hash
+    Verify {
+        /// Attestation ID (mutually exclusive with --payload-hash)
+        #[arg(long)]
+        id: Option<u64>,
+        /// Payload hash to look up (mutually exclusive with --id)
+        #[arg(long)]
+        payload_hash: Option<String>,
+        /// Local file whose SHA-256 hash is compared against the stored hash
+        #[arg(long)]
+        payload_file: Option<String>,
+        /// Contract ID (overrides --contract-id / ANCHOR_CONTRACT_ID)
+        #[arg(long)]
+        contract_id: Option<String>,
+        #[arg(long, default_value = "testnet")]
+        network: String,
+        #[arg(long)]
+        secret_key: Option<String>,
+        #[arg(long)]
+        keypair_file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1871,6 +1892,95 @@ fn offline_simulate(config_path: Option<&str>, workflow: &str) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+
+fn verify_attestation(
+    id: Option<u64>,
+    payload_hash: Option<&str>,
+    payload_file: Option<&str>,
+    contract_id: &str,
+    network: &str,
+    source: &SecretKey,
+) {
+    // Exactly one of --id or --payload-hash must be provided.
+    let (fn_args, lookup_by): (Vec<&str>, &str) = match (&id, &payload_hash) {
+        (Some(i), None) => {
+            let id_str = Box::leak(i.to_string().into_boxed_str());
+            (vec!["get_attestation", "--id", id_str], "id")
+        }
+        (None, Some(h)) => (
+            vec!["get_attestation_by_hash", "--issuer", "", "--payload_hash", h],
+            "hash",
+        ),
+        (Some(_), Some(_)) => {
+            eprintln!("error: --id and --payload-hash are mutually exclusive");
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!("error: one of --id or --payload-hash is required");
+            eprintln!("hint:  anchorkit verify --id <N>  or  anchorkit verify --payload-hash <HEX>");
+            std::process::exit(1);
+        }
+    };
+
+    let _ = lookup_by; // used above for clarity
+    let raw = stellar_invoke(contract_id, source, network, &fn_args);
+    if raw.trim().is_empty() || raw.contains("Error") || raw.contains("error") {
+        eprintln!("error: Attestation not found");
+        std::process::exit(1);
+    }
+
+    // Parse key fields from the returned JSON/XDR output.
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
+        eprintln!("error: Attestation not found");
+        std::process::exit(1);
+    });
+
+    let attest_id    = parsed.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+    let issuer       = parsed.get("issuer").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let subject      = parsed.get("subject").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let timestamp    = parsed.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let stored_hash  = parsed.get("payload_hash").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Optional: compare local file hash against stored hash.
+    let payload_match = if let Some(path) = payload_file {
+        let content = secure_read_file(path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read payload file '{}': {}", path, e);
+            std::process::exit(1);
+        });
+        // Compute SHA-256 of the file content.
+        let digest = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let matches = digest == stored_hash;
+        Some((matches, digest))
+    } else {
+        None
+    };
+
+    // Print summary table.
+    println!("┌─────────────────────────────────────────────────────────────┐");
+    println!("│ Attestation Verification Result                             │");
+    println!("├─────────────────────────────────────────────────────────────┤");
+    println!("│ ID           : {:<45}│", attest_id);
+    println!("│ Issuer       : {:<45}│", &issuer[..issuer.len().min(45)]);
+    println!("│ Subject      : {:<45}│", &subject[..subject.len().min(45)]);
+    println!("│ Timestamp    : {:<45}│", timestamp);
+    println!("│ Payload Hash : {:<45}│", &stored_hash[..stored_hash.len().min(45)]);
+    if let Some((matches, computed)) = &payload_match {
+        let label = if *matches { "✓ MATCH" } else { "✗ MISMATCH" };
+        println!("│ File Hash    : {:<45}│", &computed[..computed.len().min(45)]);
+        println!("│ Match        : {:<45}│", label);
+    }
+    println!("└─────────────────────────────────────────────────────────────┘");
+
+    if let Some((false, _)) = payload_match {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let global_contract_id = cli.contract_id.clone();
@@ -1980,6 +2090,14 @@ fn main() {
                 offline_simulate(config.as_deref(), &workflow);
             }
         },
+        Commands::Verify { id, payload_hash, payload_file, contract_id, network: cmd_net, secret_key, keypair_file } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "verify");
+            let source = resolve_source(
+                ephemeral_token.as_deref(), secret_key.as_deref(), keypair_file.as_deref(),
+                None, no_interactive,
+            );
+            verify_attestation(id, payload_hash.as_deref(), payload_file.as_deref(), &cid, &cmd_net, &source);
+        }
     }
 }
 

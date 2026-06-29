@@ -63,16 +63,68 @@ pub struct RateLimitState {
 pub struct RateLimiter;
 
 impl RateLimiter {
+    /// Store a per-role rate limit override.
+    ///
+    /// The config is stored under a key derived from the role symbol bytes, keyed
+    /// as `rl_role:<role_bytes>`. Only the contract admin should call this; access
+    /// control is enforced in the contract layer via `require_admin`.
+    pub fn set_role_override(env: &Env, role: soroban_sdk::Symbol, config: RateLimitConfig) {
+        let key = Self::role_override_key(env, &role);
+        env.storage().persistent().set(&key, &config);
+    }
+
+    /// Retrieve a per-role rate limit override, or `None` if not set.
+    pub fn get_role_override(env: &Env, role: soroban_sdk::Symbol) -> Option<RateLimitConfig> {
+        let key = Self::role_override_key(env, &role);
+        env.storage().persistent().get::<_, RateLimitConfig>(&key)
+    }
+
+    /// Store a per-address rate limit override.
+    pub fn set_address_override(env: &Env, address: &Address, config: RateLimitConfig) {
+        let key = Self::address_override_key(env, address);
+        env.storage().persistent().set(&key, &config);
+    }
+
+    /// Retrieve a per-address rate limit override, or `None` if not set.
+    pub fn get_address_override(env: &Env, address: &Address) -> Option<RateLimitConfig> {
+        let key = Self::address_override_key(env, address);
+        env.storage().persistent().get::<_, RateLimitConfig>(&key)
+    }
+
+    /// Resolve the effective config for an attestor.
+    ///
+    /// Resolution order:
+    /// 1. Per-address override
+    /// 2. Per-role override (if `role` is `Some`)
+    /// 3. Global default config
+    pub fn resolve_config(
+        env: &Env,
+        attestor: &Address,
+        role: Option<soroban_sdk::Symbol>,
+    ) -> RateLimitConfig {
+        if let Some(cfg) = Self::get_address_override(env, attestor) {
+            return cfg;
+        }
+        if let Some(r) = role {
+            if let Some(cfg) = Self::get_role_override(env, r) {
+                return cfg;
+            }
+        }
+        Self::get_config(env)
+    }
+
     /// Check whether an attestor is within their rate limit and increment the counter.
     ///
-    /// If the current window has expired it is automatically reset before the
-    /// check. The counter is only incremented when the check passes.
+    /// Config resolution order: address override → role override → global default.
+    ///
+    /// When the caller is the contract admin the check is bypassed entirely; an
+    /// audit entry is written via `AdminAuditLog` so the bypass is on-chain record.
     ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
     /// * `attestor` - The address of the attestor being checked.
-    /// * `config` - The active [`RateLimitConfig`] (fetch via [`RateLimiter::get_config`]).
+    /// * `config` - The active [`RateLimitConfig`] (use [`RateLimiter::resolve_config`]).
     ///
     /// # Returns
     ///
@@ -82,32 +134,27 @@ impl RateLimiter {
     ///
     /// Returns [`AnchorKitError`] with code [`ErrorCode::RateLimitExceeded`] when
     /// the attestor has reached `config.max_submissions` in the current window.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use soroban_sdk::Env;
-    /// # use soroban_sdk::testutils::Address as _;
-    /// # let env = Env::default();
-    /// # let attestor = soroban_sdk::Address::generate(&env);
-    /// use anchorkit::{RateLimiter, RateLimitConfig};
-    ///
-    /// let config = RateLimitConfig { max_submissions: 10, window_length: 100 };
-    /// // First call succeeds.
-    /// assert!(RateLimiter::check_and_increment(&env, &attestor, &config).is_ok());
-    /// ```
     pub fn check_and_increment(
         env: &Env,
         attestor: &Address,
         config: &RateLimitConfig,
     ) -> Result<(), AnchorKitError> {
-        // If attestor is the admin, skip rate limits entirely
+        // If attestor is the admin, skip rate limits and write an audit entry.
         if let Some(admin) = env
             .storage()
             .instance()
             .get::<_, Address>(&make_storage_key(env, &[b"ADMIN"]))
         {
             if *attestor == admin {
+                // Record the bypass so it is auditable on-chain.
+                crate::admin_audit_log::AdminAuditLog::log_change(
+                    env,
+                    attestor,
+                    "rate_limit_bypass",
+                    "bypassed",
+                    "",
+                    "bypassed",
+                );
                 return Ok(());
             }
         }
@@ -296,6 +343,28 @@ impl RateLimiter {
     /// Generate collision-resistant storage key for the global rate limit config.
     fn get_config_key(env: &Env) -> soroban_sdk::BytesN<32> {
         make_storage_key(env, &[b"RL_CONFIG"])
+    }
+
+    /// Storage key for a per-role rate limit override.
+    fn role_override_key(env: &Env, role: &soroban_sdk::Symbol) -> soroban_sdk::BytesN<32> {
+        use soroban_sdk::xdr::ToXdr;
+        let role_xdr = role.clone().to_xdr(env);
+        let mut raw = alloc::vec::Vec::with_capacity(role_xdr.len() as usize);
+        for i in 0..role_xdr.len() {
+            raw.push(role_xdr.get(i).unwrap_or(0));
+        }
+        make_storage_key(env, &[b"RL_ROLE", &raw])
+    }
+
+    /// Storage key for a per-address rate limit override.
+    fn address_override_key(env: &Env, address: &Address) -> soroban_sdk::BytesN<32> {
+        use soroban_sdk::xdr::ToXdr;
+        let addr_xdr = address.clone().to_xdr(env);
+        let mut raw = alloc::vec::Vec::with_capacity(addr_xdr.len() as usize);
+        for i in 0..addr_xdr.len() {
+            raw.push(addr_xdr.get(i).unwrap_or(0));
+        }
+        make_storage_key(env, &[b"RL_ADDR", &raw])
     }
 }
 

@@ -25,6 +25,69 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// HMAC-SHA256 signing helpers
+// ---------------------------------------------------------------------------
+
+/// Compute HMAC-SHA256(`key`, `payload`) and return a lowercase hex string.
+fn sign_payload(key: &[u8], payload: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize().into_bytes();
+    result.iter().fold(String::new(), |mut s, b| {
+        use alloc::format;
+        s.push_str(&format!("{:02x}", b));
+        s
+    })
+}
+
+/// Verify that `signature_header` (format `sha256=<hex>`) matches
+/// HMAC-SHA256(`key`, `payload`).
+///
+/// The comparison is done byte-by-byte in constant time to prevent timing
+/// attacks.
+pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8]) -> bool {
+    let hex_digest = match signature_header.strip_prefix("sha256=") {
+        Some(h) => h,
+        None => return false,
+    };
+    // Hex-decode the received digest.
+    if hex_digest.len() % 2 != 0 {
+        return false;
+    }
+    let mut received = Vec::with_capacity(hex_digest.len() / 2);
+    let mut chars = hex_digest.chars();
+    loop {
+        match (chars.next(), chars.next()) {
+            (Some(a), Some(b)) => {
+                let byte = match (a.to_digit(16), b.to_digit(16)) {
+                    (Some(hi), Some(lo)) => (hi << 4 | lo) as u8,
+                    _ => return false,
+                };
+                received.push(byte);
+            }
+            (None, None) => break,
+            _ => return false,
+        }
+    }
+    // Compute expected digest.
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload.as_bytes());
+    // Constant-time comparison via XOR.
+    let expected = mac.finalize().into_bytes();
+    if received.len() != expected.len() {
+        return false;
+    }
+    let diff: u8 = received.iter().zip(expected.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    diff == 0
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -45,6 +108,10 @@ pub struct WebhookDeliveryConfig {
     pub retry_config: RetryConfig,
     /// Key under which failed entries are stored in the DLQ map.
     pub dead_letter_storage_key: String,
+    /// Optional HMAC-SHA256 signing key. When `Some`, an `X-Anchor-Signature`
+    /// header of the form `sha256=<hex>` is appended to every HTTP POST.
+    /// Existing configs that omit this field continue to work unsigned.
+    pub signing_key: Option<Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +146,9 @@ pub struct DlqEntry {
 ///
 /// `now_fn` returns the current Unix timestamp in seconds (used to timestamp DLQ entries).
 ///
+/// When `config.signing_key` is `Some`, an `X-Anchor-Signature: sha256=<hex>`
+/// header value is computed and passed as the third argument to `http_post`.
+///
 /// On total failure a [`DlqEntry`] is appended to `dlq` under
 /// `config.dead_letter_storage_key` and an `AnchorKitError` is returned.
 pub fn deliver_webhook<H, S, T>(
@@ -90,11 +160,16 @@ pub fn deliver_webhook<H, S, T>(
     now_fn: T,
 ) -> Result<(), AnchorKitError>
 where
-    H: Fn(&str, &str) -> Result<u16, String>,
+    H: Fn(&str, &str, Option<&str>) -> Result<u16, String>,
     S: FnMut(u64),
     T: Fn() -> u64,
 {
     let retry_cfg = config.retry_config.clone();
+    // Pre-compute signature header value (constant for a given payload+key).
+    let sig_header: Option<String> = config.signing_key.as_ref().map(|k| {
+        let hex = sign_payload(k, payload);
+        alloc::format!("sha256={}", hex)
+    });
 
     let last_error_msg: RefCell<String> = RefCell::new(String::new());
     let last_status: RefCell<u16> = RefCell::new(0);
@@ -103,7 +178,8 @@ where
     let result = retry_with_backoff(
         &retry_cfg,
         |attempt| {
-            let (status, msg) = match http_post(&config.endpoint_url, payload) {
+            let sig_ref = sig_header.as_deref();
+            let (status, msg) = match http_post(&config.endpoint_url, payload, sig_ref) {
                 Ok(s) if s < 400 => return Ok(()),
                 Ok(s) => (s, format!("HTTP {s}")),
                 Err(e) => (0, e),
@@ -211,8 +287,8 @@ mod tests {
                 backoff_multiplier: 1,
                 max_delay_ms: 10,
             },
-
             dead_letter_storage_key: "test-key".to_string(),
+            signing_key: None,
         }
     }
 
@@ -223,7 +299,7 @@ mod tests {
             &make_config(3),
             "payload",
             &mut dlq,
-            |_, _| Ok(200),
+            |_, _, _| Ok(200),
             |_| {},
             || 1000,
         );
@@ -238,7 +314,7 @@ mod tests {
             &make_config(2),
             "my-payload",
             &mut dlq,
-            |_, _| Ok(503),
+            |_, _, _| Ok(503),
             |_| {},
             || 9999,
         );
@@ -262,7 +338,7 @@ mod tests {
             &make_config(1),
             "payload",
             &mut dlq,
-            |_, _| Err("connection refused".to_string()),
+            |_, _, _| Err("connection refused".to_string()),
             |_| {},
             || 42,
         );
@@ -282,7 +358,7 @@ mod tests {
                 &config,
                 &alloc::format!("payload-{}", i),
                 &mut dlq,
-                |_, _| Ok(500),
+                |_, _, _| Ok(500),
                 |_| {},
                 move || i * 100,
             );

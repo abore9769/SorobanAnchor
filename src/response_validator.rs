@@ -550,8 +550,8 @@ pub struct TransactionStatusResponseValidated {
     pub kind: alloc::string::String,
 }
 
-/// Validates a raw transaction status response.
-pub fn validate_transaction_status_response(
+/// Validates a raw transaction status response, returning the validated struct.
+pub fn validate_transaction_status_response_validated(
     transaction_id: &str,
     status: &str,
     kind: &str,

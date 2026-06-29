@@ -201,3 +201,47 @@ fn test_register_missing_required_address_arg() {
         .failure()
         .stderr(contains("--address"));
 }
+
+// ── Group: verify command validation (#557) ───────────────────────────────────
+
+#[test]
+fn test_verify_without_id_or_hash_exits_with_error() {
+    cmd()
+        .args(["verify", "--contract-id", "CTEST", "--secret-key", "SABC"])
+        .env_remove("ANCHOR_CONTRACT_ID")
+        .assert()
+        .failure()
+        .stderr(contains("--id").or(contains("--payload-hash")).or(contains("required")));
+}
+
+#[test]
+fn test_verify_with_both_id_and_hash_exits_with_error() {
+    cmd()
+        .args(["verify", "--id", "1", "--payload-hash", "abc123",
+               "--contract-id", "CTEST", "--secret-key", "SABC"])
+        .env_remove("ANCHOR_CONTRACT_ID")
+        .assert()
+        .failure()
+        .stderr(contains("mutually exclusive").or(contains("--id").and(contains("--payload-hash"))));
+}
+
+#[test]
+fn test_verify_missing_contract_id() {
+    cmd()
+        .args(["verify", "--id", "1", "--secret-key", "SABC"])
+        .env_remove("ANCHOR_CONTRACT_ID")
+        .assert()
+        .failure()
+        .stderr(contains("--contract-id").or(contains("ANCHOR_CONTRACT_ID")));
+}
+
+#[test]
+fn test_verify_payload_file_not_found() {
+    cmd()
+        .args(["verify", "--id", "1",
+               "--payload-file", "/nonexistent/path/payload.bin",
+               "--contract-id", "CTEST", "--secret-key", "SABC"])
+        .env_remove("ANCHOR_CONTRACT_ID")
+        .assert()
+        .failure();
+}

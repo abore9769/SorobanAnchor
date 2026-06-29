@@ -301,3 +301,59 @@ mod admin_audit_log_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod admin_bypass_audit_tests {
+    use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+    use soroban_sdk::{Address, Env};
+    use anchorkit::admin_audit_log::AdminAuditLog;
+    use anchorkit::contract::AnchorKitContract;
+    use anchorkit::rate_limiter::{RateLimiter, RateLimitConfig};
+    use anchorkit::deterministic_hash::make_storage_key;
+
+    fn make_env() -> (Env, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, AnchorKitContract);
+        (env, cid)
+    }
+
+    fn set_ledger(env: &Env, ts: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp: ts,
+            protocol_version: 21,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6_312_000,
+        });
+    }
+
+    /// Admin bypass writes an audit log entry with change_type = "rate_limit_bypass".
+    #[test]
+    fn test_admin_bypass_is_logged() {
+        let (env, cid) = make_env();
+        set_ledger(&env, 1000);
+        let admin = Address::generate(&env);
+        env.as_contract(&cid, || {
+            // Store admin address so bypass is detected.
+            env.storage()
+                .instance()
+                .set(&make_storage_key(&env, &[b"ADMIN"]), &admin);
+            let config = RateLimitConfig { max_submissions: 5, window_length: 100 };
+            // Admin bypass: check_and_increment should succeed AND log.
+            let before = AdminAuditLog::get_entry_count(&env);
+            let result = RateLimiter::check_and_increment(&env, &admin, &config);
+            assert!(result.is_ok());
+            let after = AdminAuditLog::get_entry_count(&env);
+            assert_eq!(after, before + 1, "bypass should write one audit entry");
+            let entry = AdminAuditLog::get_entry(&env, before).unwrap();
+            assert_eq!(
+                entry.change_type,
+                soroban_sdk::String::from_str(&env, "rate_limit_bypass")
+            );
+        });
+    }
+}

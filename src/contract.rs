@@ -9,6 +9,7 @@ use alloc::vec::Vec as RustVec;
 use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_payload_hash};
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::RateLimitConfig;
 use crate::sep10_jwt;
 use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
 use crate::replay_detection::{self, ReplayMetrics};
@@ -4712,6 +4713,62 @@ impl AnchorKitContract {
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
     }
 
+    // --- Cache Invalidation Governance (#555) ---
+
+    /// Submit a proposal to invalidate a specific anchor's capability cache.
+    /// Any registered attestor may call this; returns the new proposal_id.
+    pub fn propose_cache_invalidation(env: Env, caller: Address, anchor: Address) -> u64 {
+        caller.require_auth();
+        Self::check_attestor(&env, &caller);
+        crate::cache_governance::propose(&env, &caller, &anchor)
+    }
+
+    /// Endorse an existing cache invalidation proposal (registered attestors only).
+    /// Duplicate endorsements from the same address are silently ignored.
+    pub fn endorse_cache_invalidation(env: Env, caller: Address, proposal_id: u64) {
+        caller.require_auth();
+        Self::check_attestor(&env, &caller);
+        crate::cache_governance::endorse(&env, &caller, proposal_id)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+    }
+
+    /// Execute a proposal that has reached quorum, clearing the anchor's cache entries.
+    /// Callable by anyone once quorum is met and the proposal has not expired.
+    pub fn execute_cache_invalidation(env: Env, proposal_id: u64) {
+        let anchor = crate::cache_governance::execute(&env, proposal_id)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+        let cap_key = (symbol_short!("CAPCACHE"), anchor.clone());
+        env.storage().temporary().remove(&cap_key);
+        let meta_key = (symbol_short!("METACACHE"), anchor);
+        env.storage().temporary().remove(&meta_key);
+    }
+
+    /// Get a cache invalidation proposal by ID.
+    pub fn get_cache_invalidation_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> crate::cache_governance::CacheInvalidationProposal {
+        crate::cache_governance::get_proposal(&env, proposal_id)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::CacheNotFound))
+    }
+
+    /// Set quorum threshold for cache invalidation proposals (admin only).
+    pub fn set_cache_quorum_threshold(env: Env, n: u32) {
+        Self::require_admin(&env);
+        let mut cfg = crate::cache_governance::get_config(&env);
+        cfg.quorum_threshold = n;
+        crate::cache_governance::set_config(&env, cfg);
+    }
+
+    /// Set proposal expiry in ledgers (admin only).
+    pub fn set_cache_proposal_expiry(env: Env, ledgers: u32) {
+        Self::require_admin(&env);
+        let mut cfg = crate::cache_governance::get_config(&env);
+        cfg.proposal_expiry_ledgers = ledgers;
+        crate::cache_governance::set_config(&env, cfg);
+    }
+
+
     /// Report the SWR lifecycle state of an anchor's metadata cache entry
     /// without panicking. This makes both fresh and stale availability explicit:
     /// callers can distinguish `Fresh`, `Stale` (serve-but-refresh), `Expired`
@@ -6023,6 +6080,21 @@ impl AnchorKitContract {
         );
     }
 
+    /// Set a per-role rate limit override (admin only).
+    pub fn set_role_rate_limit(env: Env, role: Symbol, config: RateLimitConfig) {
+        Self::require_admin(&env);
+        RateLimiter::validate_config(&config)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+        RateLimiter::set_role_override(&env, role.clone(), config);
+        let admin = Self::get_admin_internal(&env);
+        AdminAuditLog::log_action(&env, &admin, "set_role_rate_limit", soroban_sdk::String::from_str(&env, "role"), "", "updated");
+    }
+
+    /// Get per-role rate limit override, or None if not set.
+    pub fn get_role_rate_limit(env: Env, role: Symbol) -> Option<RateLimitConfig> {
+        RateLimiter::get_role_override(&env, role)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -6047,7 +6119,11 @@ impl AnchorKitContract {
     }
 
     fn enforce_rate_limit(env: &Env, attestor: &Address) {
-        let config = RateLimiter::get_config(env);
+        let role = [AdminRole::KycAdmin, AdminRole::AttestorAdmin, AdminRole::CacheAdmin]
+            .iter()
+            .find(|&&r| Self::has_role_internal(env, attestor, r))
+            .map(|r| Symbol::new(env, Self::role_name(*r)));
+        let config = RateLimiter::resolve_config(env, attestor, role);
         if RateLimiter::check_and_increment(env, attestor, &config).is_err() {
             panic_with_error!(env, ErrorCode::RateLimitExceeded);
         }

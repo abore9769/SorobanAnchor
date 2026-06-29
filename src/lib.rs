@@ -121,7 +121,7 @@
 extern crate alloc;
 
 // ── Core modules (all build variants) ────────────────────────────────────────
-mod deterministic_hash;
+pub mod deterministic_hash;
 mod domain_validator;
 pub mod errors;
 pub mod sep10_jwt;
@@ -133,6 +133,7 @@ pub mod contract;
 pub mod anchor_health;
 pub mod service_management;
 pub mod admin_audit_log;
+pub mod cache_governance;
 
 // ── std-only modules (filesystem, runtime config) ─────────────────────────────
 #[cfg(feature = "std")]
@@ -191,7 +192,7 @@ pub use response_validator::{
     Sep38QuoteResponse, WithdrawResponse,
 };
 #[cfg(not(feature = "wasm"))]
-pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, WebhookDeliveryConfig, DlqEntry};
+pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, verify_webhook_signature, WebhookDeliveryConfig, DlqEntry};
 #[cfg(not(feature = "wasm"))]
 pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 #[cfg(not(feature = "wasm"))]
