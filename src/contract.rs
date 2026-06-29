@@ -14,6 +14,11 @@ use crate::transaction_state_tracker::{OptRecovery, TransactionState, Transactio
 use crate::replay_detection::{self, ReplayMetrics};
 use crate::admin_audit_log::AdminAuditLog;
 use crate::service_management::ServiceManager;
+use crate::sep38;
+
+/// Score penalty (in [0,1] units) applied to anomalous anchors in `score_anchor_with_anomaly`.
+/// Default: 0.20 (equivalent to 20 out of 100 score points).
+const ANOMALY_SCORE_PENALTY: f32 = 0.20_f32;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,6 +330,10 @@ impl WeightedRoutingStrategy {
     /// Compute a normalized composite score in [0.0, 1.0].
     /// Lower fee and faster settlement are better; higher reputation is better.
     /// Each dimension is normalised against the provided max values.
+    ///
+    /// When `anomaly_report` is `Some` and `anchor_id` appears in
+    /// `anomalous_anchors`, a penalty of `anomaly_penalty / 100.0` is
+    /// subtracted from the final score (default 0.20).
     pub fn score_anchor(
         &self,
         fee_pct: u32,
@@ -333,6 +342,29 @@ impl WeightedRoutingStrategy {
         max_fee: u32,
         max_settlement: u64,
         max_reputation: u32,
+    ) -> f32 {
+        self.score_anchor_with_anomaly(
+            fee_pct, settlement_time, reputation,
+            max_fee, max_settlement, max_reputation,
+            None, None,
+        )
+    }
+
+    /// Like [`score_anchor`] but applies a fee-anomaly penalty when the anchor
+    /// is flagged in `anomaly_report`.
+    ///
+    /// * `anchor_id` – the string ID used in the [`FeeAnomalyReport`].
+    /// * `anomaly_report` – optional pre-computed report; pass `None` to skip.
+    pub fn score_anchor_with_anomaly(
+        &self,
+        fee_pct: u32,
+        settlement_time: u64,
+        reputation: u32,
+        max_fee: u32,
+        max_settlement: u64,
+        max_reputation: u32,
+        anchor_id: Option<&str>,
+        anomaly_report: Option<&sep38::FeeAnomalyReport>,
     ) -> f32 {
         let fee_score = if max_fee == 0 {
             1.0_f32
@@ -349,9 +381,22 @@ impl WeightedRoutingStrategy {
         } else {
             reputation as f32 / max_reputation as f32
         };
-        self.fee_weight * fee_score
+        let base = self.fee_weight * fee_score
             + self.speed_weight * speed_score
-            + self.reputation_weight * rep_score
+            + self.reputation_weight * rep_score;
+
+        // Apply anomaly penalty when report flags this anchor.
+        let penalty = if let (Some(id), Some(report)) = (anchor_id, anomaly_report) {
+            if report.anomalous_anchors.iter().any(|(aid, _)| aid == id) {
+                ANOMALY_SCORE_PENALTY
+            } else {
+                0.0_f32
+            }
+        } else {
+            0.0_f32
+        };
+
+        (base - penalty).clamp(0.0_f32, 1.0_f32)
     }
 }
 
@@ -2071,6 +2116,31 @@ impl AnchorKitContract {
             .instance()
             .get::<_, u64>(&symbol_short!("JWTSKEW"))
             .unwrap_or(sep10_jwt::DEFAULT_CLOCK_SKEW)
+    }
+
+    /// Admin-only: remove all JTI entries from persistent storage whose TTL
+    /// has lapsed. This is a manual cleanup for environments where automatic
+    /// Soroban TTL expiry is not guaranteed.
+    ///
+    /// Iterates the JTI index stored under key `"JTIIDX"` and removes entries
+    /// that are no longer present in persistent storage (already expired).
+    pub fn purge_expired_jtis(env: Env) {
+        Self::require_admin(&env);
+        let idx_key = symbol_short!("JTIIDX");
+        let keys: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut live: Vec<Bytes> = Vec::new(&env);
+        for k in keys.iter() {
+            if env.storage().persistent().has(&k) {
+                live.push_back(k);
+            }
+        }
+        if live.len() < keys.len() {
+            env.storage().persistent().set(&idx_key, &live);
+        }
     }
 
     /// Verifies a SEP-10 JWT (JWS compact, EdDSA) using the stored key for `issuer`: signature, `exp`, and `sub`.
@@ -5855,6 +5925,18 @@ impl AnchorKitContract {
     // Transaction state
     // -----------------------------------------------------------------------
 
+    /// Admin-only: configure the auto-eviction policy for the transaction state tracker.
+    ///
+    /// When `enabled` is `true`, `create_transaction_record` will proactively
+    /// evict the oldest terminal transactions when storage budget is at Warning
+    /// or Critical. `max_per_call` bounds the number of evictions per call.
+    pub fn set_eviction_policy(env: Env, enabled: bool, max_per_call: u32) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&symbol_short!("EVICTEN"), &enabled);
+        env.storage().instance().set(&symbol_short!("EVICTMAX"), &max_per_call);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
     pub fn create_transaction_record(
         env: Env,
         transaction_id: u64,
@@ -5891,6 +5973,21 @@ impl AnchorKitContract {
         initiator: Address,
         routing_reason: Option<String>,
     ) -> TransactionStateRecord {
+        // Apply eviction policy from storage before inserting a new record.
+        let eviction_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("EVICTEN"))
+            .unwrap_or(false);
+        if eviction_enabled {
+            let max_per_call: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("EVICTMAX"))
+                .unwrap_or(10u32);
+            Self::run_auto_eviction(env, max_per_call);
+        }
+
         let now = env.ledger().timestamp();
         let current_ledger = env.ledger().sequence();
         let mut history = soroban_sdk::Vec::new(env);
@@ -5919,6 +6016,53 @@ impl AnchorKitContract {
         env.storage().persistent().set(&ids_key, &ids);
         env.storage().persistent().extend_ttl(&ids_key, PERSISTENT_TTL, PERSISTENT_TTL);
         record
+    }
+
+    /// Evict the oldest terminal transactions from persistent storage.
+    /// Called by `create_transaction_record_internal` when eviction is enabled.
+    fn run_auto_eviction(env: &Env, max_per_call: u32) {
+        let ids_key = symbol_short!("TXIDS");
+        let ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ids_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+        let mut terminal: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        for id in ids.iter() {
+            let key = (symbol_short!("TXSTATE"), id);
+            if let Some(rec) = env
+                .storage()
+                .persistent()
+                .get::<_, TransactionStateRecord>(&key)
+            {
+                if rec.state.is_terminal() {
+                    terminal.push((rec.timestamp, id));
+                }
+            }
+        }
+        terminal.sort_unstable_by_key(|&(ts, _)| ts);
+
+        let limit = max_per_call as usize;
+        let mut evicted_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for (_, id) in terminal.iter().take(limit) {
+            let key = (symbol_short!("TXSTATE"), *id);
+            env.storage().persistent().remove(&key);
+            evicted_ids.push(*id);
+        }
+        if !evicted_ids.is_empty() {
+            let mut live: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(env);
+            for id in ids.iter() {
+                if !evicted_ids.contains(&id) {
+                    live.push_back(id);
+                }
+            }
+            env.storage().persistent().set(&ids_key, &live);
+            env.events().publish(
+                (symbol_short!("EVICT"), symbol_short!("budget")),
+                evicted_ids.len() as u32,
+            );
+        }
     }
 
     /// Advance a transaction from Pending to InProgress.
