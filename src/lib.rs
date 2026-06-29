@@ -204,7 +204,9 @@ pub use sep6::{
 };
 #[cfg(not(feature = "wasm"))]
 pub use sep24::{
-    initiate_interactive_deposit, initiate_interactive_withdrawal, fetch_sep24_transaction_status,
+    initiate_interactive_deposit, initiate_interactive_deposit_with_origin,
+    initiate_interactive_withdrawal, initiate_interactive_withdrawal_with_origin,
+    fetch_sep24_transaction_status,
     validate_interactive_url, validate_transaction_id,
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
@@ -215,6 +217,8 @@ pub use admin_audit_log::{AdminAuditLog, AdminConfigChangeEvent, AdminAuditLogCo
 pub use contract::{HealthStatus, MetadataFreshnessReport, RateLimiterHealth};
 pub use contract::{AnchorHealthMetrics, AnchorProofRecord};
 pub use transaction_state_tracker::{BudgetStatus, BudgetAlert};
+#[cfg(not(feature = "wasm"))]
+pub use sep38::{CrossAnchorFeeAggregator, FeeAnomalyReport};
 #[cfg(not(feature = "wasm"))]
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 

@@ -21,6 +21,12 @@ pub const MAX_JWT_LIFETIME: u64 = 86_400;
 /// Default clock skew tolerance in seconds.
 pub const DEFAULT_CLOCK_SKEW: u64 = 60;
 
+/// Maximum allowed JTI byte length (prevents bloated keys in storage).
+pub const JTI_MAX_BYTES: usize = 256;
+
+/// Extra ledger buffer added to a JTI TTL to absorb clock skew (~10 minutes).
+pub const JTI_TTL_BUFFER_LEDGERS: u32 = 120;
+
 trait Ed25519VerifyResult {
     fn into_verify_result(self) -> Result<(), ()>;
 }
@@ -389,19 +395,33 @@ pub fn verify_sep10_jwt(
         }
     }
 
-    // Issue #63: jti replay protection — reject if jti was already used
+    // Issue #63 / #550: persistent JTI replay protection across ledger boundaries.
+    // Use persistent storage keyed by SHA-256("jti:" || jti_bytes) so the JTI
+    // is remembered between separate contract invocations. TTL is derived from
+    // the token's remaining lifetime plus a 10-minute buffer for clock skew.
     if let Some(jti_bytes) = parse_json_jti(&payload_dec) {
-        let jti_key = (
-            soroban_sdk::symbol_short!("JTI"),
-            Bytes::from_slice(env, &jti_bytes),
-        );
-        if env.storage().temporary().has(&jti_key) {
+        if jti_bytes.len() > JTI_MAX_BYTES {
             return Err(());
         }
-        // Mark jti as used until token expiry (ledger TTL approximation)
-        let ttl = (exp.saturating_sub(now) as u32).max(1);
-        env.storage().temporary().set(&jti_key, &true);
-        env.storage().temporary().extend_ttl(&jti_key, ttl, ttl);
+        // Build storage key: SHA-256(len_prefix("jti:") || len_prefix(jti_bytes))
+        let mut key_input = Bytes::new(env);
+        for &b in b"jti:" {
+            key_input.push_back(b);
+        }
+        for &b in jti_bytes.as_slice() {
+            key_input.push_back(b);
+        }
+        let jti_key = env.crypto().sha256(&key_input);
+        if env.storage().persistent().has(&jti_key) {
+            return Err(());
+        }
+        // TTL in ledgers: remaining token lifetime / 5 s/ledger + 120 buffer ledgers.
+        let remaining_secs = exp.saturating_sub(now);
+        let ttl_ledgers = ((remaining_secs / 5) as u32)
+            .saturating_add(JTI_TTL_BUFFER_LEDGERS)
+            .max(1);
+        env.storage().persistent().set(&jti_key, &true);
+        env.storage().persistent().extend_ttl(&jti_key, ttl_ledgers, ttl_ledgers);
     }
 
     let sub = parse_json_sub(env, &payload_dec)?;

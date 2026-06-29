@@ -9,7 +9,7 @@ mod sep10_contract_tests {
     use soroban_sdk::{Address, Bytes, Env, String};
 
     use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
-    use crate::sep10_test_util::{build_sep10_jwt, build_sep10_jwt_with_iat, register_attestor_with_sep10};
+    use crate::sep10_test_util::{build_sep10_jwt, build_sep10_jwt_with_iat, build_sep10_jwt_with_jti, register_attestor_with_sep10};
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -136,6 +136,55 @@ mod sep10_contract_tests {
         let sub_str: std::string::String = sub.to_string();
         // exp == now → exp + skew(60) = 5060 > 5000 → accepted
         let jwt = build_sep10_jwt(&sk, &sub_str, now);
+        let token = String::from_str(&env, &jwt);
+        client.verify_sep10_token(&token, &issuer);
+    }
+
+    // --- Issue #550: persistent JTI replay cache ---
+
+    /// Same jti rejected on second contract invocation (cross-ledger replay protection).
+    #[test]
+    #[should_panic]
+    fn jti_rejected_on_second_invocation() {
+        let env = make_env();
+        let now = 1_000u64;
+        let (client, issuer, sk) = setup(&env, now);
+        let sub = Address::generate(&env).to_string();
+        let sub_str: std::string::String = sub.to_string();
+        let exp = now + 3_600;
+        let jwt = build_sep10_jwt_with_jti(&sk, &sub_str, exp, "unique-jti-replay-test");
+        let token = String::from_str(&env, &jwt);
+        // First call succeeds
+        client.verify_sep10_token(&token, &issuer);
+        // Second call with same jti must panic (ReplayAttack)
+        client.verify_sep10_token(&token, &issuer);
+    }
+
+    /// Different jti values are each accepted once.
+    #[test]
+    fn different_jtis_each_accepted() {
+        let env = make_env();
+        let now = 1_000u64;
+        let (client, issuer, sk) = setup(&env, now);
+        let sub = Address::generate(&env).to_string();
+        let sub_str: std::string::String = sub.to_string();
+        let exp = now + 3_600;
+        let jwt_a = build_sep10_jwt_with_jti(&sk, &sub_str, exp, "jti-alpha");
+        let jwt_b = build_sep10_jwt_with_jti(&sk, &sub_str, exp, "jti-beta");
+        client.verify_sep10_token(&String::from_str(&env, &jwt_a), &issuer);
+        client.verify_sep10_token(&String::from_str(&env, &jwt_b), &issuer);
+    }
+
+    /// Token without a jti claim is still accepted (jti is optional).
+    #[test]
+    fn token_without_jti_accepted() {
+        let env = make_env();
+        let now = 1_000u64;
+        let (client, issuer, sk) = setup(&env, now);
+        let sub = Address::generate(&env).to_string();
+        let sub_str: std::string::String = sub.to_string();
+        let exp = now + 3_600;
+        let jwt = build_sep10_jwt(&sk, &sub_str, exp);
         let token = String::from_str(&env, &jwt);
         client.verify_sep10_token(&token, &issuer);
     }

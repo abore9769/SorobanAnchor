@@ -75,10 +75,67 @@ pub struct Sep24TransactionStatusResponse {
 
 /// Validates that a SEP-24 interactive flow URL is a well-formed HTTPS URL.
 ///
-/// Delegates all validation to [`validate_anchor_domain`], which enforces
-/// https-only, no userinfo, no IP literals, and a valid registered domain.
-pub fn validate_interactive_url(url: &str) -> Result<(), AnchorKitError> {
-    validate_anchor_domain(url).map_err(|_| AnchorKitError::invalid_endpoint_format())
+/// Delegates structural validation to [`validate_anchor_domain`], which
+/// enforces https-only, no userinfo, no IP literals, and a valid registered
+/// domain.
+///
+/// When `allowed_origin` is `Some`, the scheme + host (+ optional port) of
+/// `url` must match it case-insensitively. Any mismatch returns
+/// [`ErrorCode::InvalidEndpointFormat`].
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::sep24::validate_interactive_url;
+///
+/// // No origin pinning
+/// assert!(validate_interactive_url("https://anchor.example.com/dep", None).is_ok());
+///
+/// // Pinned origin matches
+/// assert!(validate_interactive_url(
+///     "https://anchor.example.com/dep",
+///     Some("https://anchor.example.com"),
+/// ).is_ok());
+///
+/// // Pinned origin mismatch
+/// assert!(validate_interactive_url(
+///     "https://evil.example.com/dep",
+///     Some("https://anchor.example.com"),
+/// ).is_err());
+/// ```
+pub fn validate_interactive_url(url: &str, allowed_origin: Option<&str>) -> Result<(), AnchorKitError> {
+    validate_anchor_domain(url).map_err(|_| AnchorKitError::invalid_endpoint_format())?;
+
+    if let Some(origin) = allowed_origin {
+        let url_origin = extract_origin(url);
+        let expected_origin = extract_origin(origin);
+        if !url_origin.eq_ignore_ascii_case(&expected_origin) {
+            return Err(AnchorKitError::invalid_endpoint_format());
+        }
+    }
+    Ok(())
+}
+
+/// Extract `scheme://host` (with optional `:port`) from a URL string.
+///
+/// Strips any trailing path, query, or fragment. Returns the origin prefix
+/// lowercased for comparison, or an empty string on malformed input.
+fn extract_origin(url: &str) -> String {
+    // Strip scheme
+    let after_scheme = if let Some(rest) = url.find("://").map(|i| &url[i + 3..]) {
+        rest
+    } else {
+        return String::new();
+    };
+    // Find first '/' after host (or end of string)
+    let host_and_port = if let Some(slash) = after_scheme.find('/') {
+        &after_scheme[..slash]
+    } else {
+        after_scheme
+    };
+    let scheme_end = url.find("://").unwrap();
+    let scheme = &url[..scheme_end];
+    alloc::format!("{}://{}", scheme.to_ascii_lowercase(), host_and_port.to_ascii_lowercase())
 }
 
 /// Validates that a transaction ID is non-empty and contains only
@@ -139,7 +196,17 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AnchorKitError> {
 pub fn initiate_interactive_deposit(
     raw: RawInteractiveDepositResponse,
 ) -> Result<InteractiveDepositResponse, AnchorKitError> {
-    validate_interactive_url(&raw.url)?;
+    initiate_interactive_deposit_with_origin(raw, None)
+}
+
+/// Like [`initiate_interactive_deposit`] but pins the interactive URL to
+/// `expected_origin` when provided (e.g. the anchor's
+/// `transfer_server_sep0024` value from stellar.toml).
+pub fn initiate_interactive_deposit_with_origin(
+    raw: RawInteractiveDepositResponse,
+    expected_origin: Option<&str>,
+) -> Result<InteractiveDepositResponse, AnchorKitError> {
+    validate_interactive_url(&raw.url, expected_origin)?;
     validate_transaction_id(&raw.id)?;
     Ok(InteractiveDepositResponse {
         url: raw.url,
@@ -180,7 +247,16 @@ pub fn initiate_interactive_deposit(
 pub fn initiate_interactive_withdrawal(
     raw: RawInteractiveWithdrawalResponse,
 ) -> Result<InteractiveWithdrawalResponse, AnchorKitError> {
-    validate_interactive_url(&raw.url)?;
+    initiate_interactive_withdrawal_with_origin(raw, None)
+}
+
+/// Like [`initiate_interactive_withdrawal`] but pins the interactive URL to
+/// `expected_origin` when provided.
+pub fn initiate_interactive_withdrawal_with_origin(
+    raw: RawInteractiveWithdrawalResponse,
+    expected_origin: Option<&str>,
+) -> Result<InteractiveWithdrawalResponse, AnchorKitError> {
+    validate_interactive_url(&raw.url, expected_origin)?;
     validate_transaction_id(&raw.id)?;
     Ok(InteractiveWithdrawalResponse {
         url: raw.url,
@@ -239,7 +315,7 @@ pub fn fetch_sep24_transaction_status(
         ));
     }
     if let Some(ref url) = raw.more_info_url {
-        validate_interactive_url(url)?;
+        validate_interactive_url(url, None)?;
     }
     let asset_code = raw.asset_code.as_deref()
         .map(normalize_asset_code)
@@ -262,45 +338,45 @@ mod tests {
 
     #[test]
     fn test_validate_interactive_url_accepts_https() {
-        assert!(validate_interactive_url("https://anchor.example.com/deposit").is_ok());
+        assert!(validate_interactive_url("https://anchor.example.com/deposit", None).is_ok());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_http() {
-        assert!(validate_interactive_url("http://anchor.example.com/deposit").is_err());
+        assert!(validate_interactive_url("http://anchor.example.com/deposit", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_relative() {
-        assert!(validate_interactive_url("/deposit/interactive").is_err());
-        assert!(validate_interactive_url("deposit/interactive").is_err());
+        assert!(validate_interactive_url("/deposit/interactive", None).is_err());
+        assert!(validate_interactive_url("deposit/interactive", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_data_uri() {
-        assert!(validate_interactive_url("data:text/html,<h1>phish</h1>").is_err());
+        assert!(validate_interactive_url("data:text/html,<h1>phish</h1>", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_empty() {
-        assert!(validate_interactive_url("").is_err());
+        assert!(validate_interactive_url("", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_userinfo() {
-        assert!(validate_interactive_url("https://user:pass@anchor.example.com/deposit").is_err());
-        assert!(validate_interactive_url("https://user@anchor.example.com/deposit").is_err());
+        assert!(validate_interactive_url("https://user:pass@anchor.example.com/deposit", None).is_err());
+        assert!(validate_interactive_url("https://user@anchor.example.com/deposit", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_rejects_ip_literal() {
-        assert!(validate_interactive_url("https://[::1]/deposit").is_err());
-        assert!(validate_interactive_url("https://[2001:db8::1]/deposit").is_err());
+        assert!(validate_interactive_url("https://[::1]/deposit", None).is_err());
+        assert!(validate_interactive_url("https://[2001:db8::1]/deposit", None).is_err());
     }
 
     #[test]
     fn test_validate_interactive_url_accepts_valid_with_path_and_query() {
-        assert!(validate_interactive_url("https://anchor.example.com/sep24/deposit?asset=USDC").is_ok());
+        assert!(validate_interactive_url("https://anchor.example.com/sep24/deposit?asset=USDC", None).is_ok());
     }
 
     // -----------------------------------------------------------------------

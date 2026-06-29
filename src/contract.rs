@@ -15,6 +15,11 @@ use crate::transaction_state_tracker::{OptRecovery, TransactionState, Transactio
 use crate::replay_detection::{self, ReplayMetrics};
 use crate::admin_audit_log::AdminAuditLog;
 use crate::service_management::ServiceManager;
+use crate::sep38;
+
+/// Score penalty (in [0,1] units) applied to anomalous anchors in `score_anchor_with_anomaly`.
+/// Default: 0.20 (equivalent to 20 out of 100 score points).
+const ANOMALY_SCORE_PENALTY: f32 = 0.20_f32;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -326,6 +331,10 @@ impl WeightedRoutingStrategy {
     /// Compute a normalized composite score in [0.0, 1.0].
     /// Lower fee and faster settlement are better; higher reputation is better.
     /// Each dimension is normalised against the provided max values.
+    ///
+    /// When `anomaly_report` is `Some` and `anchor_id` appears in
+    /// `anomalous_anchors`, a penalty of `anomaly_penalty / 100.0` is
+    /// subtracted from the final score (default 0.20).
     pub fn score_anchor(
         &self,
         fee_pct: u32,
@@ -334,6 +343,29 @@ impl WeightedRoutingStrategy {
         max_fee: u32,
         max_settlement: u64,
         max_reputation: u32,
+    ) -> f32 {
+        self.score_anchor_with_anomaly(
+            fee_pct, settlement_time, reputation,
+            max_fee, max_settlement, max_reputation,
+            None, None,
+        )
+    }
+
+    /// Like [`score_anchor`] but applies a fee-anomaly penalty when the anchor
+    /// is flagged in `anomaly_report`.
+    ///
+    /// * `anchor_id` – the string ID used in the [`FeeAnomalyReport`].
+    /// * `anomaly_report` – optional pre-computed report; pass `None` to skip.
+    pub fn score_anchor_with_anomaly(
+        &self,
+        fee_pct: u32,
+        settlement_time: u64,
+        reputation: u32,
+        max_fee: u32,
+        max_settlement: u64,
+        max_reputation: u32,
+        anchor_id: Option<&str>,
+        anomaly_report: Option<&sep38::FeeAnomalyReport>,
     ) -> f32 {
         let fee_score = if max_fee == 0 {
             1.0_f32
@@ -350,9 +382,22 @@ impl WeightedRoutingStrategy {
         } else {
             reputation as f32 / max_reputation as f32
         };
-        self.fee_weight * fee_score
+        let base = self.fee_weight * fee_score
             + self.speed_weight * speed_score
-            + self.reputation_weight * rep_score
+            + self.reputation_weight * rep_score;
+
+        // Apply anomaly penalty when report flags this anchor.
+        let penalty = if let (Some(id), Some(report)) = (anchor_id, anomaly_report) {
+            if report.anomalous_anchors.iter().any(|(aid, _)| aid == id) {
+                ANOMALY_SCORE_PENALTY
+            } else {
+                0.0_f32
+            }
+        } else {
+            0.0_f32
+        };
+
+        (base - penalty).clamp(0.0_f32, 1.0_f32)
     }
 }
 
@@ -1056,6 +1101,11 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
+
+/// Inclusive lower bound for the configurable JWT max-length (set_jwt_max_len).
+const MIN_JWT_MAX_LEN: u32 = 2048;
+/// Inclusive upper bound for the configurable JWT max-length (set_jwt_max_len).
+const MAX_JWT_MAX_LEN: u32 = 16384;
 
 /// Default lifetime for an approved KYC record before the approval expires.
 const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
@@ -2032,7 +2082,7 @@ impl AnchorKitContract {
     /// Must be between 2048 and 16384. Admin-only.
     pub fn set_jwt_max_len(env: Env, max_len: u32) {
         Self::require_admin(&env);
-        if max_len < sep10_jwt::MAX_JWT_LEN || max_len > 16384 {
+        if max_len < MIN_JWT_MAX_LEN || max_len > MAX_JWT_MAX_LEN {
             panic_with_error!(&env, ErrorCode::ValidationError);
         }
         env.storage()
@@ -2072,6 +2122,31 @@ impl AnchorKitContract {
             .instance()
             .get::<_, u64>(&symbol_short!("JWTSKEW"))
             .unwrap_or(sep10_jwt::DEFAULT_CLOCK_SKEW)
+    }
+
+    /// Admin-only: remove all JTI entries from persistent storage whose TTL
+    /// has lapsed. This is a manual cleanup for environments where automatic
+    /// Soroban TTL expiry is not guaranteed.
+    ///
+    /// Iterates the JTI index stored under key `"JTIIDX"` and removes entries
+    /// that are no longer present in persistent storage (already expired).
+    pub fn purge_expired_jtis(env: Env) {
+        Self::require_admin(&env);
+        let idx_key = symbol_short!("JTIIDX");
+        let keys: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut live: Vec<Bytes> = Vec::new(&env);
+        for k in keys.iter() {
+            if env.storage().persistent().has(&k) {
+                live.push_back(k);
+            }
+        }
+        if live.len() < keys.len() {
+            env.storage().persistent().set(&idx_key, &live);
+        }
     }
 
     /// Verifies a SEP-10 JWT (JWS compact, EdDSA) using the stored key for `issuer`: signature, `exp`, and `sub`.
@@ -3158,7 +3233,13 @@ impl AnchorKitContract {
         Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::check_timestamp(&env, timestamp);
 
-        // Replay check (read-only)
+        // Replay check (read-only).
+        // The USED/(issuer, hash) key written below is also checked by
+        // submit_attestation_with_session, so a non-session submission of a
+        // given (issuer, hash) pair blocks any future session submission of
+        // the same pair.  The SESSREQ key is session-scoped and has no
+        // analogue in this sessionless path; the global USED key provides
+        // equivalent cross-path replay protection.
         let issuer_xdr = issuer.clone().to_xdr(&env);
         let issuer_raw = xdr_to_vec(&issuer_xdr);
         let hash_raw = xdr_to_vec(&payload_hash);
@@ -5815,17 +5896,18 @@ impl AnchorKitContract {
         }
     }
 
-    pub fn refresh_anchor_info(env: Env, anchor: Address) {
+    pub fn refresh_anchor_info(env: Env, anchor: Address, toml_data: StellarToml, ttl_seconds: u64, source_uri: String) {
         anchor.require_auth();
         let key = (symbol_short!("TOMLCACHE"), anchor.clone());
         let had_cached_entry = env.storage().temporary().has(&key);
+        Self::fetch_anchor_info(env.clone(), anchor.clone(), toml_data, ttl_seconds, source_uri);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "anchor_info"),
-            RefreshStatus::Failed,
+            RefreshStatus::Success,
             had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement anchor info was available"),
+            String::from_str(&env, "anchor info cache refreshed successfully"),
         );
     }
 
@@ -5912,6 +5994,18 @@ impl AnchorKitContract {
     // Transaction state
     // -----------------------------------------------------------------------
 
+    /// Admin-only: configure the auto-eviction policy for the transaction state tracker.
+    ///
+    /// When `enabled` is `true`, `create_transaction_record` will proactively
+    /// evict the oldest terminal transactions when storage budget is at Warning
+    /// or Critical. `max_per_call` bounds the number of evictions per call.
+    pub fn set_eviction_policy(env: Env, enabled: bool, max_per_call: u32) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&symbol_short!("EVICTEN"), &enabled);
+        env.storage().instance().set(&symbol_short!("EVICTMAX"), &max_per_call);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
     pub fn create_transaction_record(
         env: Env,
         transaction_id: u64,
@@ -5948,6 +6042,21 @@ impl AnchorKitContract {
         initiator: Address,
         routing_reason: Option<String>,
     ) -> TransactionStateRecord {
+        // Apply eviction policy from storage before inserting a new record.
+        let eviction_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("EVICTEN"))
+            .unwrap_or(false);
+        if eviction_enabled {
+            let max_per_call: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("EVICTMAX"))
+                .unwrap_or(10u32);
+            Self::run_auto_eviction(env, max_per_call);
+        }
+
         let now = env.ledger().timestamp();
         let current_ledger = env.ledger().sequence();
         let mut history = soroban_sdk::Vec::new(env);
@@ -5976,6 +6085,53 @@ impl AnchorKitContract {
         env.storage().persistent().set(&ids_key, &ids);
         env.storage().persistent().extend_ttl(&ids_key, PERSISTENT_TTL, PERSISTENT_TTL);
         record
+    }
+
+    /// Evict the oldest terminal transactions from persistent storage.
+    /// Called by `create_transaction_record_internal` when eviction is enabled.
+    fn run_auto_eviction(env: &Env, max_per_call: u32) {
+        let ids_key = symbol_short!("TXIDS");
+        let ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ids_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+        let mut terminal: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        for id in ids.iter() {
+            let key = (symbol_short!("TXSTATE"), id);
+            if let Some(rec) = env
+                .storage()
+                .persistent()
+                .get::<_, TransactionStateRecord>(&key)
+            {
+                if rec.state.is_terminal() {
+                    terminal.push((rec.timestamp, id));
+                }
+            }
+        }
+        terminal.sort_unstable_by_key(|&(ts, _)| ts);
+
+        let limit = max_per_call as usize;
+        let mut evicted_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for (_, id) in terminal.iter().take(limit) {
+            let key = (symbol_short!("TXSTATE"), *id);
+            env.storage().persistent().remove(&key);
+            evicted_ids.push(*id);
+        }
+        if !evicted_ids.is_empty() {
+            let mut live: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(env);
+            for id in ids.iter() {
+                if !evicted_ids.contains(&id) {
+                    live.push_back(id);
+                }
+            }
+            env.storage().persistent().set(&ids_key, &live);
+            env.events().publish(
+                (symbol_short!("EVICT"), symbol_short!("budget")),
+                evicted_ids.len() as u32,
+            );
+        }
     }
 
     /// Advance a transaction from Pending to InProgress.
@@ -6198,17 +6354,10 @@ impl AnchorKitContract {
     /// Sort services in ascending order for deterministic storage.
     /// This ensures consistent behavior regardless of submission order.
     fn sort_services(_env: &Env, services: &mut Vec<u32>) {
-        // Simple bubble sort for small vectors (typically 1-4 elements)
-        let len = services.len();
-        for i in 0..len {
-            for j in 0..len - i - 1 {
-                let a = services.get(j).unwrap();
-                let b = services.get(j + 1).unwrap();
-                if a > b {
-                    services.set(j, b);
-                    services.set(j + 1, a);
-                }
-            }
+        let mut native: alloc::vec::Vec<u32> = services.iter().collect();
+        native.sort_unstable();
+        for (i, val) in native.iter().enumerate() {
+            services.set(i as u32, *val);
         }
     }
 
