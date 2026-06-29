@@ -421,6 +421,13 @@ pub struct TransactionStateTracker {
     known_ids: alloc::vec::Vec<u64>,
     /// Simulated expiry set (dev mode only): IDs that cleanup_expired should remove.
     pub expired_ids: alloc::vec::Vec<u64>,
+    /// When `true`, `create_transaction` will evict the oldest terminal
+    /// transactions automatically when the budget is at Warning or Critical.
+    pub eviction_enabled: bool,
+    /// Maximum number of terminal transactions evicted per `create_transaction` call.
+    pub max_evictions_per_call: u32,
+    /// In-memory budget monitor (dev mode) — tracks entry count and byte usage.
+    pub budget_monitor: StorageBudgetMonitor,
 }
 
 impl TransactionStateTracker {
@@ -450,6 +457,9 @@ impl TransactionStateTracker {
             is_dev_mode,
             known_ids: alloc::vec::Vec::new(),
             expired_ids: alloc::vec::Vec::new(),
+            eviction_enabled: false,
+            max_evictions_per_call: 10,
+            budget_monitor: StorageBudgetMonitor::new(),
         }
     }
 
@@ -509,6 +519,9 @@ impl TransactionStateTracker {
         routing_reason: Option<String>,
         env: &Env,
     ) -> Result<TransactionStateRecord, String> {
+        // Auto-evict terminal transactions when budget is at Warning/Critical.
+        self.auto_evict_if_needed(env);
+
         let current_time = env.ledger().timestamp();
         let mut history = Vec::new(env);
         history.push_back((TransactionState::Pending, current_time));
@@ -528,8 +541,11 @@ impl TransactionStateTracker {
         };
 
         if self.is_dev_mode {
+            // Approximate byte size for budget tracking.
+            const APPROX_RECORD_BYTES: u64 = 256;
             self.cache.push(record.clone());
             self.known_ids.push(transaction_id);
+            self.budget_monitor.record_entry(APPROX_RECORD_BYTES);
         } else {
             let key = (symbol_short!("TXSTATE"), transaction_id);
             env.storage().persistent().set(&key, &record);
@@ -545,6 +561,109 @@ impl TransactionStateTracker {
         }
 
         Ok(record)
+    }
+
+    /// Evict the oldest terminal (Completed or Failed) transactions when the
+    /// in-memory budget is at or above the Warning threshold.
+    ///
+    /// Bounded to at most `max_evictions_per_call` removals per invocation.
+    /// Does nothing when `eviction_enabled` is `false`.
+    ///
+    /// In dev mode the budget thresholds are:
+    ///   - Warning:  20 entries × 256 bytes = 5 120 bytes
+    ///   - Critical: 50 entries × 256 bytes = 12 800 bytes
+    pub fn auto_evict_if_needed(&mut self, env: &Env) {
+        if !self.eviction_enabled {
+            return;
+        }
+
+        const WARNING_BYTES: u64 = 5_120;
+        const CRITICAL_BYTES: u64 = 12_800;
+        const APPROX_RECORD_BYTES: u64 = 256;
+
+        let status = self.budget_monitor.get_status(WARNING_BYTES, CRITICAL_BYTES);
+        if matches!(status, BudgetStatus::Ok) {
+            return;
+        }
+
+        if self.is_dev_mode {
+            // Collect terminal IDs sorted by created_at (timestamp ascending).
+            let mut terminal: alloc::vec::Vec<(u64, u64)> = self
+                .cache
+                .iter()
+                .filter(|r| r.state.is_terminal())
+                .map(|r| (r.timestamp, r.transaction_id))
+                .collect();
+            terminal.sort_unstable_by_key(|&(ts, _)| ts);
+
+            let limit = self.max_evictions_per_call as usize;
+            let mut evicted = 0u32;
+            let mut evicted_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+            for (_, id) in terminal.iter().take(limit) {
+                evicted_ids.push(*id);
+                evicted += 1;
+            }
+            if evicted > 0 {
+                self.cache.retain(|r| !evicted_ids.contains(&r.transaction_id));
+                self.known_ids.retain(|id| !evicted_ids.contains(id));
+                for _ in 0..evicted {
+                    self.budget_monitor.remove_entry(APPROX_RECORD_BYTES);
+                }
+                // Emit a Soroban event in production; in dev mode we record in audit log.
+                // (env.events() is available in both modes via the Env abstraction.)
+                env.events().publish(
+                    (symbol_short!("EVICT"), symbol_short!("budget")),
+                    (evicted, status == BudgetStatus::Critical),
+                );
+            }
+        } else {
+            let ids_key = symbol_short!("TXIDS");
+            let ids: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&ids_key)
+                .unwrap_or_else(|| Vec::new(env));
+
+            // Collect terminal records sorted by timestamp.
+            let mut terminal: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+            for id in ids.iter() {
+                let key = (symbol_short!("TXSTATE"), id);
+                if let Some(rec) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, TransactionStateRecord>(&key)
+                {
+                    if rec.state.is_terminal() {
+                        terminal.push((rec.timestamp, id));
+                    }
+                }
+            }
+            terminal.sort_unstable_by_key(|&(ts, _)| ts);
+
+            let limit = self.max_evictions_per_call as usize;
+            let mut evicted = 0u32;
+            let mut evicted_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+            for (_, id) in terminal.iter().take(limit) {
+                let key = (symbol_short!("TXSTATE"), *id);
+                env.storage().persistent().remove(&key);
+                evicted_ids.push(*id);
+                evicted += 1;
+            }
+            if evicted > 0 {
+                // Rebuild live IDs list.
+                let mut live: Vec<u64> = Vec::new(env);
+                for id in ids.iter() {
+                    if !evicted_ids.contains(&id) {
+                        live.push_back(id);
+                    }
+                }
+                env.storage().persistent().set(&ids_key, &live);
+                env.events().publish(
+                    (symbol_short!("EVICT"), symbol_short!("budget")),
+                    (evicted, status == BudgetStatus::Critical),
+                );
+            }
+        }
     }
 
     /// Transition a transaction from [`Pending`](TransactionState::Pending) to

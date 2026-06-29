@@ -532,6 +532,101 @@ impl AnchorFeeHistory {
     }
 }
 
+// ── CrossAnchorFeeAggregator ──────────────────────────────────────────────────
+
+/// Cross-anchor fee anomaly report produced by [`CrossAnchorFeeAggregator::compute_report`].
+#[derive(Clone, Debug)]
+pub struct FeeAnomalyReport {
+    /// Cluster-wide median fee in basis points.
+    pub median_fee_bps: u64,
+    /// Anchors whose 7-day average fee exceeds the median by more than
+    /// `anomaly_threshold_bps`, listed as `(anchor_id, average_fee_bps)`.
+    pub anomalous_anchors: AllocVec<(String, u64)>,
+    /// Length of the observation window used for the 7-day average (seconds).
+    pub observation_window_seconds: u64,
+}
+
+/// Aggregates fee observations across multiple anchors and identifies anomalies.
+///
+/// An anchor is flagged as anomalous when its 7-day average fee exceeds the
+/// cluster-wide median by more than `anomaly_threshold_bps` basis points.
+pub struct CrossAnchorFeeAggregator {
+    anchors: alloc::collections::BTreeMap<String, AnchorFeeHistory>,
+    /// Threshold above the cluster median (in bps) that classifies an anchor as anomalous.
+    pub anomaly_threshold_bps: u64,
+}
+
+impl CrossAnchorFeeAggregator {
+    /// Default anomaly threshold: 150 bps above the cluster median.
+    pub const DEFAULT_ANOMALY_THRESHOLD_BPS: u64 = 150;
+
+    /// Observation window for the 7-day average: 7 × 24 × 3600 seconds.
+    pub const WINDOW_SECONDS: u64 = 7 * 24 * 3600;
+
+    pub fn new(anomaly_threshold_bps: u64) -> Self {
+        CrossAnchorFeeAggregator {
+            anchors: alloc::collections::BTreeMap::new(),
+            anomaly_threshold_bps,
+        }
+    }
+
+    /// Record a fee observation for `anchor_id`.
+    pub fn insert_observation(&mut self, anchor_id: &str, fee_bps: u32, timestamp: u64) {
+        let history = self
+            .anchors
+            .entry(anchor_id.into())
+            .or_insert_with(|| AnchorFeeHistory::new(Self::WINDOW_SECONDS));
+        history.record(fee_bps, 0, timestamp);
+    }
+
+    /// Compute the [`FeeAnomalyReport`] for the current cluster state.
+    ///
+    /// Anchors with no observations within the window are excluded from the
+    /// median computation and are never flagged as anomalous.
+    pub fn compute_report(&self, current_time: u64) -> FeeAnomalyReport {
+        // Collect per-anchor averages for anchors that have observations.
+        let mut averages: AllocVec<(String, u64)> = AllocVec::new();
+        for (id, history) in &self.anchors {
+            if let Some(avg) = history.average_fee_bps(current_time) {
+                averages.push((id.clone(), avg as u64));
+            }
+        }
+
+        if averages.is_empty() {
+            return FeeAnomalyReport {
+                median_fee_bps: 0,
+                anomalous_anchors: AllocVec::new(),
+                observation_window_seconds: Self::WINDOW_SECONDS,
+            };
+        }
+
+        // Sort by fee to compute median.
+        let mut fees: AllocVec<u64> = averages.iter().map(|(_, f)| *f).collect();
+        fees.sort_unstable();
+        let median = {
+            let n = fees.len();
+            if n % 2 == 1 {
+                fees[n / 2]
+            } else {
+                // Lower median for even-count arrays.
+                fees[n / 2 - 1]
+            }
+        };
+
+        let threshold = self.anomaly_threshold_bps;
+        let anomalous_anchors: AllocVec<(String, u64)> = averages
+            .into_iter()
+            .filter(|(_, avg)| avg.saturating_sub(median) > threshold)
+            .collect();
+
+        FeeAnomalyReport {
+            median_fee_bps: median,
+            anomalous_anchors,
+            observation_window_seconds: Self::WINDOW_SECONDS,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
