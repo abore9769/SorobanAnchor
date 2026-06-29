@@ -1056,6 +1056,11 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
 
+/// Inclusive lower bound for the configurable JWT max-length (set_jwt_max_len).
+const MIN_JWT_MAX_LEN: u32 = 2048;
+/// Inclusive upper bound for the configurable JWT max-length (set_jwt_max_len).
+const MAX_JWT_MAX_LEN: u32 = 16384;
+
 /// Default lifetime for an approved KYC record before the approval expires.
 const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
 
@@ -2031,7 +2036,7 @@ impl AnchorKitContract {
     /// Must be between 2048 and 16384. Admin-only.
     pub fn set_jwt_max_len(env: Env, max_len: u32) {
         Self::require_admin(&env);
-        if max_len < sep10_jwt::MAX_JWT_LEN || max_len > 16384 {
+        if max_len < MIN_JWT_MAX_LEN || max_len > MAX_JWT_MAX_LEN {
             panic_with_error!(&env, ErrorCode::ValidationError);
         }
         env.storage()
@@ -3157,7 +3162,13 @@ impl AnchorKitContract {
         Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::check_timestamp(&env, timestamp);
 
-        // Replay check (read-only)
+        // Replay check (read-only).
+        // The USED/(issuer, hash) key written below is also checked by
+        // submit_attestation_with_session, so a non-session submission of a
+        // given (issuer, hash) pair blocks any future session submission of
+        // the same pair.  The SESSREQ key is session-scoped and has no
+        // analogue in this sessionless path; the global USED key provides
+        // equivalent cross-path replay protection.
         let issuer_xdr = issuer.clone().to_xdr(&env);
         let issuer_raw = xdr_to_vec(&issuer_xdr);
         let hash_raw = xdr_to_vec(&payload_hash);
@@ -5758,17 +5769,18 @@ impl AnchorKitContract {
         }
     }
 
-    pub fn refresh_anchor_info(env: Env, anchor: Address) {
+    pub fn refresh_anchor_info(env: Env, anchor: Address, toml_data: StellarToml, ttl_seconds: u64, source_uri: String) {
         anchor.require_auth();
         let key = (symbol_short!("TOMLCACHE"), anchor.clone());
         let had_cached_entry = env.storage().temporary().has(&key);
+        Self::fetch_anchor_info(env.clone(), anchor.clone(), toml_data, ttl_seconds, source_uri);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "anchor_info"),
-            RefreshStatus::Failed,
+            RefreshStatus::Success,
             had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement anchor info was available"),
+            String::from_str(&env, "anchor info cache refreshed successfully"),
         );
     }
 
@@ -6122,17 +6134,10 @@ impl AnchorKitContract {
     /// Sort services in ascending order for deterministic storage.
     /// This ensures consistent behavior regardless of submission order.
     fn sort_services(_env: &Env, services: &mut Vec<u32>) {
-        // Simple bubble sort for small vectors (typically 1-4 elements)
-        let len = services.len();
-        for i in 0..len {
-            for j in 0..len - i - 1 {
-                let a = services.get(j).unwrap();
-                let b = services.get(j + 1).unwrap();
-                if a > b {
-                    services.set(j, b);
-                    services.set(j + 1, a);
-                }
-            }
+        let mut native: alloc::vec::Vec<u32> = services.iter().collect();
+        native.sort_unstable();
+        for (i, val) in native.iter().enumerate() {
+            services.set(i as u32, *val);
         }
     }
 
