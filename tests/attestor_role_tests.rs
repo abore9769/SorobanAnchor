@@ -515,3 +515,78 @@ fn test_multisig_requirements_reference_valid_attestors() {
         }
     }
 }
+
+// ── Per-role rate limit override tests (#554) ─────────────────────────────────
+
+#[cfg(test)]
+mod rate_limit_role_override_tests {
+    use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+    use soroban_sdk::{Address, Env, Symbol};
+    use anchorkit::rate_limiter::{RateLimiter, RateLimitConfig};
+
+    fn make_env() -> Env {
+        let env = Env::default();
+        env.mock_all_auths();
+        env
+    }
+
+    fn set_ledger(env: &Env, seq: u32) {
+        env.ledger().set(LedgerInfo {
+            timestamp: 1000,
+            protocol_version: 21,
+            sequence_number: seq,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6_312_000,
+        });
+    }
+
+    /// Role override takes precedence over the global config.
+    #[test]
+    fn test_role_override_takes_precedence_over_global() {
+        let env = make_env();
+        set_ledger(&env, 1);
+        let cid = env.register_contract(None, anchorkit::contract::AnchorKitContract);
+        let role = Symbol::new(&env, "KycAdmin");
+        let role_cfg = RateLimitConfig { max_submissions: 50, window_length: 100 };
+        env.as_contract(&cid, || {
+            RateLimiter::set_role_override(&env, role.clone(), role_cfg.clone());
+            let resolved = RateLimiter::resolve_config(&env, &Address::generate(&env), Some(role));
+            assert_eq!(resolved.max_submissions, 50);
+        });
+    }
+
+    /// Address override takes precedence over role override.
+    #[test]
+    fn test_address_override_takes_precedence_over_role() {
+        let env = make_env();
+        set_ledger(&env, 1);
+        let cid = env.register_contract(None, anchorkit::contract::AnchorKitContract);
+        let attestor = Address::generate(&env);
+        let role = Symbol::new(&env, "KycAdmin");
+        let role_cfg = RateLimitConfig { max_submissions: 50, window_length: 100 };
+        let addr_cfg = RateLimitConfig { max_submissions: 99, window_length: 100 };
+        env.as_contract(&cid, || {
+            RateLimiter::set_role_override(&env, role.clone(), role_cfg);
+            RateLimiter::set_address_override(&env, &attestor, addr_cfg);
+            let resolved = RateLimiter::resolve_config(&env, &attestor, Some(role));
+            assert_eq!(resolved.max_submissions, 99);
+        });
+    }
+
+    /// Missing role uses global config.
+    #[test]
+    fn test_missing_role_uses_global_config() {
+        let env = make_env();
+        set_ledger(&env, 1);
+        let cid = env.register_contract(None, anchorkit::contract::AnchorKitContract);
+        let attestor = Address::generate(&env);
+        env.as_contract(&cid, || {
+            let resolved = RateLimiter::resolve_config(&env, &attestor, None);
+            assert_eq!(resolved.max_submissions, 10);
+            assert_eq!(resolved.window_length, 100);
+        });
+    }
+}

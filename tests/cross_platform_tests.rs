@@ -1,6 +1,38 @@
 // Cross-platform path handling tests
 // These tests verify that all file operations use platform-agnostic path APIs
 
+// ── #563: verify_reproducible_build.sh sanity checks ─────────────────────────
+#[test]
+fn test_verify_reproducible_build_script_exists() {
+    assert!(
+        Path::new("scripts/verify_reproducible_build.sh").exists(),
+        "scripts/verify_reproducible_build.sh must exist"
+    );
+}
+
+#[test]
+fn test_verify_reproducible_build_script_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata("scripts/verify_reproducible_build.sh")
+        .expect("could not stat scripts/verify_reproducible_build.sh");
+    let mode = meta.permissions().mode();
+    assert!(
+        mode & 0o111 != 0,
+        "scripts/verify_reproducible_build.sh must be executable (mode: {:o})",
+        mode
+    );
+}
+
+#[test]
+fn test_verify_reproducible_build_script_contains_sha256sum() {
+    let content = fs::read_to_string("scripts/verify_reproducible_build.sh")
+        .expect("could not read scripts/verify_reproducible_build.sh");
+    assert!(
+        content.contains("sha256sum"),
+        "scripts/verify_reproducible_build.sh must contain 'sha256sum'"
+    );
+}
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

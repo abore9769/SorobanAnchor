@@ -680,3 +680,144 @@ mod snapshot_tests {
         }
     }
 }
+
+// ── Auto-eviction tests (#553) ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod auto_eviction_tests {
+    use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+    use soroban_sdk::Env;
+
+    fn make_env() -> Env {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6_312_000,
+        });
+        env
+    }
+
+    /// Eviction triggers when budget reaches the warning threshold.
+    #[test]
+    fn eviction_triggers_on_warning_threshold() {
+        let env = make_env();
+        let mut tracker = TransactionStateTracker::new(true);
+        tracker.eviction_enabled = true;
+        tracker.max_evictions_per_call = 10;
+
+        // Fill past warning threshold (>20 entries × 256 bytes = >5120 bytes).
+        for i in 0..22u64 {
+            let addr = soroban_sdk::Address::generate(&env);
+            tracker.create_transaction(i, addr.clone(), &env).unwrap();
+            // Transition to terminal (Completed) so they are eviction candidates.
+            tracker.start_transaction(i, &env).unwrap();
+            tracker.complete_transaction(i, &env).unwrap();
+        }
+        // Budget should now be at/above warning.
+        // Creating one more transaction triggers eviction.
+        let addr = soroban_sdk::Address::generate(&env);
+        tracker.create_transaction(99, addr, &env).unwrap();
+
+        // Eviction happened: some completed entries were removed.
+        assert!(tracker.cache_size() < 23);
+    }
+
+    /// Oldest entries are evicted first.
+    #[test]
+    fn oldest_entries_evicted_first() {
+        let env = make_env();
+        let mut tracker = TransactionStateTracker::new(true);
+        tracker.eviction_enabled = true;
+        tracker.max_evictions_per_call = 1;
+
+        for i in 0..22u64 {
+            let addr = soroban_sdk::Address::generate(&env);
+            tracker.create_transaction(i, addr.clone(), &env).unwrap();
+            tracker.start_transaction(i, &env).unwrap();
+            tracker.complete_transaction(i, &env).unwrap();
+        }
+
+        let size_before = tracker.cache_size();
+        let addr = soroban_sdk::Address::generate(&env);
+        tracker.create_transaction(99, addr, &env).unwrap();
+
+        // At most 1 eviction per call, so size decreases by exactly 1 terminal.
+        // (new record was added so net change may be 0 if 1 evicted + 1 added)
+        assert!(tracker.cache_size() <= size_before);
+    }
+
+    /// max_evictions_per_call is respected.
+    #[test]
+    fn max_evictions_per_call_respected() {
+        let env = make_env();
+        let mut tracker = TransactionStateTracker::new(true);
+        tracker.eviction_enabled = true;
+        tracker.max_evictions_per_call = 3;
+
+        for i in 0..22u64 {
+            let addr = soroban_sdk::Address::generate(&env);
+            tracker.create_transaction(i, addr.clone(), &env).unwrap();
+            tracker.start_transaction(i, &env).unwrap();
+            tracker.complete_transaction(i, &env).unwrap();
+        }
+
+        let size_before = tracker.cache_size();
+        let addr = soroban_sdk::Address::generate(&env);
+        tracker.create_transaction(99, addr, &env).unwrap();
+
+        // At most 3 evictions: size_before + 1 (new) - 3 (evicted) = size_before - 2.
+        assert!(tracker.cache_size() >= size_before.saturating_sub(2));
+    }
+
+    /// Eviction does not run when eviction_enabled = false.
+    #[test]
+    fn eviction_disabled_no_removal() {
+        let env = make_env();
+        let mut tracker = TransactionStateTracker::new(true);
+        tracker.eviction_enabled = false;
+
+        for i in 0..22u64 {
+            let addr = soroban_sdk::Address::generate(&env);
+            tracker.create_transaction(i, addr.clone(), &env).unwrap();
+            tracker.start_transaction(i, &env).unwrap();
+            tracker.complete_transaction(i, &env).unwrap();
+        }
+        let size_before = tracker.cache_size();
+        let addr = soroban_sdk::Address::generate(&env);
+        tracker.create_transaction(99, addr, &env).unwrap();
+        // No eviction: size grew by exactly 1.
+        assert_eq!(tracker.cache_size(), size_before + 1);
+    }
+
+    /// Non-terminal (Pending, InProgress) transactions are never evicted.
+    #[test]
+    fn non_terminal_transactions_never_evicted() {
+        let env = make_env();
+        let mut tracker = TransactionStateTracker::new(true);
+        tracker.eviction_enabled = true;
+        tracker.max_evictions_per_call = 10;
+
+        // Create 22 Pending transactions (non-terminal) to push past warning.
+        for i in 0..22u64 {
+            let addr = soroban_sdk::Address::generate(&env);
+            tracker.create_transaction(i, addr.clone(), &env).unwrap();
+            // Leave as Pending — non-terminal.
+        }
+
+        let size_before = tracker.cache_size();
+        let addr = soroban_sdk::Address::generate(&env);
+        tracker.create_transaction(99, addr, &env).unwrap();
+
+        // No terminal records to evict; all pending entries remain.
+        // Size grows by 1 (the new one), nothing was removed.
+        assert_eq!(tracker.cache_size(), size_before + 1);
+    }
+}

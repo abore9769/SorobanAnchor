@@ -92,6 +92,7 @@ mod anchor_info_discovery_tests {
             ),
             kyc_server: String::from_str(env, "https://kyc.example.com"),
             web_auth_endpoint: String::from_str(env, "https://auth.example.com"),
+            direct_payment_server: String::from_str(env, ""),
         }
     }
 
@@ -116,6 +117,7 @@ mod anchor_info_discovery_tests {
             ),
             kyc_server: String::from_str(env, "https://kyc.example.com"),
             web_auth_endpoint: String::from_str(env, "https://auth.example.com"),
+            direct_payment_server: String::from_str(env, ""),
         }
     }
 
@@ -485,6 +487,7 @@ mod anchor_info_discovery_tests {
             ),
             kyc_server: String::from_str(&env, "https://kyc2.example.com"),
             web_auth_endpoint: String::from_str(&env, "https://auth2.example.com"),
+            direct_payment_server: String::from_str(&env, ""),
         };
 
         client.fetch_anchor_info(&anchor1, &sample_toml(&env), &3600u64, &no_uri(&env));

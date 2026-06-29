@@ -226,10 +226,10 @@ mod contract_init_upgrade_tests {
         // initialize() sets SCHEMAVER = SCHEMA_V1 = 1
         assert_eq!(client.get_schema_version(), 1);
 
-        client.migrate(&2u32);
+        client.migrate(&2u32, &100u32);
         assert_eq!(client.get_schema_version(), 2);
 
-        client.migrate(&5u32);
+        client.migrate(&5u32, &100u32);
         assert_eq!(client.get_schema_version(), 5);
     }
 
@@ -244,7 +244,7 @@ mod contract_init_upgrade_tests {
         set_ledger(&env, 1000);
         let (client, _admin) = deploy(&env);
 
-        client.migrate(&1u32);
+        client.migrate(&1u32, &100u32);
     }
 
     // -----------------------------------------------------------------------
@@ -259,7 +259,7 @@ mod contract_init_upgrade_tests {
         let (client, admin) = deploy(&env);
         client.initialize(&admin);
 
-        client.migrate(&0u32);
+        client.migrate(&0u32, &100u32);
     }
 
     // -----------------------------------------------------------------------
@@ -274,9 +274,9 @@ mod contract_init_upgrade_tests {
         let (client, admin) = deploy(&env);
         client.initialize(&admin);
 
-        client.migrate(&3u32);
+        client.migrate(&3u32, &100u32);
         // Attempting to migrate to the same version must fail.
-        client.migrate(&3u32);
+        client.migrate(&3u32, &100u32);
     }
 
     #[test]
@@ -287,9 +287,9 @@ mod contract_init_upgrade_tests {
         let (client, admin) = deploy(&env);
         client.initialize(&admin);
 
-        client.migrate(&5u32);
+        client.migrate(&5u32, &100u32);
         // Downgrade attempt must fail.
-        client.migrate(&2u32);
+        client.migrate(&2u32, &100u32);
     }
 
     // -----------------------------------------------------------------------
@@ -322,12 +322,12 @@ mod contract_init_upgrade_tests {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "migrate",
-                args: soroban_sdk::vec![&env, 1u32.into_val(&env)],
+                args: soroban_sdk::vec![&env, 2u32.into_val(&env), 100u32.into_val(&env)],
                 sub_invokes: &[],
             },
         }]);
         // Must panic because attacker is not the stored admin.
-        client.migrate(&1u32);
+        client.migrate(&2u32, &100u32);
     }
 
     // -----------------------------------------------------------------------

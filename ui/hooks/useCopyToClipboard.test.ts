@@ -1,5 +1,5 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useCopyToClipboard, formatJsonForCopy, generateCurlCommand, generateInstallCommand } from './useCopyToClipboard';
+import { useCopyToClipboard, exportHistoryAsJson, formatJsonForCopy, generateCurlCommand, generateInstallCommand } from './useCopyToClipboard';
 
 // Mock clipboard API
 const mockWriteText = jest.fn();
@@ -208,5 +208,52 @@ describe('generateInstallCommand', () => {
   it('should default to npm', () => {
     const result = generateInstallCommand('anchorkit');
     expect(result).toBe('npm install anchorkit');
+  });
+});
+
+// ─── #565: exportHistoryAsJson ────────────────────────────────────────────────
+
+describe('exportHistoryAsJson', () => {
+  let createObjectURLMock: jest.Mock;
+  let revokeObjectURLMock: jest.Mock;
+  let clickMock: jest.Mock;
+  let createElementSpy: jest.SpyInstance;
+  let anchor: { href: string; download: string; click: jest.Mock };
+
+  beforeEach(() => {
+    createObjectURLMock = jest.fn(() => 'blob:mock-url');
+    revokeObjectURLMock = jest.fn();
+    clickMock = jest.fn();
+    anchor = { href: '', download: '', click: clickMock };
+
+    global.URL.createObjectURL = createObjectURLMock;
+    global.URL.revokeObjectURL = revokeObjectURLMock;
+    createElementSpy = jest.spyOn(document, 'createElement').mockReturnValue(anchor as unknown as HTMLAnchorElement);
+  });
+
+  afterEach(() => {
+    createElementSpy.mockRestore();
+  });
+
+  it('creates a Blob with content type application/json', () => {
+    // Capture the Blob passed to createObjectURL
+    exportHistoryAsJson([{ id: '1' }]);
+    const blobArg: Blob = createObjectURLMock.mock.calls[0][0];
+    expect(blobArg.type).toBe('application/json');
+  });
+
+  it('sets download attribute matching anchorkit_history_ pattern', () => {
+    exportHistoryAsJson([]);
+    expect(anchor.download).toMatch(/^anchorkit_history_\d+\.json$/);
+  });
+
+  it('programmatically clicks the anchor element', () => {
+    exportHistoryAsJson([]);
+    expect(clickMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes the object URL after click', () => {
+    exportHistoryAsJson([]);
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:mock-url');
   });
 });

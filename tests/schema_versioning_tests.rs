@@ -113,9 +113,9 @@ mod schema_versioning_tests {
         set_ledger(&env, 1_000);
         let (client, _) = setup(&env);
 
-        client.migrate(&1u32);
+        client.migrate(&2u32, &100u32);
         // Second call with advancing version must also succeed without panicking.
-        client.migrate(&2u32);
+        client.migrate(&3u32, &100u32);
     }
 
     // -----------------------------------------------------------------------

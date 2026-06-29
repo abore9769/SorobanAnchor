@@ -157,7 +157,7 @@ anchorkit doctor
 The contract explicitly exposes which Stellar Ecosystem Proposals (SEPs) it supports via two on-chain methods:
 
 ```rust
-// Returns [6, 10, 24, 38]
+// Returns [6, 10, 24, 31, 38]
 let seps: Vec<u32> = AnchorKitContract::supported_seps(env);
 
 // Returns per-SEP boolean flags
@@ -170,9 +170,10 @@ assert!(flags.sep10); // SEP-10 JWT authentication is supported
 | [SEP-6](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md) | Non-interactive deposit and withdrawal | ✓ |
 | [SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md) | Stellar Web Authentication (JWT) | ✓ |
 | [SEP-24](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0024.md) | Interactive deposit and withdrawal | ✓ |
+| [SEP-31](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0031.md) | Direct payment | ✓ |
 | [SEP-38](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0038.md) | Anchor RFQ / firm quotes | ✓ |
 
-Constants are also exported from the `contract` module: `SEP_6`, `SEP_10`, `SEP_24`, `SEP_38`.
+Constants are also exported from the `contract` module: `SEP_6`, `SEP_10`, `SEP_24`, `SEP_31`, `SEP_38`.
 
 ## Key APIs
 

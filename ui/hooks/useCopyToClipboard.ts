@@ -110,6 +110,19 @@ export function useCopyToClipboard(
 }
 
 /**
+ * Export request history as a JSON file download.
+ */
+export function exportHistoryAsJson(history: unknown[]): void {
+  const blob = new Blob([JSON.stringify(history, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `anchorkit_history_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Utility function to format JSON for copying
  */
 export function formatJsonForCopy(data: any, pretty: boolean = true): string {
