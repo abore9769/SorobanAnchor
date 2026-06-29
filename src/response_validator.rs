@@ -551,7 +551,7 @@ pub struct TransactionStatusResponseValidated {
 }
 
 /// Validates a raw transaction status response.
-pub fn validate_transaction_status_response(
+pub fn validate_transaction_status_response_v2(
     transaction_id: &str,
     status: &str,
     kind: &str,
