@@ -1780,6 +1780,10 @@ impl AnchorKitContract {
         soroban_sdk::vec![env, symbol_short!("ATCNT")]
     }
 
+    fn attestor_list_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("ATLIST")]
+    }
+
     fn cache_count_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
         soroban_sdk::vec![env, symbol_short!("CACNT")]
     }
@@ -1837,6 +1841,22 @@ impl AnchorKitContract {
             .instance()
             .get::<_, u64>(&Self::attestor_count_key(&env))
             .unwrap_or(0)
+    }
+
+    /// List all registered attestor addresses.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing the addresses of all registered attestors.
+    pub fn list_registered_attestors(env: Env) -> soroban_sdk::Vec<Address> {
+        env.storage()
+            .instance()
+            .get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 
     /// Get the current number of cache entries.
@@ -2197,6 +2217,13 @@ impl AnchorKitContract {
         
         // Increment count
         env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count + 1));
+        
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !attestors_list.contains(&attestor) {
+            attestors_list.push_back(attestor.clone());
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
+        
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
         AdminAuditLog::log_action(
@@ -2265,6 +2292,13 @@ impl AnchorKitContract {
         let current_count = Self::get_attestor_count_internal(&env);
         if current_count > 0 {
             env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count - 1));
+            
+            let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            if let Some(idx) = attestors_list.first_index_of(&attestor) {
+                attestors_list.remove(idx);
+                env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+            }
+            
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         }
 
@@ -4320,6 +4354,12 @@ impl AnchorKitContract {
         env.storage().persistent().set(&pk_key, &public_key);
         env.storage().persistent().extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !attestors_list.contains(&attestor) {
+            attestors_list.push_back(attestor.clone());
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
+        
         let sopcnt_key = make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
         env.storage().persistent().set(&sopcnt_key, &(op_index + 1));
@@ -4374,6 +4414,12 @@ impl AnchorKitContract {
         env.storage().persistent().remove(&key);
         let pk_key = make_storage_key(&env, &[b"ATPUBKEY", &raw]);
         env.storage().persistent().remove(&pk_key);
+
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if let Some(idx) = attestors_list.first_index_of(&attestor) {
+            attestors_list.remove(idx);
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
 
         let sopcnt_key = make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);

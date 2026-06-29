@@ -7,7 +7,7 @@
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use std::io::Read;
+
 use anchorkit::normalize_stellar_account_id;
 
 // ── SecretKey wrapper ─────────────────────────────────────────────────────────
@@ -1377,6 +1377,53 @@ fn check_config_files() -> CheckResult {
     }
 }
 
+fn check_endpoint_proofs(contract_id: &str, network: &str) -> Vec<CheckResult> {
+    let mut results = Vec::new();
+    let source = std::env::var("ANCHOR_ADMIN_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(SecretKey::new)
+        .unwrap_or_else(|| SecretKey::new("default"));
+
+    let count_str = stellar_invoke(contract_id, &source, network, &["get_attestor_count"]);
+    let count: u32 = count_str.trim().trim_matches('"').parse().unwrap_or(0);
+    if count == 0 {
+        return results;
+    }
+
+    let list_str = stellar_invoke(contract_id, &source, network, &["list_registered_attestors"]);
+    let attestors: Vec<String> = serde_json::from_str(&list_str).unwrap_or_default();
+
+    for address in attestors {
+        let proof_raw = stellar_invoke(contract_id, &source, network, &["get_endpoint_proof", "--attestor", &address]);
+        
+        if proof_raw.trim() == "null" || proof_raw.trim().is_empty() {
+            results.push(CheckResult::warn(format!("No PoP registered for {}", address)));
+            continue;
+        }
+
+        let val: serde_json::Value = match serde_json::from_str(&proof_raw) {
+            Ok(v) => v,
+            Err(_) => {
+                results.push(CheckResult::warn(format!("No PoP registered for {}", address)));
+                continue;
+            }
+        };
+
+        if let Some(verified) = val.get("verified").and_then(|v| v.as_bool()) {
+            if verified {
+                results.push(CheckResult::pass(format!("PoP verified for {}", address)));
+            } else {
+                results.push(CheckResult::warn(format!("PoP registered but unverified for {}", address)));
+            }
+        } else {
+            results.push(CheckResult::warn(format!("No PoP registered for {}", address)));
+        }
+    }
+
+    results
+}
+
 fn doctor(network: &str, fix: bool) {
     println!("\n🔍 SorobanAnchor Environment Check\n");
     
@@ -1406,6 +1453,15 @@ fn doctor(network: &str, fix: bool) {
             println!("    {}\x1b[0m", deployment_check.message);
             if !deployment_check.passed {
                 all_passed = false;
+            }
+            
+            let pop_results = check_endpoint_proofs(&contract_id, network);
+            if !pop_results.is_empty() {
+                println!("\n  Endpoint Proof of Possession (PoP):");
+                for res in pop_results {
+                    println!("    {} {} {}", res.color(), res.icon(), res.message);
+                    // PoP checks are advisory and should not fail the overall doctor run
+                }
             }
         }
     }

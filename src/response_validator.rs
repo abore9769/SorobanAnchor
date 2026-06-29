@@ -550,27 +550,6 @@ pub struct TransactionStatusResponseValidated {
     pub kind: alloc::string::String,
 }
 
-/// Validates a raw transaction status response.
-pub fn validate_transaction_status_response(
-    transaction_id: &str,
-    status: &str,
-    kind: &str,
-) -> Result<TransactionStatusResponseValidated, Error> {
-    if transaction_id.is_empty() {
-        return Err(Error::validation_error("transaction_id is empty"));
-    }
-    if status.is_empty() {
-        return Err(Error::validation_error("status is empty"));
-    }
-    if kind.is_empty() {
-        return Err(Error::validation_error("kind is empty"));
-    }
-    Ok(TransactionStatusResponseValidated {
-        transaction_id: alloc::string::String::from(transaction_id),
-        status: alloc::string::String::from(status),
-        kind: alloc::string::String::from(kind),
-    })
-}
 
 #[cfg(test)]
 mod tests {
