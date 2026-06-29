@@ -175,6 +175,7 @@ pub const SERVICE_DEPOSITS: u32 = 1;
 pub const SERVICE_WITHDRAWALS: u32 = 2;
 pub const SERVICE_QUOTES: u32 = 3;
 pub const SERVICE_KYC: u32 = 4;
+pub const SERVICE_SEP31: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // #344 — Admin permission model
@@ -237,7 +238,7 @@ pub const SERVICE_CAPABILITY_VERSION: u32 = 1;
 /// outside `SERVICE_DEPOSITS..=MAX_KNOWN_SERVICE_CODE` are rejected by
 /// [`configure_services_versioned`]. Extend this (and bump the version) to
 /// introduce new service identifiers.
-const MAX_KNOWN_SERVICE_CODE: u32 = SERVICE_KYC;
+const MAX_KNOWN_SERVICE_CODE: u32 = SERVICE_SEP31;
 
 /// Typed representation of a service capability an anchor can support.
 ///
@@ -249,6 +250,7 @@ pub enum ServiceType {
     Withdrawals,
     Quotes,
     KYC,
+    Sep31,
 }
 
 impl ServiceType {
@@ -258,6 +260,7 @@ impl ServiceType {
             ServiceType::Withdrawals => SERVICE_WITHDRAWALS,
             ServiceType::Quotes => SERVICE_QUOTES,
             ServiceType::KYC => SERVICE_KYC,
+            ServiceType::Sep31 => SERVICE_SEP31,
         }
     }
 }
@@ -576,6 +579,7 @@ pub struct StellarToml {
     pub transfer_server_sep0024: String,
     pub kyc_server: String,
     pub web_auth_endpoint: String,
+    pub direct_payment_server: String,
 }
 
 #[contracttype]
@@ -852,6 +856,8 @@ pub const SEP_6: u32 = 6;
 pub const SEP_10: u32 = 10;
 /// SEP-24: Interactive deposit and withdrawal
 pub const SEP_24: u32 = 24;
+/// SEP-31: Direct payment
+pub const SEP_31: u32 = 31;
 /// SEP-38: Anchor Request for Quote (RFQ)
 pub const SEP_38: u32 = 38;
 
@@ -865,6 +871,8 @@ pub struct SepFeatureFlags {
     pub sep10: bool,
     /// SEP-24 interactive deposit/withdrawal support.
     pub sep24: bool,
+    /// SEP-31 direct payment support.
+    pub sep31: bool,
     /// SEP-38 RFQ / firm quote support.
     pub sep38: bool,
 }
@@ -5851,6 +5859,21 @@ impl AnchorKitContract {
         }
     }
 
+    /// Return `true` when the anchor's cached stellar.toml advertises a
+    /// `DIRECT_PAYMENT_SERVER` endpoint (SEP-31).
+    pub fn supports_sep31(env: Env, anchor: Address) -> bool {
+        let key = (symbol_short!("TOMLCACHE"), anchor);
+        if !env.storage().temporary().has(&key) {
+            return false;
+        }
+        let cached: CachedToml = env.storage().temporary().get(&key).unwrap();
+        let now = env.ledger().timestamp();
+        if cached.cached_at + cached.ttl_seconds <= now {
+            return false;
+        }
+        !cached.toml.direct_payment_server.is_empty()
+    }
+
     // -----------------------------------------------------------------------
     // Transaction state
     // -----------------------------------------------------------------------
@@ -7038,7 +7061,7 @@ impl AnchorKitContract {
     ///
     /// # Returns
     ///
-    /// A [`Vec<u32>`] containing the SEP numbers: `[6, 10, 24, 38]`.
+    /// A [`Vec<u32>`] containing the SEP numbers: `[6, 10, 24, 31, 38]`.
     ///
     /// # Examples
     ///
@@ -7055,6 +7078,7 @@ impl AnchorKitContract {
         v.push_back(SEP_6);
         v.push_back(SEP_10);
         v.push_back(SEP_24);
+        v.push_back(SEP_31);
         v.push_back(SEP_38);
         v
     }
@@ -7082,6 +7106,7 @@ impl AnchorKitContract {
             sep6: true,
             sep10: true,
             sep24: true,
+            sep31: true,
             sep38: true,
         }
     }

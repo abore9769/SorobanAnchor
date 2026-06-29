@@ -20,13 +20,14 @@
 //! - Anchor discovery via `stellar.toml`
 //!
 //! ### Off-chain service layer (SEP modules)
-//! Three thin normalisation modules translate raw anchor HTTP responses into
+//! Four thin normalisation modules translate raw anchor HTTP responses into
 //! typed Rust structs so callers never have to parse raw JSON themselves:
 //!
 //! | Module | SEP | Purpose |
 //! |--------|-----|---------|
 //! | [`sep6`] | SEP-6 | Non-interactive deposit / withdrawal |
 //! | [`sep24`] | SEP-24 | Interactive deposit / withdrawal |
+//! | [`sep31`] | SEP-31 | Direct payment |
 //! | [`sep38`] | SEP-38 | Anchor RFQ / firm quotes |
 //!
 //! ### Cross-cutting utilities
@@ -151,6 +152,8 @@ pub mod sep6;
 #[cfg(not(feature = "wasm"))]
 pub mod sep24;
 #[cfg(not(feature = "wasm"))]
+pub mod sep31;
+#[cfg(not(feature = "wasm"))]
 pub mod sep38;
 #[cfg(not(feature = "wasm"))]
 pub mod stellar_toml;
@@ -200,6 +203,10 @@ pub use sep6::{
     RawDepositResponse, RawTransactionResponse, RawWithdrawalResponse, TransactionKind,
     TransactionStatus, TransactionStatusResponse, WithdrawalResponse,
     poll_transaction_status, PollConfig, PollResult,
+};
+#[cfg(not(feature = "wasm"))]
+pub use sep31::{
+    initiate_sep31_payment, RawSep31PaymentResponse, Sep31PaymentResponse,
 };
 #[cfg(not(feature = "wasm"))]
 pub use sep24::{
