@@ -42,7 +42,27 @@ pub fn build_sep10_jwt_with_iat(
     format!("{}.{}", signing_input, sig_b64)
 }
 
-/// Sign a payload hash with the given signing key, returning a 64-byte Bytes signature.
+/// Build a SEP-10 JWT that includes a custom `jti` claim (used to test
+/// the persistent JTI replay cache).
+pub fn build_sep10_jwt_with_jti(
+    signing_key: &SigningKey,
+    sub: &str,
+    exp: u64,
+    jti: &str,
+) -> std::string::String {
+    let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+    let iat = exp.saturating_sub(anchorkit::sep10_jwt::MAX_JWT_LIFETIME);
+    let payload = format!(
+        r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com","jti":"{}"}}"#,
+        sub, iat, exp, jti
+    );
+    let header_b64 = URL_SAFE_NO_PAD.encode(header);
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+    let sig = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    format!("{}.{}", signing_input, sig_b64)
+}
 pub fn sign_payload(env: &Env, signing_key: &SigningKey, payload_hash: &Bytes) -> Bytes {
     let mut msg = std::vec::Vec::with_capacity(payload_hash.len() as usize);
     for i in 0..payload_hash.len() {

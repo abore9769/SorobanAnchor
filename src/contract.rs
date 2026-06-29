@@ -4,16 +4,23 @@ use soroban_sdk::{
 };
 extern crate alloc;
 use alloc::string::String as RustString;
+use alloc::string::ToString;
 use alloc::vec::Vec as RustVec;
 
 use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_payload_hash};
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::RateLimitConfig;
 use crate::sep10_jwt;
 use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
 use crate::replay_detection::{self, ReplayMetrics};
 use crate::admin_audit_log::AdminAuditLog;
 use crate::service_management::ServiceManager;
+use crate::sep38;
+
+/// Score penalty (in [0,1] units) applied to anomalous anchors in `score_anchor_with_anomaly`.
+/// Default: 0.20 (equivalent to 20 out of 100 score points).
+const ANOMALY_SCORE_PENALTY: f32 = 0.20_f32;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,6 +56,23 @@ pub struct Quote {
     /// was chosen (e.g. `"lowest_fee"`, `"preferred_anchor"`, `"referral"`).
     /// `None` when no reason was recorded.
     pub routing_reason: Option<String>,
+}
+
+/// Pre-v2 quote layout without `routing_reason`. Used when reading legacy records
+/// that were persisted before the field was added to the schema.
+#[contracttype]
+#[derive(Clone)]
+pub struct QuoteV1 {
+    pub quote_id: u64,
+    pub anchor: Address,
+    pub base_asset: String,
+    pub quote_asset: String,
+    pub rate: u64,
+    pub fee_percentage: u32,
+    pub minimum_amount: u64,
+    pub maximum_amount: u64,
+    pub valid_until: u64,
+    pub schema_version: u32,
 }
 
 #[contracttype]
@@ -186,6 +210,7 @@ pub const SERVICE_DEPOSITS: u32 = 1;
 pub const SERVICE_WITHDRAWALS: u32 = 2;
 pub const SERVICE_QUOTES: u32 = 3;
 pub const SERVICE_KYC: u32 = 4;
+pub const SERVICE_SEP31: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // #344 — Admin permission model
@@ -248,7 +273,7 @@ pub const SERVICE_CAPABILITY_VERSION: u32 = 1;
 /// outside `SERVICE_DEPOSITS..=MAX_KNOWN_SERVICE_CODE` are rejected by
 /// [`configure_services_versioned`]. Extend this (and bump the version) to
 /// introduce new service identifiers.
-const MAX_KNOWN_SERVICE_CODE: u32 = SERVICE_KYC;
+const MAX_KNOWN_SERVICE_CODE: u32 = SERVICE_SEP31;
 
 /// Typed representation of a service capability an anchor can support.
 ///
@@ -260,6 +285,7 @@ pub enum ServiceType {
     Withdrawals,
     Quotes,
     KYC,
+    Sep31,
 }
 
 impl ServiceType {
@@ -269,6 +295,7 @@ impl ServiceType {
             ServiceType::Withdrawals => SERVICE_WITHDRAWALS,
             ServiceType::Quotes => SERVICE_QUOTES,
             ServiceType::KYC => SERVICE_KYC,
+            ServiceType::Sep31 => SERVICE_SEP31,
         }
     }
 }
@@ -336,6 +363,10 @@ impl WeightedRoutingStrategy {
     /// Compute a normalized composite score in [0.0, 1.0].
     /// Lower fee and faster settlement are better; higher reputation is better.
     /// Each dimension is normalised against the provided max values.
+    ///
+    /// When `anomaly_report` is `Some` and `anchor_id` appears in
+    /// `anomalous_anchors`, a penalty of `anomaly_penalty / 100.0` is
+    /// subtracted from the final score (default 0.20).
     pub fn score_anchor(
         &self,
         fee_pct: u32,
@@ -344,6 +375,29 @@ impl WeightedRoutingStrategy {
         max_fee: u32,
         max_settlement: u64,
         max_reputation: u32,
+    ) -> f32 {
+        self.score_anchor_with_anomaly(
+            fee_pct, settlement_time, reputation,
+            max_fee, max_settlement, max_reputation,
+            None, None,
+        )
+    }
+
+    /// Like [`score_anchor`] but applies a fee-anomaly penalty when the anchor
+    /// is flagged in `anomaly_report`.
+    ///
+    /// * `anchor_id` – the string ID used in the [`FeeAnomalyReport`].
+    /// * `anomaly_report` – optional pre-computed report; pass `None` to skip.
+    pub fn score_anchor_with_anomaly(
+        &self,
+        fee_pct: u32,
+        settlement_time: u64,
+        reputation: u32,
+        max_fee: u32,
+        max_settlement: u64,
+        max_reputation: u32,
+        anchor_id: Option<&str>,
+        anomaly_report: Option<&sep38::FeeAnomalyReport>,
     ) -> f32 {
         let fee_score = if max_fee == 0 {
             1.0_f32
@@ -360,9 +414,22 @@ impl WeightedRoutingStrategy {
         } else {
             reputation as f32 / max_reputation as f32
         };
-        self.fee_weight * fee_score
+        let base = self.fee_weight * fee_score
             + self.speed_weight * speed_score
-            + self.reputation_weight * rep_score
+            + self.reputation_weight * rep_score;
+
+        // Apply anomaly penalty when report flags this anchor.
+        let penalty = if let (Some(id), Some(report)) = (anchor_id, anomaly_report) {
+            if report.anomalous_anchors.iter().any(|(aid, _)| aid == id) {
+                ANOMALY_SCORE_PENALTY
+            } else {
+                0.0_f32
+            }
+        } else {
+            0.0_f32
+        };
+
+        (base - penalty).clamp(0.0_f32, 1.0_f32)
     }
 }
 
@@ -587,6 +654,7 @@ pub struct StellarToml {
     pub transfer_server_sep0024: String,
     pub kyc_server: String,
     pub web_auth_endpoint: String,
+    pub direct_payment_server: String,
 }
 
 #[contracttype]
@@ -838,6 +906,7 @@ pub struct AnchorProofRecord {
 //
 // Version history:
 //   SCHEMA_V1 = 1  — initial versioned layout (introduced in this release)
+//   SCHEMA_V2 = 2  — adds `routing_reason: Option<String>` to [`Quote`]
 //
 // Migration strategy:
 //   After a WASM upgrade that increments a schema version, call `migrate()`
@@ -853,9 +922,8 @@ pub struct AnchorProofRecord {
 /// stored data to detect version skew.
 pub const SCHEMA_V1: u32 = 1;
 
-// Batch attestation constants (#564)
-pub const MAX_BATCH_SIZE: usize = 50;
-pub const BATCH_ATTESTATION_RATE_MULTIPLIER: u32 = 5;
+/// Schema version for [`Quote`] records that include `routing_reason`.
+pub const SCHEMA_V2: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Supported SEP versions (#353)
@@ -867,6 +935,8 @@ pub const SEP_6: u32 = 6;
 pub const SEP_10: u32 = 10;
 /// SEP-24: Interactive deposit and withdrawal
 pub const SEP_24: u32 = 24;
+/// SEP-31: Direct payment
+pub const SEP_31: u32 = 31;
 /// SEP-38: Anchor Request for Quote (RFQ)
 pub const SEP_38: u32 = 38;
 
@@ -880,6 +950,8 @@ pub struct SepFeatureFlags {
     pub sep10: bool,
     /// SEP-24 interactive deposit/withdrawal support.
     pub sep24: bool,
+    /// SEP-31 direct payment support.
+    pub sep31: bool,
     /// SEP-38 RFQ / firm quote support.
     pub sep38: bool,
 }
@@ -1071,6 +1143,11 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
 
+/// Inclusive lower bound for the configurable JWT max-length (set_jwt_max_len).
+const MIN_JWT_MAX_LEN: u32 = 2048;
+/// Inclusive upper bound for the configurable JWT max-length (set_jwt_max_len).
+const MAX_JWT_MAX_LEN: u32 = 16384;
+
 /// Default lifetime for an approved KYC record before the approval expires.
 const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
 
@@ -1195,6 +1272,18 @@ fn xdr_to_vec(b: &Bytes) -> alloc::vec::Vec<u8> {
         v.push(b.get(i).expect("xdr_to_vec: index out of range"));
     }
     v
+}
+
+fn quote_index_key(env: &Env) -> Symbol {
+    Symbol::new(env, "QUOTE_INDEX")
+}
+
+fn migrate_quotes_v2_cursor_key(env: &Env) -> Symbol {
+    Symbol::new(env, "MIGRATE_QUOTES_V2_CURSOR")
+}
+
+fn quote_anchor_ref_key(env: &Env, quote_id: u64) -> BytesN<32> {
+    make_storage_key(env, &[b"QANCH", &quote_id.to_be_bytes()])
 }
 
 /// Storage key for a specific `(role, grantee)` pair.
@@ -1592,6 +1681,8 @@ impl AnchorKitContract {
     /// * `env` - The Soroban environment context.
     /// * `new_schema_version` - The schema version to advance to. Must be > 0 and
     ///   greater than the currently stored version (returned by `get_schema_version`).
+    /// * `batch_size` - Maximum number of legacy quote records to rewrite per call
+    ///   when migrating to schema v2.
     ///
     /// # Authorization
     ///
@@ -1610,9 +1701,9 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// AnchorKitContract::migrate(env, 1u32);
+    /// AnchorKitContract::migrate(env, 1u32, 100u32);
     /// ```
-    pub fn migrate(env: Env, new_schema_version: u32) {
+    pub fn migrate(env: Env, new_schema_version: u32, batch_size: u32) {
         // migrate must not run before initialization
         if !env.storage().persistent().has(&initialized_key(&env)) {
             panic_with_error!(&env, ErrorCode::NotInitialized);
@@ -1631,10 +1722,159 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::ValidationError);
         }
 
+        let cursor_key = migrate_quotes_v2_cursor_key(&env);
+        let v2_migration_pending = env.storage().persistent().has(&cursor_key);
+
+        if new_schema_version >= SCHEMA_V2
+            && (current < SCHEMA_V2 || v2_migration_pending)
+        {
+            let migrated = Self::migrate_quotes_to_v2(&env, batch_size);
+            if migrated > 0 {
+                let admin = Self::get_admin_internal(&env);
+                let new_value =
+                    RustString::from("v2 (") + &migrated.to_string() + ")";
+                AdminAuditLog::log_action(
+                    &env,
+                    &admin,
+                    "schema_migration",
+                    String::from_str(&env, "quotes"),
+                    "v1",
+                    &new_value,
+                );
+            }
+            if env.storage().persistent().has(&cursor_key) {
+                return;
+            }
+        }
+
         env.storage().instance().set(&schema_key, &new_schema_version);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Rewrite legacy [`Quote`] records to schema v2, processing at most
+    /// `batch_size` entries per call. Returns the number of records migrated.
+    fn migrate_quotes_to_v2(env: &Env, batch_size: u32) -> u32 {
+        if batch_size == 0 {
+            panic_with_error!(env, ErrorCode::ValidationError);
+        }
+
+        let idx_key = quote_index_key(env);
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        let cursor_key = migrate_quotes_v2_cursor_key(env);
+        let resume_after: u64 = env
+            .storage()
+            .persistent()
+            .get(&cursor_key)
+            .unwrap_or(0u64);
+
+        let mut migrated: u32 = 0;
+        let mut last_processed: u64 = resume_after;
+
+        for quote_id in ids.iter() {
+            let id = quote_id;
+            if id <= resume_after {
+                continue;
+            }
+            if migrated >= batch_size {
+                env.storage()
+                    .persistent()
+                    .set(&cursor_key, &last_processed);
+                env.storage().persistent().extend_ttl(
+                    &cursor_key,
+                    PERSISTENT_TTL,
+                    PERSISTENT_TTL,
+                );
+                return migrated;
+            }
+
+            let ref_key = quote_anchor_ref_key(env, id);
+            let anchor: Address = match env.storage().persistent().get(&ref_key) {
+                Some(a) => a,
+                None => {
+                    last_processed = id;
+                    continue;
+                }
+            };
+
+            let anchor_raw = xdr_to_vec(&anchor.to_xdr(env));
+            let q_key = make_storage_key(env, &[b"QUOTE", &anchor_raw, &id.to_be_bytes()]);
+
+            let needs_write = if let Some(quote) = env.storage().persistent().get::<_, Quote>(&q_key)
+            {
+                if quote.schema_version >= SCHEMA_V2 {
+                    last_processed = id;
+                    continue;
+                }
+                let updated = Quote {
+                    routing_reason: None,
+                    schema_version: SCHEMA_V2,
+                    ..quote
+                };
+                env.storage().persistent().set(&q_key, &updated);
+                true
+            } else if let Some(v1) = env.storage().persistent().get::<_, QuoteV1>(&q_key) {
+                if v1.schema_version >= SCHEMA_V2 {
+                    last_processed = id;
+                    continue;
+                }
+                let updated = Quote {
+                    quote_id: v1.quote_id,
+                    anchor: v1.anchor,
+                    base_asset: v1.base_asset,
+                    quote_asset: v1.quote_asset,
+                    rate: v1.rate,
+                    fee_percentage: v1.fee_percentage,
+                    minimum_amount: v1.minimum_amount,
+                    maximum_amount: v1.maximum_amount,
+                    valid_until: v1.valid_until,
+                    schema_version: SCHEMA_V2,
+                    routing_reason: None,
+                };
+                env.storage().persistent().set(&q_key, &updated);
+                true
+            } else {
+                last_processed = id;
+                continue;
+            };
+
+            if needs_write {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&q_key, PERSISTENT_TTL, PERSISTENT_TTL);
+                migrated += 1;
+            }
+            last_processed = id;
+        }
+
+        env.storage().persistent().remove(&cursor_key);
+        migrated
+    }
+
+    fn append_quote_index(env: &Env, quote_id: u64, anchor: &Address) {
+        let idx_key = quote_index_key(env);
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(env));
+        ids.push_back(quote_id);
+        env.storage().persistent().set(&idx_key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        let ref_key = quote_anchor_ref_key(env, quote_id);
+        env.storage().persistent().set(&ref_key, anchor);
+        env.storage()
+            .persistent()
+            .extend_ttl(&ref_key, PERSISTENT_TTL, PERSISTENT_TTL);
     }
 
     /// Get the current on-chain data schema version.
@@ -1795,6 +2035,10 @@ impl AnchorKitContract {
         soroban_sdk::vec![env, symbol_short!("ATCNT")]
     }
 
+    fn attestor_list_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("ATLIST")]
+    }
+
     fn cache_count_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
         soroban_sdk::vec![env, symbol_short!("CACNT")]
     }
@@ -1852,6 +2096,22 @@ impl AnchorKitContract {
             .instance()
             .get::<_, u64>(&Self::attestor_count_key(&env))
             .unwrap_or(0)
+    }
+
+    /// List all registered attestor addresses.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing the addresses of all registered attestors.
+    pub fn list_registered_attestors(env: Env) -> soroban_sdk::Vec<Address> {
+        env.storage()
+            .instance()
+            .get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 
     /// Get the current number of cache entries.
@@ -2046,7 +2306,7 @@ impl AnchorKitContract {
     /// Must be between 2048 and 16384. Admin-only.
     pub fn set_jwt_max_len(env: Env, max_len: u32) {
         Self::require_admin(&env);
-        if max_len < sep10_jwt::MAX_JWT_LEN || max_len > 16384 {
+        if max_len < MIN_JWT_MAX_LEN || max_len > MAX_JWT_MAX_LEN {
             panic_with_error!(&env, ErrorCode::ValidationError);
         }
         env.storage()
@@ -2086,6 +2346,31 @@ impl AnchorKitContract {
             .instance()
             .get::<_, u64>(&symbol_short!("JWTSKEW"))
             .unwrap_or(sep10_jwt::DEFAULT_CLOCK_SKEW)
+    }
+
+    /// Admin-only: remove all JTI entries from persistent storage whose TTL
+    /// has lapsed. This is a manual cleanup for environments where automatic
+    /// Soroban TTL expiry is not guaranteed.
+    ///
+    /// Iterates the JTI index stored under key `"JTIIDX"` and removes entries
+    /// that are no longer present in persistent storage (already expired).
+    pub fn purge_expired_jtis(env: Env) {
+        Self::require_admin(&env);
+        let idx_key = symbol_short!("JTIIDX");
+        let keys: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut live: Vec<Bytes> = Vec::new(&env);
+        for k in keys.iter() {
+            if env.storage().persistent().has(&k) {
+                live.push_back(k);
+            }
+        }
+        if live.len() < keys.len() {
+            env.storage().persistent().set(&idx_key, &live);
+        }
     }
 
     /// Verifies a SEP-10 JWT (JWS compact, EdDSA) using the stored key for `issuer`: signature, `exp`, and `sub`.
@@ -2212,6 +2497,13 @@ impl AnchorKitContract {
         
         // Increment count
         env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count + 1));
+        
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !attestors_list.contains(&attestor) {
+            attestors_list.push_back(attestor.clone());
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
+        
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
         AdminAuditLog::log_action(
@@ -2280,6 +2572,13 @@ impl AnchorKitContract {
         let current_count = Self::get_attestor_count_internal(&env);
         if current_count > 0 {
             env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count - 1));
+            
+            let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            if let Some(idx) = attestors_list.first_index_of(&attestor) {
+                attestors_list.remove(idx);
+                env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+            }
+            
             env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         }
 
@@ -3172,7 +3471,13 @@ impl AnchorKitContract {
         Self::verify_attestation_signature(&env, &issuer, &payload_hash, &signature);
         Self::check_timestamp(&env, timestamp);
 
-        // Replay check (read-only)
+        // Replay check (read-only).
+        // The USED/(issuer, hash) key written below is also checked by
+        // submit_attestation_with_session, so a non-session submission of a
+        // given (issuer, hash) pair blocks any future session submission of
+        // the same pair.  The SESSREQ key is session-scoped and has no
+        // analogue in this sessionless path; the global USED key provides
+        // equivalent cross-path replay protection.
         let issuer_xdr = issuer.clone().to_xdr(&env);
         let issuer_raw = xdr_to_vec(&issuer_xdr);
         let hash_raw = xdr_to_vec(&payload_hash);
@@ -4207,6 +4512,7 @@ impl AnchorKitContract {
         let q_key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &next.to_be_bytes()]);
         env.storage().persistent().set(&q_key, &quote);
         env.storage().persistent().extend_ttl(&q_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        Self::append_quote_index(&env, next, &anchor);
 
         let lq_key = make_storage_key(&env, &[b"LATESTQ", &anchor_raw]);
         env.storage().persistent().set(&lq_key, &next);
@@ -4425,6 +4731,12 @@ impl AnchorKitContract {
         env.storage().persistent().set(&pk_key, &public_key);
         env.storage().persistent().extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !attestors_list.contains(&attestor) {
+            attestors_list.push_back(attestor.clone());
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
+        
         let sopcnt_key = make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
         env.storage().persistent().set(&sopcnt_key, &(op_index + 1));
@@ -4479,6 +4791,12 @@ impl AnchorKitContract {
         env.storage().persistent().remove(&key);
         let pk_key = make_storage_key(&env, &[b"ATPUBKEY", &raw]);
         env.storage().persistent().remove(&pk_key);
+
+        let mut attestors_list = env.storage().instance().get::<_, soroban_sdk::Vec<Address>>(&Self::attestor_list_key(&env)).unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if let Some(idx) = attestors_list.first_index_of(&attestor) {
+            attestors_list.remove(idx);
+            env.storage().instance().set(&Self::attestor_list_key(&env), &attestors_list);
+        }
 
         let sopcnt_key = make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]);
         let op_index: u64 = env.storage().persistent().get(&sopcnt_key).unwrap_or(0u64);
@@ -4816,6 +5134,62 @@ impl AnchorKitContract {
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
     }
+
+    // --- Cache Invalidation Governance (#555) ---
+
+    /// Submit a proposal to invalidate a specific anchor's capability cache.
+    /// Any registered attestor may call this; returns the new proposal_id.
+    pub fn propose_cache_invalidation(env: Env, caller: Address, anchor: Address) -> u64 {
+        caller.require_auth();
+        Self::check_attestor(&env, &caller);
+        crate::cache_governance::propose(&env, &caller, &anchor)
+    }
+
+    /// Endorse an existing cache invalidation proposal (registered attestors only).
+    /// Duplicate endorsements from the same address are silently ignored.
+    pub fn endorse_cache_invalidation(env: Env, caller: Address, proposal_id: u64) {
+        caller.require_auth();
+        Self::check_attestor(&env, &caller);
+        crate::cache_governance::endorse(&env, &caller, proposal_id)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+    }
+
+    /// Execute a proposal that has reached quorum, clearing the anchor's cache entries.
+    /// Callable by anyone once quorum is met and the proposal has not expired.
+    pub fn execute_cache_invalidation(env: Env, proposal_id: u64) {
+        let anchor = crate::cache_governance::execute(&env, proposal_id)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+        let cap_key = (symbol_short!("CAPCACHE"), anchor.clone());
+        env.storage().temporary().remove(&cap_key);
+        let meta_key = (symbol_short!("METACACHE"), anchor);
+        env.storage().temporary().remove(&meta_key);
+    }
+
+    /// Get a cache invalidation proposal by ID.
+    pub fn get_cache_invalidation_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> crate::cache_governance::CacheInvalidationProposal {
+        crate::cache_governance::get_proposal(&env, proposal_id)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::CacheNotFound))
+    }
+
+    /// Set quorum threshold for cache invalidation proposals (admin only).
+    pub fn set_cache_quorum_threshold(env: Env, n: u32) {
+        Self::require_admin(&env);
+        let mut cfg = crate::cache_governance::get_config(&env);
+        cfg.quorum_threshold = n;
+        crate::cache_governance::set_config(&env, cfg);
+    }
+
+    /// Set proposal expiry in ledgers (admin only).
+    pub fn set_cache_proposal_expiry(env: Env, ledgers: u32) {
+        Self::require_admin(&env);
+        let mut cfg = crate::cache_governance::get_config(&env);
+        cfg.proposal_expiry_ledgers = ledgers;
+        crate::cache_governance::set_config(&env, cfg);
+    }
+
 
     /// Report the SWR lifecycle state of an anchor's metadata cache entry
     /// without panicking. This makes both fresh and stale availability explicit:
@@ -5863,17 +6237,18 @@ impl AnchorKitContract {
         }
     }
 
-    pub fn refresh_anchor_info(env: Env, anchor: Address) {
+    pub fn refresh_anchor_info(env: Env, anchor: Address, toml_data: StellarToml, ttl_seconds: u64, source_uri: String) {
         anchor.require_auth();
         let key = (symbol_short!("TOMLCACHE"), anchor.clone());
         let had_cached_entry = env.storage().temporary().has(&key);
+        Self::fetch_anchor_info(env.clone(), anchor.clone(), toml_data, ttl_seconds, source_uri);
         Self::record_refresh_diagnostic(
             &env,
             &anchor,
             String::from_str(&env, "anchor_info"),
-            RefreshStatus::Failed,
+            RefreshStatus::Success,
             had_cached_entry,
-            String::from_str(&env, "refresh failed before replacement anchor info was available"),
+            String::from_str(&env, "anchor info cache refreshed successfully"),
         );
     }
 
@@ -5956,9 +6331,36 @@ impl AnchorKitContract {
         }
     }
 
+    /// Return `true` when the anchor's cached stellar.toml advertises a
+    /// `DIRECT_PAYMENT_SERVER` endpoint (SEP-31).
+    pub fn supports_sep31(env: Env, anchor: Address) -> bool {
+        let key = (symbol_short!("TOMLCACHE"), anchor);
+        if !env.storage().temporary().has(&key) {
+            return false;
+        }
+        let cached: CachedToml = env.storage().temporary().get(&key).unwrap();
+        let now = env.ledger().timestamp();
+        if cached.cached_at + cached.ttl_seconds <= now {
+            return false;
+        }
+        !cached.toml.direct_payment_server.is_empty()
+    }
+
     // -----------------------------------------------------------------------
     // Transaction state
     // -----------------------------------------------------------------------
+
+    /// Admin-only: configure the auto-eviction policy for the transaction state tracker.
+    ///
+    /// When `enabled` is `true`, `create_transaction_record` will proactively
+    /// evict the oldest terminal transactions when storage budget is at Warning
+    /// or Critical. `max_per_call` bounds the number of evictions per call.
+    pub fn set_eviction_policy(env: Env, enabled: bool, max_per_call: u32) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&symbol_short!("EVICTEN"), &enabled);
+        env.storage().instance().set(&symbol_short!("EVICTMAX"), &max_per_call);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
 
     pub fn create_transaction_record(
         env: Env,
@@ -5996,6 +6398,21 @@ impl AnchorKitContract {
         initiator: Address,
         routing_reason: Option<String>,
     ) -> TransactionStateRecord {
+        // Apply eviction policy from storage before inserting a new record.
+        let eviction_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("EVICTEN"))
+            .unwrap_or(false);
+        if eviction_enabled {
+            let max_per_call: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("EVICTMAX"))
+                .unwrap_or(10u32);
+            Self::run_auto_eviction(env, max_per_call);
+        }
+
         let now = env.ledger().timestamp();
         let current_ledger = env.ledger().sequence();
         let mut history = soroban_sdk::Vec::new(env);
@@ -6024,6 +6441,53 @@ impl AnchorKitContract {
         env.storage().persistent().set(&ids_key, &ids);
         env.storage().persistent().extend_ttl(&ids_key, PERSISTENT_TTL, PERSISTENT_TTL);
         record
+    }
+
+    /// Evict the oldest terminal transactions from persistent storage.
+    /// Called by `create_transaction_record_internal` when eviction is enabled.
+    fn run_auto_eviction(env: &Env, max_per_call: u32) {
+        let ids_key = symbol_short!("TXIDS");
+        let ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ids_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+        let mut terminal: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        for id in ids.iter() {
+            let key = (symbol_short!("TXSTATE"), id);
+            if let Some(rec) = env
+                .storage()
+                .persistent()
+                .get::<_, TransactionStateRecord>(&key)
+            {
+                if rec.state.is_terminal() {
+                    terminal.push((rec.timestamp, id));
+                }
+            }
+        }
+        terminal.sort_unstable_by_key(|&(ts, _)| ts);
+
+        let limit = max_per_call as usize;
+        let mut evicted_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for (_, id) in terminal.iter().take(limit) {
+            let key = (symbol_short!("TXSTATE"), *id);
+            env.storage().persistent().remove(&key);
+            evicted_ids.push(*id);
+        }
+        if !evicted_ids.is_empty() {
+            let mut live: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(env);
+            for id in ids.iter() {
+                if !evicted_ids.contains(&id) {
+                    live.push_back(id);
+                }
+            }
+            env.storage().persistent().set(&ids_key, &live);
+            env.events().publish(
+                (symbol_short!("EVICT"), symbol_short!("budget")),
+                evicted_ids.len() as u32,
+            );
+        }
     }
 
     /// Advance a transaction from Pending to InProgress.
@@ -6128,6 +6592,21 @@ impl AnchorKitContract {
         );
     }
 
+    /// Set a per-role rate limit override (admin only).
+    pub fn set_role_rate_limit(env: Env, role: Symbol, config: RateLimitConfig) {
+        Self::require_admin(&env);
+        RateLimiter::validate_config(&config)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
+        RateLimiter::set_role_override(&env, role.clone(), config);
+        let admin = Self::get_admin_internal(&env);
+        AdminAuditLog::log_action(&env, &admin, "set_role_rate_limit", soroban_sdk::String::from_str(&env, "role"), "", "updated");
+    }
+
+    /// Get per-role rate limit override, or None if not set.
+    pub fn get_role_rate_limit(env: Env, role: Symbol) -> Option<RateLimitConfig> {
+        RateLimiter::get_role_override(&env, role)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -6152,7 +6631,11 @@ impl AnchorKitContract {
     }
 
     fn enforce_rate_limit(env: &Env, attestor: &Address) {
-        let config = RateLimiter::get_config(env);
+        let role = [AdminRole::KycAdmin, AdminRole::AttestorAdmin, AdminRole::CacheAdmin]
+            .iter()
+            .find(|&&r| Self::has_role_internal(env, attestor, r))
+            .map(|r| Symbol::new(env, Self::role_name(*r)));
+        let config = RateLimiter::resolve_config(env, attestor, role);
         if RateLimiter::check_and_increment(env, attestor, &config).is_err() {
             panic_with_error!(env, ErrorCode::RateLimitExceeded);
         }
@@ -6227,17 +6710,10 @@ impl AnchorKitContract {
     /// Sort services in ascending order for deterministic storage.
     /// This ensures consistent behavior regardless of submission order.
     fn sort_services(_env: &Env, services: &mut Vec<u32>) {
-        // Simple bubble sort for small vectors (typically 1-4 elements)
-        let len = services.len();
-        for i in 0..len {
-            for j in 0..len - i - 1 {
-                let a = services.get(j).unwrap();
-                let b = services.get(j + 1).unwrap();
-                if a > b {
-                    services.set(j, b);
-                    services.set(j + 1, a);
-                }
-            }
+        let mut native: alloc::vec::Vec<u32> = services.iter().collect();
+        native.sort_unstable();
+        for (i, val) in native.iter().enumerate() {
+            services.set(i as u32, *val);
         }
     }
 
@@ -7143,7 +7619,7 @@ impl AnchorKitContract {
     ///
     /// # Returns
     ///
-    /// A [`Vec<u32>`] containing the SEP numbers: `[6, 10, 24, 38]`.
+    /// A [`Vec<u32>`] containing the SEP numbers: `[6, 10, 24, 31, 38]`.
     ///
     /// # Examples
     ///
@@ -7160,6 +7636,7 @@ impl AnchorKitContract {
         v.push_back(SEP_6);
         v.push_back(SEP_10);
         v.push_back(SEP_24);
+        v.push_back(SEP_31);
         v.push_back(SEP_38);
         v
     }
@@ -7187,6 +7664,7 @@ impl AnchorKitContract {
             sep6: true,
             sep10: true,
             sep24: true,
+            sep31: true,
             sep38: true,
         }
     }

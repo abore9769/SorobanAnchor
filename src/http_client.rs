@@ -224,6 +224,7 @@ pub fn fetch_stellar_toml_with_proxy(
 ///     timeout_ms: 5000,
 ///     retry_config: RetryConfig::default(),
 ///     dead_letter_storage_key: "anchor-hook".to_string(),
+///     signing_key: None,
 /// };
 /// let proxy = ProxyConfig {
 ///     proxy_url: Some("http://proxy.corp.example.com:3128".to_string()),
@@ -259,12 +260,15 @@ pub fn deliver_webhook_with_proxy(
         config,
         payload,
         dlq,
-        move |url, body| {
-            client
+        move |url, body, sig_header| {
+            let mut req = client
                 .post(url)
                 .header("Content-Type", "application/json")
-                .body(alloc::string::String::from(body))
-                .send()
+                .body(alloc::string::String::from(body));
+            if let Some(sig) = sig_header {
+                req = req.header("X-Anchor-Signature", sig);
+            }
+            req.send()
                 .map(|r| r.status().as_u16())
                 .map_err(|e| alloc::format!("HTTP POST failed: {}", e))
         },
@@ -419,6 +423,7 @@ mod tests {
                 backoff_multiplier: 1,
             },
             dead_letter_storage_key: "proxy-test".to_string(),
+            signing_key: None,
         };
 
         let mut dlq: BTreeMap<String, alloc::vec::Vec<DlqEntry>> = BTreeMap::new();
@@ -428,7 +433,7 @@ mod tests {
             &config,
             r#"{"event":"deposit_completed"}"#,
             &mut dlq,
-            |_url, _body| Ok(200u16),
+            |_url, _body, _sig| Ok(200u16),
             |_| {},
             || 1_000_000u64,
         );
@@ -457,6 +462,7 @@ mod tests {
                 backoff_multiplier: 1,
             },
             dead_letter_storage_key: "proxy-fail-test".to_string(),
+            signing_key: None,
         };
 
         let mut dlq: BTreeMap<String, alloc::vec::Vec<DlqEntry>> = BTreeMap::new();
@@ -466,7 +472,7 @@ mod tests {
             &config,
             r#"{"event":"deposit_failed"}"#,
             &mut dlq,
-            |_url, _body| Ok(503u16),
+            |_url, _body, _sig| Ok(503u16),
             |_| {},
             || 9_999_999u64,
         );

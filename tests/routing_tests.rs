@@ -646,3 +646,50 @@ mod routing_tests {
         assert_eq!(results.get(0).unwrap().anchor, with_quotes);
     }
 }
+
+// ── CrossAnchorFeeAggregator tests ────────────────────────────────────────────
+
+mod fee_aggregator_tests {
+    use anchorkit::sep38::CrossAnchorFeeAggregator;
+
+    const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn single_anchor_no_anomaly() {
+        let mut agg = CrossAnchorFeeAggregator::new(CrossAnchorFeeAggregator::DEFAULT_ANOMALY_THRESHOLD_BPS);
+        agg.insert_observation("anchor-a", 200, NOW);
+        let report = agg.compute_report(NOW);
+        assert_eq!(report.median_fee_bps, 200);
+        assert!(report.anomalous_anchors.is_empty());
+    }
+
+    #[test]
+    fn two_anchors_one_above_threshold_flagged() {
+        let mut agg = CrossAnchorFeeAggregator::new(150);
+        agg.insert_observation("anchor-a", 200, NOW);
+        agg.insert_observation("anchor-b", 400, NOW); // 400 - 200 = 200 > 150 → anomalous
+        let report = agg.compute_report(NOW);
+        assert_eq!(report.median_fee_bps, 200);
+        assert_eq!(report.anomalous_anchors.len(), 1);
+        assert_eq!(report.anomalous_anchors[0].0, "anchor-b");
+    }
+
+    #[test]
+    fn equal_fees_no_anomaly() {
+        let mut agg = CrossAnchorFeeAggregator::new(150);
+        for id in ["a", "b", "c"] {
+            agg.insert_observation(id, 300, NOW);
+        }
+        let report = agg.compute_report(NOW);
+        assert_eq!(report.median_fee_bps, 300);
+        assert!(report.anomalous_anchors.is_empty());
+    }
+
+    #[test]
+    fn empty_history_returns_no_anomalous_entries() {
+        let agg = CrossAnchorFeeAggregator::new(150);
+        let report = agg.compute_report(NOW);
+        assert_eq!(report.median_fee_bps, 0);
+        assert!(report.anomalous_anchors.is_empty());
+    }
+}

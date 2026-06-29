@@ -20,13 +20,14 @@
 //! - Anchor discovery via `stellar.toml`
 //!
 //! ### Off-chain service layer (SEP modules)
-//! Three thin normalisation modules translate raw anchor HTTP responses into
+//! Four thin normalisation modules translate raw anchor HTTP responses into
 //! typed Rust structs so callers never have to parse raw JSON themselves:
 //!
 //! | Module | SEP | Purpose |
 //! |--------|-----|---------|
 //! | [`sep6`] | SEP-6 | Non-interactive deposit / withdrawal |
 //! | [`sep24`] | SEP-24 | Interactive deposit / withdrawal |
+//! | [`sep31`] | SEP-31 | Direct payment |
 //! | [`sep38`] | SEP-38 | Anchor RFQ / firm quotes |
 //!
 //! ### Cross-cutting utilities
@@ -121,7 +122,7 @@
 extern crate alloc;
 
 // ── Core modules (all build variants) ────────────────────────────────────────
-mod deterministic_hash;
+pub mod deterministic_hash;
 mod domain_validator;
 pub mod errors;
 pub mod sep10_jwt;
@@ -133,6 +134,7 @@ pub mod contract;
 pub mod anchor_health;
 pub mod service_management;
 pub mod admin_audit_log;
+pub mod cache_governance;
 
 // ── std-only modules (filesystem, runtime config) ─────────────────────────────
 #[cfg(feature = "std")]
@@ -150,6 +152,8 @@ pub mod webhook;
 pub mod sep6;
 #[cfg(not(feature = "wasm"))]
 pub mod sep24;
+#[cfg(not(feature = "wasm"))]
+pub mod sep31;
 #[cfg(not(feature = "wasm"))]
 pub mod sep38;
 #[cfg(not(feature = "wasm"))]
@@ -191,7 +195,7 @@ pub use response_validator::{
     Sep38QuoteResponse, WithdrawResponse,
 };
 #[cfg(not(feature = "wasm"))]
-pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, WebhookDeliveryConfig, DlqEntry};
+pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, verify_webhook_signature, WebhookDeliveryConfig, DlqEntry};
 #[cfg(not(feature = "wasm"))]
 pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 #[cfg(not(feature = "wasm"))]
@@ -202,8 +206,14 @@ pub use sep6::{
     poll_transaction_status, PollConfig, PollResult,
 };
 #[cfg(not(feature = "wasm"))]
+pub use sep31::{
+    initiate_sep31_payment, RawSep31PaymentResponse, Sep31PaymentResponse,
+};
+#[cfg(not(feature = "wasm"))]
 pub use sep24::{
-    initiate_interactive_deposit, initiate_interactive_withdrawal, fetch_sep24_transaction_status,
+    initiate_interactive_deposit, initiate_interactive_deposit_with_origin,
+    initiate_interactive_withdrawal, initiate_interactive_withdrawal_with_origin,
+    fetch_sep24_transaction_status,
     validate_interactive_url, validate_transaction_id,
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
@@ -214,6 +224,8 @@ pub use admin_audit_log::{AdminAuditLog, AdminConfigChangeEvent, AdminAuditLogCo
 pub use contract::{HealthStatus, MetadataFreshnessReport, RateLimiterHealth};
 pub use contract::{AnchorHealthMetrics, AnchorProofRecord};
 pub use transaction_state_tracker::{BudgetStatus, BudgetAlert};
+#[cfg(not(feature = "wasm"))]
+pub use sep38::{CrossAnchorFeeAggregator, FeeAnomalyReport};
 #[cfg(not(feature = "wasm"))]
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
