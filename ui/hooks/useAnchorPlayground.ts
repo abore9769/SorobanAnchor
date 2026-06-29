@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { useState, useCallback, useEffect } from "react";
+import { useCopyToClipboard, exportHistoryAsJson } from "../hooks/useCopyToClipboard";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type HttpMethod = "GET" | "POST" | "PUT";
@@ -38,11 +38,24 @@ export interface HistoryEntry {
   success: boolean;
 }
 
+export interface RequestHistoryEntry {
+  id: string;
+  timestamp: number;
+  operation: string;
+  requestBody: unknown;
+  responseStatus: number | null;
+  responseBody: unknown;
+  durationMs: number | null;
+}
+
 export interface ResponseState {
   data: unknown;
   status: number;
   time: number;
 }
+
+const HISTORY_STORAGE_KEY = "anchorkit_playground_history_v1";
+const MAX_HISTORY_ENTRIES = 50;
 
 // ─── SEP Data ─────────────────────────────────────────────────────────────────
 export const SEP_PROTOCOLS: SEPProtocol[] = [
@@ -133,7 +146,24 @@ export function useAnchorPlayground() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [requestHistory, setRequestHistory] = useState<RequestHistoryEntry[]>([]);
   const { copy, isCopied: copied } = useCopyToClipboard();
+
+  // Hydrate requestHistory from localStorage on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setRequestHistory(parsed);
+        }
+      }
+    } catch {
+      // corrupted storage — silently reset
+      setRequestHistory([]);
+    }
+  }, []);
 
   const selectSEP = useCallback((sep: SEPProtocol) => {
     setActiveSEP(sep);
@@ -193,6 +223,20 @@ export function useAnchorPlayground() {
         status: res.status,
         success: res.ok,
       }, ...h.slice(0, 19)]);
+      setRequestHistory(prev => {
+        const entry: RequestHistoryEntry = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          operation: `${activeSEP.name} ${activeEp.path}`,
+          requestBody: body ? JSON.parse(body) : params,
+          responseStatus: res.status,
+          responseBody: data,
+          durationMs: elapsed,
+        };
+        const updated = [entry, ...prev].slice(0, MAX_HISTORY_ENTRIES);
+        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
+        return updated;
+      });
     } catch (err) {
       const elapsed = Math.round(performance.now() - t0);
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -207,10 +251,33 @@ export function useAnchorPlayground() {
         status: null,
         success: false,
       }, ...h.slice(0, 19)]);
+      setRequestHistory(prev => {
+        const entry: RequestHistoryEntry = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          operation: `${activeSEP.name} ${activeEp.path}`,
+          requestBody: params,
+          responseStatus: null,
+          responseBody: { error: msg },
+          durationMs: elapsed,
+        };
+        const updated = [entry, ...prev].slice(0, MAX_HISTORY_ENTRIES);
+        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
+        return updated;
+      });
     } finally {
       setLoading(false);
     }
   }, [buildUrl, jwt, activeEp, activeSEP, params]);
+
+  const clearHistory = useCallback(() => {
+    localStorage.removeItem(HISTORY_STORAGE_KEY);
+    setRequestHistory([]);
+  }, []);
+
+  const exportHistory = useCallback(() => {
+    exportHistoryAsJson(requestHistory);
+  }, [requestHistory]);
 
   const copyResponse = useCallback(() => {
     if (response) copy(JSON.stringify(response.data, null, 2));
@@ -224,6 +291,9 @@ export function useAnchorPlayground() {
     jwt, setJwt,
     response, loading, error,
     history,
+    requestHistory,
+    clearHistory,
+    exportHistory,
     buildUrl,
     sendRequest,
     copyResponse, copied,

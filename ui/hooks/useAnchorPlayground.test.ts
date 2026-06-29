@@ -1,12 +1,25 @@
 import { renderHook, act } from "@testing-library/react";
-import { useAnchorPlayground, SEP_PROTOCOLS } from "./useAnchorPlayground";
+import { useAnchorPlayground, SEP_PROTOCOLS, RequestHistoryEntry } from "./useAnchorPlayground";
 
 const MOCK_JSON = { assets: [{ code: "USDC" }] };
+
+// Mock localStorage
+const localStorageMock = (() => {
+  let store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => { store[key] = value; },
+    removeItem: (key: string) => { delete store[key]; },
+    clear: () => { store = {}; },
+  };
+})();
+Object.defineProperty(global, "localStorage", { value: localStorageMock, writable: true });
 
 global.fetch = jest.fn() as jest.Mock;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  localStorageMock.clear();
   (global.fetch as jest.Mock).mockResolvedValue({
     ok: true,
     status: 200,
@@ -100,5 +113,67 @@ describe("useAnchorPlayground", () => {
       expect.any(String),
       expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer my.jwt.token" }) })
     );
+  });
+});
+
+// ─── #565: requestHistory localStorage persistence ────────────────────────────
+
+describe("useAnchorPlayground requestHistory localStorage", () => {
+  const STORAGE_KEY = "anchorkit_playground_history_v1";
+
+  it("hydrates requestHistory from localStorage on mount", () => {
+    const existing: RequestHistoryEntry[] = [
+      { id: "a", timestamp: 1000, operation: "SEP-1 /.well-known/stellar.toml", requestBody: {}, responseStatus: 200, responseBody: {}, durationMs: 50 },
+    ];
+    localStorageMock.setItem(STORAGE_KEY, JSON.stringify(existing));
+    const { result } = renderHook(() => useAnchorPlayground());
+    expect(result.current.requestHistory).toHaveLength(1);
+    expect(result.current.requestHistory[0].id).toBe("a");
+  });
+
+  it("appends a new RequestHistoryEntry after sendRequest", async () => {
+    const { result } = renderHook(() => useAnchorPlayground());
+    await act(async () => { await result.current.sendRequest(); });
+    expect(result.current.requestHistory).toHaveLength(1);
+    expect(result.current.requestHistory[0].responseStatus).toBe(200);
+  });
+
+  it("persists requestHistory to localStorage after sendRequest", async () => {
+    const { result } = renderHook(() => useAnchorPlayground());
+    await act(async () => { await result.current.sendRequest(); });
+    const stored = JSON.parse(localStorageMock.getItem(STORAGE_KEY)!);
+    expect(Array.isArray(stored)).toBe(true);
+    expect(stored).toHaveLength(1);
+  });
+
+  it("caps requestHistory at MAX_HISTORY_ENTRIES (50)", async () => {
+    // Pre-fill 50 entries
+    const full: RequestHistoryEntry[] = Array.from({ length: 50 }, (_, i) => ({
+      id: `old-${i}`, timestamp: i, operation: "op", requestBody: {}, responseStatus: 200, responseBody: {}, durationMs: 1,
+    }));
+    localStorageMock.setItem(STORAGE_KEY, JSON.stringify(full));
+
+    const { result } = renderHook(() => useAnchorPlayground());
+    await act(async () => { await result.current.sendRequest(); });
+
+    expect(result.current.requestHistory).toHaveLength(50);
+    // Newest entry must be first
+    expect(result.current.requestHistory[0].id).toBe("uuid-1");
+  });
+
+  it("clearHistory removes localStorage entry and resets state", async () => {
+    const { result } = renderHook(() => useAnchorPlayground());
+    await act(async () => { await result.current.sendRequest(); });
+    expect(result.current.requestHistory).toHaveLength(1);
+
+    act(() => { result.current.clearHistory(); });
+    expect(result.current.requestHistory).toHaveLength(0);
+    expect(localStorageMock.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("falls back to empty array when localStorage contains corrupted JSON", () => {
+    localStorageMock.setItem(STORAGE_KEY, "not-valid-json{{{");
+    const { result } = renderHook(() => useAnchorPlayground());
+    expect(result.current.requestHistory).toHaveLength(0);
   });
 });

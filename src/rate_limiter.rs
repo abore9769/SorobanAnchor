@@ -314,7 +314,7 @@ impl RateLimiter {
     /// and deliberately return `false` (window not expired), preserving the
     /// existing rate-limit state so an attestor cannot exploit the anomaly to
     /// bypass their quota.
-    fn is_window_expired(
+    pub(crate) fn is_window_expired(
         current_ledger: u32,
         window_start_ledger: u32,
         window_length: u32,
@@ -329,6 +329,11 @@ impl RateLimiter {
         }
     }
     
+    /// Generate collision-resistant storage key for per-attestor rate limit state.
+    pub(crate) fn state_key(env: &Env, attestor: &Address) -> soroban_sdk::BytesN<32> {
+        Self::get_state_key(env, attestor)
+    }
+
     /// Generate collision-resistant storage key for per-attestor rate limit state.
     fn get_state_key(env: &Env, attestor: &Address) -> soroban_sdk::BytesN<32> {
         let addr_xdr = attestor.clone().to_xdr(env);

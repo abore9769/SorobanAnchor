@@ -129,6 +129,17 @@ pub struct Attestation {
     pub schema_version: u32,
 }
 
+/// Input record for [`AnchorKitContract::submit_attestation_batch`].
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationInput {
+    pub issuer: Address,
+    pub subject: Address,
+    pub timestamp: u64,
+    pub payload_hash: Bytes,
+    pub signature: Bytes,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct TracingSpan {
@@ -3511,6 +3522,96 @@ impl AnchorKitContract {
             },
         );
         id
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch attestation submission (#564)
+    // -----------------------------------------------------------------------
+
+    /// Submit multiple attestations atomically.
+    ///
+    /// Either every attestation in the batch is committed or none are.
+    /// Phase 1 validates all inputs without writing. Phase 2 writes only after
+    /// all checks pass. Rate limit is consumed proportionally
+    /// (`batch_size * BATCH_ATTESTATION_RATE_MULTIPLIER` slots).
+    pub fn submit_attestation_batch(
+        env: Env,
+        caller: Address,
+        attestations: Vec<AttestationInput>,
+    ) -> Vec<u64> {
+        caller.require_auth();
+        Self::check_attestor(&env, &caller);
+
+        let batch_size = attestations.len() as usize;
+        if batch_size > MAX_BATCH_SIZE {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+
+        if batch_size == 0 {
+            return Vec::new(&env);
+        }
+
+        // Consume rate-limit slots proportionally (batch_size * multiplier).
+        {
+            let config = RateLimiter::get_config(&env);
+            let slots = (batch_size as u32).saturating_mul(BATCH_ATTESTATION_RATE_MULTIPLIER);
+            let state_key = RateLimiter::state_key(&env, &caller);
+            let current_ledger = env.ledger().sequence();
+            let mut state = env
+                .storage()
+                .persistent()
+                .get::<_, crate::rate_limiter::RateLimitState>(&state_key)
+                .unwrap_or(crate::rate_limiter::RateLimitState {
+                    submission_count: 0,
+                    window_start_ledger: current_ledger,
+                });
+            if RateLimiter::is_window_expired(current_ledger, state.window_start_ledger, config.window_length) {
+                state = crate::rate_limiter::RateLimitState {
+                    submission_count: 0,
+                    window_start_ledger: current_ledger,
+                };
+            }
+            if state.submission_count.saturating_add(slots) > config.max_submissions {
+                panic_with_error!(&env, ErrorCode::RateLimitExceeded);
+            }
+            state.submission_count = state.submission_count.saturating_add(slots);
+            env.storage().persistent().set(&state_key, &state);
+        }
+
+        // ── Phase 1: validate all inputs, no attestation writes ──────────
+        let mut used_keys: RustVec<soroban_sdk::BytesN<32>> = RustVec::new();
+        for entry in attestations.iter() {
+            Self::verify_attestation_signature(&env, &entry.issuer, &entry.payload_hash, &entry.signature);
+            Self::check_timestamp(&env, entry.timestamp);
+            let issuer_xdr = entry.issuer.clone().to_xdr(&env);
+            let issuer_raw = xdr_to_vec(&issuer_xdr);
+            let hash_raw = xdr_to_vec(&entry.payload_hash);
+            let used_key = make_storage_key(&env, &[b"USED", &issuer_raw, &hash_raw]);
+            if env.storage().persistent().has(&used_key) {
+                panic_with_error!(&env, ErrorCode::ReplayAttack);
+            }
+            used_keys.push(used_key);
+        }
+
+        // ── Phase 2: write atomically ─────────────────────────────────────
+        let mut ids = Vec::new(&env);
+        for (i, entry) in attestations.iter().enumerate() {
+            let id = Self::next_attestation_id(&env);
+            Self::store_attestation(
+                &env,
+                id,
+                entry.issuer.clone(),
+                entry.subject.clone(),
+                entry.timestamp,
+                entry.payload_hash.clone(),
+                entry.signature.clone(),
+            );
+            let used_key = &used_keys[i];
+            env.storage().persistent().set(used_key, &id);
+            env.storage().persistent().extend_ttl(used_key, REPLAY_TTL, REPLAY_TTL);
+            ids.push_back(id);
+        }
+        ids
     }
 
     // -----------------------------------------------------------------------
