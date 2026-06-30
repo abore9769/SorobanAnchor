@@ -950,6 +950,7 @@ struct AuditLogEvent {
     operation_index: u64,
     operation_type: String,
     status: String,
+    result_data: u64,
 }
 
 #[contracttype]
@@ -4331,6 +4332,7 @@ impl AnchorKitContract {
                 log_id, session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "attest"),
                 status: String::from_str(&env, "success"),
+                result_data: 0,
             },
         );
         id
@@ -4395,6 +4397,7 @@ impl AnchorKitContract {
                 log_id, session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "register"),
                 status: String::from_str(&env, "success"),
+                result_data: 0,
             },
         );
     }
@@ -4456,6 +4459,7 @@ impl AnchorKitContract {
                 log_id, session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "revoke"),
                 status: String::from_str(&env, "success"),
+                result_data: 0,
             },
         );
     }
@@ -4523,7 +4527,29 @@ impl AnchorKitContract {
     /// Return the total number of audit log entries ever written.
     pub fn get_audit_log_count(env: Env) -> u64 {
         let acnt_key = make_storage_key(&env, &[b"ACNT"]);
-        env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64)
+        let count = env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64);
+        
+        let threshold_key = symbol_short!("AUTOPRUNE");
+        let threshold = env.storage().instance().get::<_, u32>(&threshold_key).unwrap_or(0);
+        if threshold > 0 && count > threshold as u64 {
+            let retention_days = Self::get_audit_log_retention(env.clone());
+            let before_timestamp = env.ledger().timestamp().saturating_sub(retention_days * 86400);
+            let pruned = Self::prune_audit_logs_internal(&env, before_timestamp);
+            if pruned > 0 {
+                env.events().publish(
+                    (symbol_short!("audit"), symbol_short!("pruned")),
+                    AuditLogEvent {
+                        log_id: 0,
+                        session_id: 0,
+                        operation_index: 0,
+                        operation_type: String::from_str(&env, "auto_prune"),
+                        status: String::from_str(&env, "success"),
+                        result_data: pruned,
+                    },
+                );
+            }
+        }
+        count
     }
 
     /// Return a page of audit log entries starting at `offset`, up to `limit` entries
@@ -4571,17 +4597,13 @@ impl AnchorKitContract {
         results
     }
 
-    /// Remove audit log entries whose `operation.timestamp` is strictly before
-    /// `before_timestamp`. Scans up to the first 100 log IDs to remain WASM-safe.
-    /// Returns the number of entries pruned.
-    pub fn prune_audit_logs(env: Env, before_timestamp: u64) -> u64 {
-        Self::require_admin(&env);
-        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
+    fn prune_audit_logs_internal(env: &Env, before_timestamp: u64) -> u64 {
+        let acnt_key = make_storage_key(env, &[b"ACNT"]);
         let total: u64 = env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64);
         let scan_limit = total.min(100);
         let mut pruned: u64 = 0;
         for i in 0..scan_limit {
-            let audit_key = make_storage_key(&env, &[b"AUDIT", &i.to_be_bytes()]);
+            let audit_key = make_storage_key(env, &[b"AUDIT", &i.to_be_bytes()]);
             if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
                 if entry.operation.timestamp < before_timestamp {
                     env.storage().persistent().remove(&audit_key);
@@ -4590,6 +4612,53 @@ impl AnchorKitContract {
             }
         }
         pruned
+    }
+
+    /// Remove audit log entries whose `operation.timestamp` is strictly before
+    /// `before_timestamp`. Scans up to the first 100 log IDs to remain WASM-safe.
+    /// Returns the number of entries pruned.
+    pub fn prune_audit_logs(env: Env, before_timestamp: u64) -> u64 {
+        Self::require_admin(&env);
+        Self::prune_audit_logs_internal(&env, before_timestamp)
+    }
+
+    pub fn set_auto_prune_threshold(env: Env, n: u32) {
+        Self::require_admin(&env);
+        let key = symbol_short!("AUTOPRUNE");
+        env.storage().instance().set(&key, &n);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    pub fn export_audit_log_batch(env: Env, start_id: u64, limit: u32) -> Bytes {
+        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
+        let total: u64 = env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64);
+        
+        let effective_limit = limit.min(50);
+        let end_id = start_id.saturating_add(effective_limit as u64).min(total);
+        
+        let mut json = alloc::string::String::new();
+        json.push('[');
+        
+        let mut first = true;
+        for i in start_id..end_id {
+            let audit_key = make_storage_key(&env, &[b"AUDIT", &i.to_be_bytes()]);
+            if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
+                if !first {
+                    json.push(',');
+                }
+                first = false;
+                
+                let raw_xdr = xdr_to_vec(&entry.to_xdr(&env));
+                json.push('"');
+                for b in raw_xdr {
+                    use core::fmt::Write;
+                    write!(&mut json, "{:02x}", b).unwrap();
+                }
+                json.push('"');
+            }
+        }
+        json.push(']');
+        Bytes::from_slice(&env, json.as_bytes())
     }
 
     // -----------------------------------------------------------------------
