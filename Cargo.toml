@@ -64,7 +64,7 @@ toml = "0.7"
 reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
 aes-gcm = { version = "0.10.3", features = ["aes"], optional = true }
 argon2 = { version = "0.5.3", optional = true }
-rand = { version = "0.8", features = ["std"] }
+rand = { version = "0.8" }
 base64 = { version = "0.22" }
 rpassword = { version = "7.3", optional = true }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }

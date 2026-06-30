@@ -131,6 +131,7 @@ pub mod retry;
 pub mod replay_detection;
 pub mod transaction_state_tracker;
 pub mod contract;
+#[cfg(not(feature = "wasm"))]
 pub mod anchor_health;
 pub mod service_management;
 pub mod admin_audit_log;
@@ -229,5 +230,6 @@ pub use sep38::{CrossAnchorFeeAggregator, FeeAnomalyReport};
 #[cfg(not(feature = "wasm"))]
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "wasm")))]
 mod stellar_toml_tests;
+

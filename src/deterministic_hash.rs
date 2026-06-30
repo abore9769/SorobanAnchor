@@ -19,17 +19,27 @@
 //!
 //! - `data` must not be empty; an empty payload is rejected before hashing to
 //!   prevent accidental collision with zero-data attestations.
+//! - `data` must not exceed [`MAX_PAYLOAD_SIZE`].
 //! - Hash digests accepted from external callers (e.g. via `Bytes`) must be
 //!   exactly 32 bytes; any other length returns `false` without panicking.
 
 use soroban_sdk::{panic_with_error, Address, Bytes, BytesN, Env, xdr::ToXdr};
 use crate::errors::ErrorCode;
 
-/// Reject an empty `data` payload before hashing.
+/// Maximum allowed attestation payload size in bytes.
 ///
-/// Panics with [`ErrorCode::ValidationError`] when `data.len() == 0`.
+/// Hard limit chosen to prevent attackers from submitting very large `data`
+/// payloads that could consume excessive WASM instructions while preparing
+/// the SHA-256 input.
+const MAX_PAYLOAD_SIZE: u32 = 4096; // 4 KB
+
+/// Reject invalid `data` payload before hashing.
+///
+/// Panics with [`ErrorCode::ValidationError`] when `data.len() == 0` or when
+/// `data.len() > MAX_PAYLOAD_SIZE`.
 fn validate_payload_data(env: &Env, data: &Bytes) {
-    if data.len() == 0 {
+    let len = data.len();
+    if len == 0 || len > MAX_PAYLOAD_SIZE {
         panic_with_error!(env, ErrorCode::ValidationError);
     }
 }
@@ -71,7 +81,8 @@ pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
 ///
 /// # Panics
 ///
-/// Panics with [`ErrorCode::ValidationError`] when `data` is empty.
+/// Panics with [`ErrorCode::ValidationError`] when `data` is empty or exceeds
+/// [`MAX_PAYLOAD_SIZE`].
 ///
 /// # Arguments
 ///
@@ -79,7 +90,8 @@ pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
 /// * `subject` - The Stellar address of the attestation subject, serialised as
 ///   raw XDR bytes.
 /// * `timestamp` - Unix timestamp (seconds) encoded as 8-byte big-endian.
-/// * `data` - Arbitrary payload bytes (e.g. `b"kyc_approved"`). Must be non-empty.
+/// * `data` - Arbitrary payload bytes (e.g. `b"kyc_approved"`). Must be non-empty
+///   and at most [`MAX_PAYLOAD_SIZE`] bytes.
 ///
 /// # Returns
 ///
@@ -235,6 +247,21 @@ mod deterministic_hash_tests {
         compute_payload_hash(&env, &subject, 1_700_000_000, &empty);
     }
 
+    #[test]
+    #[should_panic]
+    fn test_oversize_payload_rejected() {
+        let env = Env::default();
+        let subject = Address::generate(&env);
+
+        // MAX_PAYLOAD_SIZE + 1 bytes
+        let too_large = {
+            let mut v = alloc::vec::Vec::new();
+            v.resize(MAX_PAYLOAD_SIZE as usize + 1, 0u8);
+            Bytes::from_slice(&env, &v)
+        };
+        compute_payload_hash(&env, &subject, 1_700_000_000, &too_large);
+    }
+
     /// Canonical fixture: same subject + timestamp + data must always hash to the
     /// same value, regardless of SDK version or platform. The expected digest is
     /// recorded here so that any unintended change to the canonical serialization
@@ -258,3 +285,4 @@ mod deterministic_hash_tests {
     }
 
 }
+
