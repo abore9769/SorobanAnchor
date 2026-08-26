@@ -43,7 +43,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 // ---------------------------------------------------------------------------
 // DeduplicationKey
@@ -283,7 +283,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn first_call_is_not_duplicate() {
@@ -371,5 +370,162 @@ mod tests {
         store.record_success(&k1, "ok", 0);
         assert!(store.is_duplicate(&k1, 1));
         assert!(!store.is_duplicate(&k2, 1));
+    }
+
+    #[test]
+    fn expired_entry_treated_as_new_and_can_be_re_recorded() {
+        let mut store = DeduplicationStore::new(10);
+        let key = DeduplicationKey::new("deposit", "txn-783");
+
+        // Initial record at t=1000, expires at 1010
+        store.record_success(&key, "success_v1", 1000);
+
+        // Before expiry: duplicate hit
+        assert!(store.is_duplicate(&key, 1005));
+        assert_eq!(
+            store.cached_result(&key, 1005),
+            Some(DeduplicationResult::Success("success_v1".to_string()))
+        );
+
+        // At clock boundary (t=1010): expired, treated as new
+        assert!(!store.is_duplicate(&key, 1010));
+        assert_eq!(store.cached_result(&key, 1010), None);
+
+        // Beyond expiry (t=1050): expired, treated as new
+        assert!(!store.is_duplicate(&key, 1050));
+        assert_eq!(store.cached_result(&key, 1050), None);
+
+        // Re-recording the same key after expiry updates the cached result and TTL
+        store.record_success(&key, "success_v2", 1050);
+        assert!(store.is_duplicate(&key, 1055));
+        assert_eq!(
+            store.cached_result(&key, 1055),
+            Some(DeduplicationResult::Success("success_v2".to_string()))
+        );
+        // Second expiration boundary (expires at 1060)
+        assert!(!store.is_duplicate(&key, 1060));
+    }
+
+    #[test]
+    fn execute_deduplicated_advancing_clock_beyond_ttl() {
+        let mut store = DeduplicationStore::new(60);
+        let key = DeduplicationKey::new("withdrawal", "req-adv-clock");
+        let mut invocation_count = 0u32;
+
+        // First call at t=100 -> new operation executed
+        let (res1, was_dedup1) = execute_deduplicated(
+            &mut store,
+            &key,
+            100,
+            || {
+                invocation_count += 1;
+                Ok::<_, &str>("tx-out-1")
+            },
+        );
+        assert_eq!(res1, Ok("tx-out-1"));
+        assert!(!was_dedup1);
+        assert_eq!(invocation_count, 1);
+
+        // Second call at t=130 (within TTL of 60s -> expires at 160) -> duplicate hit
+        let (_res2, was_dedup2) = execute_deduplicated(
+            &mut store,
+            &key,
+            130,
+            || {
+                invocation_count += 1;
+                Ok::<_, &str>("tx-out-2")
+            },
+        );
+        assert!(was_dedup2);
+        assert_eq!(invocation_count, 2);
+
+        // Third call at t=160 (clock boundary: 160 >= 160) -> expired, accepted as new
+        let (res3, was_dedup3) = execute_deduplicated(
+            &mut store,
+            &key,
+            160,
+            || {
+                invocation_count += 1;
+                Ok::<_, &str>("tx-out-3")
+            },
+        );
+        assert_eq!(res3, Ok("tx-out-3"));
+        assert!(!was_dedup3);
+        assert_eq!(invocation_count, 3);
+
+        // Fourth call at t=180 (within new TTL expiring at 220) -> duplicate hit
+        let (_res4, was_dedup4) = execute_deduplicated(
+            &mut store,
+            &key,
+            180,
+            || {
+                invocation_count += 1;
+                Ok::<_, &str>("tx-out-4")
+            },
+        );
+        assert!(was_dedup4);
+        assert_eq!(invocation_count, 4);
+
+        // Fifth call at t=300 (well beyond TTL) -> expired, accepted as new
+        let (res5, was_dedup5) = execute_deduplicated(
+            &mut store,
+            &key,
+            300,
+            || {
+                invocation_count += 1;
+                Ok::<_, &str>("tx-out-5")
+            },
+        );
+        assert_eq!(res5, Ok("tx-out-5"));
+        assert!(!was_dedup5);
+        assert_eq!(invocation_count, 5);
+    }
+
+    #[test]
+    fn clock_boundary_ttl_policy_is_exact() {
+        let mut store = DeduplicationStore::new(100);
+        let key = DeduplicationKey::new("quote", "q-exact");
+        let start_time = 500;
+        store.record_success(&key, "val", start_time);
+
+        // Expected expiry = start_time + 100 = 600
+        // Strictly less than expiry: duplicate
+        assert!(store.is_duplicate(&key, 599));
+        assert!(store.cached_result(&key, 599).is_some());
+
+        // At exact expiry boundary: expired / not duplicate
+        assert!(!store.is_duplicate(&key, 600));
+        assert!(store.cached_result(&key, 600).is_none());
+
+        // Past expiry: expired / not duplicate
+        assert!(!store.is_duplicate(&key, 601));
+        assert!(store.cached_result(&key, 601).is_none());
+    }
+
+    #[test]
+    fn expired_failure_entry_treated_as_new() {
+        let mut store = DeduplicationStore::new(20);
+        let key = DeduplicationKey::new("sep38", "err-783");
+
+        store.record_failure(&key, "network_timeout", 200);
+
+        // Within TTL (expires at 220): duplicate failure
+        assert!(store.is_duplicate(&key, 210));
+        assert_eq!(
+            store.cached_result(&key, 210),
+            Some(DeduplicationResult::Failure("network_timeout".to_string()))
+        );
+
+        // After TTL: treated as new
+        assert!(!store.is_duplicate(&key, 220));
+        assert_eq!(store.cached_result(&key, 220), None);
+
+        // Record success after expiry
+        store.record_success(&key, "recovered", 225);
+        assert!(store.is_duplicate(&key, 230));
+        assert_eq!(
+            store.cached_result(&key, 230),
+            Some(DeduplicationResult::Success("recovered".to_string()))
+        );
     }
 }
