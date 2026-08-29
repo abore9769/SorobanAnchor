@@ -29,6 +29,9 @@ use crate::{
 // HMAC-SHA256 signing helpers
 // ---------------------------------------------------------------------------
 
+/// Maximum webhook body accepted by the signature verifier (1 MiB).
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+
 /// Compute HMAC-SHA256(`key`, `payload`) and return a lowercase hex string.
 fn sign_payload(key: &[u8], payload: &str) -> String {
     use hmac::{Hmac, Mac};
@@ -50,6 +53,10 @@ fn sign_payload(key: &[u8], payload: &str) -> String {
 /// The comparison is done byte-by-byte in constant time to prevent timing
 /// attacks.
 pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8]) -> bool {
+    // Reject oversized untrusted input before parsing or computing HMAC.
+    if payload.len() > MAX_WEBHOOK_BODY_BYTES {
+        return false;
+    }
     let hex_digest = match signature_header.strip_prefix("sha256=") {
         Some(h) => h,
         None => return false,
@@ -677,6 +684,54 @@ where
         sleep_fn,
         now_fn,
     )
+}
+
+/// Deliver a webhook with delivery, attempt, success, failure, and DLQ metrics.
+pub fn deliver_webhook_metered<H, S, T>(
+    config: &WebhookDeliveryConfig,
+    payload: &str,
+    dlq: &mut BTreeMap<String, Vec<DlqEntry>>,
+    http_post: H,
+    sleep_fn: S,
+    now_fn: T,
+    metrics: &crate::metrics::MetricsRegistry,
+) -> Result<(), AnchorKitError>
+where
+    H: Fn(&str, &str, Option<&str>) -> Result<u16, String>,
+    S: FnMut(u64),
+    T: Fn() -> u64,
+{
+    use crate::metrics::names;
+
+    metrics.incr(names::WEBHOOK_DELIVERIES);
+    let entries_before = dlq.values().map(Vec::len).sum::<usize>();
+    let result = deliver_webhook(
+        config,
+        payload,
+        dlq,
+        |url, body, signature| {
+            metrics.incr(names::WEBHOOK_ATTEMPTS);
+            http_post(url, body, signature)
+        },
+        sleep_fn,
+        now_fn,
+    );
+    match &result {
+        Ok(()) => metrics.incr(names::WEBHOOK_SUCCESSES),
+        Err(_) => {
+            metrics.incr(names::WEBHOOK_FAILURES);
+            let entries_after = dlq.values().map(Vec::len).sum::<usize>();
+            metrics.incr_by(
+                names::WEBHOOK_DLQ_ENTRIES,
+                entries_after.saturating_sub(entries_before) as u64,
+            );
+        }
+    }
+    metrics.set_gauge(
+        names::WEBHOOK_DLQ_DEPTH,
+        dlq.values().map(Vec::len).sum::<usize>() as u64,
+    );
+    result
 }
 
 /// Derive a deterministic delivery trace for callers that supplied none.

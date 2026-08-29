@@ -55,6 +55,14 @@ mod metrics_tests {
     }
 
     #[test]
+    fn counter_increment_at_maximum_remains_saturated() {
+        let metrics = MetricsRegistry::new();
+        metrics.incr_by("max.counter", u64::MAX);
+        metrics.incr("max.counter");
+        assert_eq!(metrics.counter("max.counter"), u64::MAX);
+    }
+
+    #[test]
     fn gauge_set_and_overwrite() {
         let metrics = MetricsRegistry::new();
         assert_eq!(metrics.gauge("queue.depth"), None);
@@ -113,6 +121,15 @@ mod metrics_tests {
         assert_eq!(metrics.counter(&names::calls(names::CONTRACT_CALL)), 3);
         assert_eq!(metrics.counter(&names::successes(names::CONTRACT_CALL)), 2);
         assert_eq!(metrics.counter(&names::failures(names::CONTRACT_CALL)), 1);
+    }
+
+    #[test]
+    fn failed_call_increments_failure_once_without_success() {
+        let metrics = MetricsRegistry::new();
+        metrics.record_call("request", false);
+        assert_eq!(metrics.counter("request.calls"), 1);
+        assert_eq!(metrics.counter("request.failures"), 1);
+        assert_eq!(metrics.counter("request.successes"), 0);
     }
 
     #[test]

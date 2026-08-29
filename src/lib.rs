@@ -288,7 +288,7 @@ pub use response_validator::{
     check_transaction_status_compatibility,
 };
 #[cfg(not(feature = "wasm"))]
-pub use webhook::{deliver_webhook, deliver_webhook_traced, dlq_entries_for_trace, get_dead_letter_webhooks, query_dlq, verify_webhook_signature, WebhookDeliveryConfig, DlqEntry};
+pub use webhook::{deliver_webhook, deliver_webhook_metered, deliver_webhook_traced, dlq_entries_for_trace, get_dead_letter_webhooks, query_dlq, verify_webhook_signature, WebhookDeliveryConfig, DlqEntry, MAX_WEBHOOK_BODY_BYTES};
 #[cfg(not(feature = "wasm"))]
 pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 #[cfg(not(feature = "wasm"))]
