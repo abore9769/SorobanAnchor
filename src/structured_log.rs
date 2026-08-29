@@ -323,7 +323,7 @@ impl StructuredLogger {
         timestamp: u64,
         fields: &[(&str, FieldValue)],
     ) -> bool {
-        if level < self.min_level {
+        if level < self.min_level || event.trim().is_empty() {
             return false;
         }
         let seq = self.seq.get();
@@ -517,6 +517,17 @@ mod tests {
         );
         let line = &logger.json_lines()[0];
         assert!(line.contains("quote \\\" backslash \\\\ newline \\n"));
+    }
+
+    #[test]
+    fn blank_event_names_are_rejected_without_output() {
+        let logger = StructuredLogger::new();
+        assert!(!logger.info("", 1, &[]));
+        assert!(!logger.info("   ", 2, &[]));
+        assert!(logger.is_empty());
+        assert!(logger.json_lines().is_empty());
+        assert!(logger.info("valid.event", 3, &[]));
+        assert_eq!(logger.records()[0].seq, 0);
     }
 
     #[test]
