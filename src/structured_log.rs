@@ -520,6 +520,15 @@ mod tests {
     }
 
     #[test]
+    fn message_newline_is_escaped_as_one_json_line() {
+        let logger = StructuredLogger::new();
+        logger.info("stream.message", 2, &[("message", "before\nafter".into())]);
+        let line = &logger.json_lines()[0];
+        assert_eq!(line.matches('\n').count(), 0);
+        assert!(line.contains("\\\"message\\\":\\\"before\\\\nafter\\\""));
+    }
+
+    #[test]
     fn min_level_filters_records() {
         let logger = StructuredLogger::new().with_min_level(LogLevel::Warn);
         assert!(!logger.debug("e", 0, &[]));
