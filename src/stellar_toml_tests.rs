@@ -183,6 +183,94 @@ code = "EURC"
 }
 
 #[test]
+fn test_currency_blank_issuer_rejected() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "USDC"
+issuer = ""
+"#;
+    assert!(parse_stellar_toml(raw).is_err());
+}
+
+#[test]
+fn test_currency_whitespace_only_issuer_rejected() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "USDC"
+issuer = "   "
+"#;
+    assert!(parse_stellar_toml(raw).is_err());
+}
+
+#[test]
+fn test_currency_without_issuer_still_parses() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "USDC"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.currencies.len(), 1);
+    assert!(parsed.currencies[0].issuer.is_none());
+}
+
+#[test]
+fn test_currency_valid_issuer_still_parses() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "USDC"
+issuer = "GAISSUER"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.currencies[0].issuer.as_deref(), Some("GAISSUER"));
+}
+
+// ---------------------------------------------------------------------------
+// Discovered endpoint deduplication (#848)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_discovered_endpoints_deduplicates_repeated_url() {
+    // KYC_SERVER and WEB_AUTH_ENDPOINT point at the same host as
+    // TRANSFER_SERVER; only the first-seen (TRANSFER_SERVER) entry for that
+    // URL should survive.
+    let raw = r#"
+TRANSFER_SERVER = "https://api.example.com"
+KYC_SERVER = "https://api.example.com"
+WEB_AUTH_ENDPOINT = "https://auth.example.com"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    let endpoints = parsed.discovered_endpoints();
+    assert_eq!(
+        endpoints,
+        vec![
+            ("TRANSFER_SERVER", "https://api.example.com".to_string()),
+            ("WEB_AUTH_ENDPOINT", "https://auth.example.com".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_discovered_endpoints_preserves_order_and_labels_when_unique() {
+    let parsed = parse_stellar_toml(VALID_TOML).unwrap();
+    let endpoints = parsed.discovered_endpoints();
+    assert_eq!(
+        endpoints,
+        vec![
+            ("TRANSFER_SERVER", "https://api.example.com".to_string()),
+            ("TRANSFER_SERVER_SEP0024", "https://api.example.com/sep24".to_string()),
+            ("KYC_SERVER", "https://kyc.example.com".to_string()),
+            ("WEB_AUTH_ENDPOINT", "https://auth.example.com".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_discovered_endpoints_empty_when_no_endpoints_declared() {
+    let parsed = parse_stellar_toml(r#"SIGNING_KEY = "GSIGN123""#).unwrap();
+    assert!(parsed.discovered_endpoints().is_empty());
+}
+
+#[test]
 fn test_currency_block_without_code_is_dropped() {
     let raw = r#"
 [[CURRENCIES]]
