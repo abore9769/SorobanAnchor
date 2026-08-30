@@ -70,6 +70,9 @@ pub mod events {
     pub const WEBHOOK_DELIVERY_FAILED: &str = "webhook.delivery_failed";
     pub const WEBHOOK_DLQ_ENTRY_ADDED: &str = "webhook.dlq_entry_added";
 
+    // Deployment drift detection.
+    pub const DEPLOYMENT_DRIFT_DETECTED: &str = "deployment.drift_detected";
+
     // Cache governance.
     pub const CACHE_POLICY_UPDATED: &str = "cache.policy_updated";
     pub const CACHE_POLICY_REJECTED: &str = "cache.policy_rejected";

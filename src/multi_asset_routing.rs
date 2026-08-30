@@ -239,6 +239,18 @@ pub fn route_multi_asset(
     all_quotes: &[CandidateQuote],
     now_timestamp: u64,
 ) -> Result<MultiAssetRoutingResult, Error> {
+    // Reject any candidate whose asset pair is empty.  An anchor that submitted
+    // a quote with blank asset codes cannot represent a real corridor and must
+    // not enter the scoring pool; doing so could produce a misleading
+    // successful selection against an empty-pair request.
+    for q in all_quotes {
+        if normalize_asset_code(&q.base_asset).is_empty()
+            || normalize_asset_code(&q.quote_asset).is_empty()
+        {
+            return Err(Error::InvalidAssetCode);
+        }
+    }
+
     let mut result = MultiAssetRoutingResult::default();
 
     for req in requests {
@@ -248,12 +260,18 @@ pub fn route_multi_asset(
         let quote = normalize_asset_code(&req.quote_asset);
         let key = pair_key(&base, &quote);
 
-        // Filter candidates for this pair
+        // Filter candidates for this pair.
+        // Self-routes (base_asset == quote_asset) are excluded: a candidate
+        // that quotes an asset against itself has no conversion value and must
+        // not win selection regardless of how its other fields score.
         let candidates: Vec<&CandidateQuote> = all_quotes
             .iter()
             .filter(|q| {
-                normalize_asset_code(&q.base_asset) == base
-                    && normalize_asset_code(&q.quote_asset) == quote
+                let q_base = normalize_asset_code(&q.base_asset);
+                let q_quote = normalize_asset_code(&q.quote_asset);
+                q_base != q_quote                              // exclude self-routes
+                    && q_base == base
+                    && q_quote == quote
                     && q.valid_until > now_timestamp
                     && req.amount >= q.minimum_amount
                     && (q.maximum_amount == 0 || req.amount <= q.maximum_amount)

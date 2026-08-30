@@ -393,7 +393,7 @@ pub use artifact_provenance::{
 // ── Issue #673: deployment drift detection ────────────────────────────────────
 #[cfg(not(feature = "wasm"))]
 pub use deployment_drift::{
-    detect_drift, ConfigEntry, DeploymentSpec, DeploymentSnapshot,
+    detect_drift, detect_drift_logged, ConfigEntry, DeploymentSpec, DeploymentSnapshot,
     DriftReport, DriftItem, DriftSeverity,
 };
 
