@@ -179,11 +179,10 @@ pub enum ErrorCode {
     /// No SLO has been configured for this anchor.
     SloNotConfigured          = 76,
 
-    // Retirement transition errors (77-78)
-    /// The requested retirement transition is invalid for the current state.
-    InvalidRetirementTransition = 77,
-    /// Environment fingerprint collection failed.
-    FingerprintCollectionFailed = 78,
+    // Registration input errors (80)
+    /// Registration was rejected because a required text field is blank
+    /// (e.g. the SEP-10 token supplied to `register_attestor` is empty).
+    InvalidRegistration       = 80,
 }
 
 impl ErrorCode {
@@ -270,6 +269,7 @@ impl ErrorCode {
             ErrorCode::SloNotConfigured          => "No SLO has been configured for this anchor",
             ErrorCode::InvalidRetirementTransition => "Invalid retirement transition for current state",
             ErrorCode::FingerprintCollectionFailed => "Environment fingerprint collection failed",
+            ErrorCode::InvalidRegistration       => "Registration rejected: a required text field is blank",
         }
     }
 }
@@ -766,8 +766,9 @@ mod tests {
         assert_eq!(ErrorCode::QuoteExpired          as u32, 60);
         assert_eq!(ErrorCode::SignatureVerificationFailed as u32, 61);
         assert_eq!(ErrorCode::BatchSizeExceeded     as u32, 62);
-        assert_eq!(ErrorCode::InvalidRetirementTransition as u32, 77);
-        assert_eq!(ErrorCode::FingerprintCollectionFailed as u32, 78);
+        assert_eq!(ErrorCode::InvalidRetirementTransition as u32, 65);
+        assert_eq!(ErrorCode::FingerprintCollectionFailed as u32, 66);
+        assert_eq!(ErrorCode::InvalidRegistration as u32, 80);
     }
 
     #[test]
