@@ -35,6 +35,8 @@ pub enum PollResult {
     Pending(TransactionState),
     /// Transaction completed; `stellar_tx_id` is the on-chain Stellar tx hash.
     Completed { stellar_tx_id: alloc::string::String },
+    /// The remote stream ended cleanly (EOF).
+    Eof,
     /// Transaction failed with a human-readable reason.
     Failed { reason: alloc::string::String },
 }
@@ -397,6 +399,21 @@ impl StreamingTransactionMonitor {
                         });
                     }
                     on_event(TransactionStatusUpdate::Failed { reason });
+                    return;
+                }
+                Ok(PollResult::Eof) => {
+                    if let Some(prev) = last_state {
+                        let ts = timestamp_fn();
+                        self.record_transition(prev, TransactionState::Completed, ts, &cycle_trace);
+                        on_event(TransactionStatusUpdate::StateChanged {
+                            from: prev,
+                            to: TransactionState::Completed,
+                            timestamp: ts,
+                        });
+                    }
+                    on_event(TransactionStatusUpdate::Completed {
+                        stellar_tx_id: alloc::string::String::new(),
+                    });
                     return;
                 }
                 Ok(PollResult::Completed { stellar_tx_id }) => {
@@ -1045,8 +1062,38 @@ mod tests {
         assert_eq!(parents, cycle_spans);
     }
 
-    /// Recorded transitions carry the trace, so the transition history can be
-    /// joined against the delivery and retry logs.
+    #[test]
+    fn eof_closes_monitor_once_and_notifies_consumer() {
+        let mut monitor = StreamingTransactionMonitor::new(7, 0);
+        let mut calls = 0;
+        let mut events = Vec::new();
+        monitor.run(
+            |_id| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(PollResult::Pending(TransactionState::InProgress))
+                } else {
+                    Ok(PollResult::Eof)
+                }
+            },
+            |event| events.push(event),
+            |_| {},
+            || 1_000,
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], TransactionStatusUpdate::StateChanged { to: TransactionState::InProgress, .. }));
+        assert_eq!(
+            events[1],
+            TransactionStatusUpdate::Completed {
+                stellar_tx_id: alloc::string::String::new()
+            }
+        );
+        let transitions = monitor.get_transitions();
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[1].to, TransactionState::Completed);
+    }
+
     #[test]
     fn test_recorded_transitions_carry_the_trace() {
         let request = TraceContext::root_from_seed("sep24:deposit-3");

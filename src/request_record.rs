@@ -254,6 +254,9 @@ impl RequestRecordStore {
 
     // ── Export / archival (#680) ─────────────────────────────────────────────
 
+    /// Maximum number of records returned by one export page.
+    pub const MAX_EXPORT_PAGE_SIZE: usize = 100;
+
     /// Export a paginated batch of active records starting at `start_cursor`.
     ///
     /// `batch_size` is capped at 100 to prevent unbounded allocations.
@@ -290,8 +293,7 @@ impl RequestRecordStore {
     /// assert!(!tail.has_more);
     /// ```
     pub fn export_batch(&self, start_cursor: usize, batch_size: usize) -> ExportBatch {
-        const MAX_BATCH: usize = 100;
-        let effective_size = batch_size.min(MAX_BATCH);
+        let effective_size = batch_size.min(Self::MAX_EXPORT_PAGE_SIZE);
 
         if start_cursor >= self.records.len() {
             return ExportBatch {
@@ -301,7 +303,9 @@ impl RequestRecordStore {
             };
         }
 
-        let end = (start_cursor + effective_size).min(self.records.len());
+        let end = start_cursor
+            .saturating_add(effective_size)
+            .min(self.records.len());
         let records = self.records[start_cursor..end].to_vec();
         let next_cursor = end;
         let has_more = next_cursor < self.records.len();
@@ -362,8 +366,7 @@ impl RequestRecordStore {
     ///
     /// Same pagination contract as [`export_batch`](Self::export_batch).
     pub fn archive_export(&self, start_cursor: usize, batch_size: usize) -> ExportBatch {
-        const MAX_BATCH: usize = 100;
-        let effective_size = batch_size.min(MAX_BATCH);
+        let effective_size = batch_size.min(Self::MAX_EXPORT_PAGE_SIZE);
 
         if start_cursor >= self.archive.len() {
             return ExportBatch {
@@ -373,7 +376,9 @@ impl RequestRecordStore {
             };
         }
 
-        let end = (start_cursor + effective_size).min(self.archive.len());
+        let end = start_cursor
+            .saturating_add(effective_size)
+            .min(self.archive.len());
         let records = self.archive[start_cursor..end].to_vec();
         let next_cursor = end;
         let has_more = next_cursor < self.archive.len();

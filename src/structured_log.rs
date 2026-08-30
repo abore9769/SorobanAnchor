@@ -262,6 +262,13 @@ impl LogRecord {
 /// Default maximum number of buffered records before the oldest are dropped.
 pub const DEFAULT_LOG_CAPACITY: usize = 1024;
 
+/// Maximum number of attributes retained in one structured log record.
+///
+/// Attributes beyond this limit are ignored at append time so a caller cannot
+/// create an unbounded record. The first attributes retain their original order
+/// and value encoding.
+pub const MAX_LOG_ATTRIBUTES: usize = 16;
+
 /// In-memory structured logger with level filtering and a bounded buffer.
 ///
 /// Interior mutability (`RefCell`/`Cell`) allows logging through a shared
@@ -335,6 +342,7 @@ impl StructuredLogger {
             event: event.to_string(),
             fields: fields
                 .iter()
+                .take(MAX_LOG_ATTRIBUTES)
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
         };
@@ -540,6 +548,19 @@ mod tests {
         assert_eq!(records[0].event, "second");
         assert_eq!(records[1].event, "third");
         assert_eq!(logger.dropped(), 1);
+    }
+
+    #[test]
+    fn attribute_count_is_capped_without_changing_order_or_values() {
+        let logger = StructuredLogger::new();
+        let fields: Vec<(&str, FieldValue)> = (0..MAX_LOG_ATTRIBUTES + 1)
+            .map(|i| (if i == MAX_LOG_ATTRIBUTES { "overflow" } else { "field" }, (i as u64).into()))
+            .collect();
+        assert!(logger.info("bounded", 0, &fields));
+        let record = &logger.records()[0];
+        assert_eq!(record.fields.len(), MAX_LOG_ATTRIBUTES);
+        assert_eq!(record.fields[0].1, FieldValue::U64(0));
+        assert!(record.field("overflow").is_none());
     }
 
     #[test]

@@ -156,6 +156,11 @@ impl TransactionArchiveManager {
                 "transaction_ids must not be empty",
             ));
         }
+        if transaction_ids.iter().any(|id| id.trim().is_empty()) {
+            return Err(AnchorKitError::validation_error(
+                "transaction_ids must not contain blank IDs",
+            ));
+        }
 
         let commitment = compute_archive_commitment(transaction_ids);
         let archive = TransactionArchive {
@@ -252,6 +257,16 @@ mod tests {
         let mut mgr = TransactionArchiveManager::new();
         let err = mgr.archive(&[], 1000, "batch-1".into(), None).unwrap_err();
         assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn archive_manager_blank_ids_rejected_before_storage() {
+        let mut mgr = TransactionArchiveManager::new();
+        let err = mgr
+            .archive(&ids(&["txn-001", "   "]), 1000, "batch-1".into(), None)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert_eq!(mgr.archive_count(), 0);
     }
 
     #[test]
