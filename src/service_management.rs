@@ -682,6 +682,11 @@ mod tests {
 
     fn make_anchor(env: &Env) -> Address { Address::generate(env) }
 
+    #[test]
+    fn test_request_correlation_header_uses_canonical_name() {
+        assert_eq!(REQUEST_CORRELATION_HEADER, "X-Correlation-Id");
+    }
+
     fn set_time(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
@@ -1040,6 +1045,10 @@ pub struct TemplateApplication {
 pub const TEMPLATE_FIAT_ON_RAMP:       &str = "fiat-on-ramp";
 pub const TEMPLATE_REMITTANCE:         &str = "remittance";
 pub const TEMPLATE_STABLECOIN_ISSUER:  &str = "stablecoin-issuer";
+
+/// Canonical request correlation header name used when propagating a single
+/// correlation ID across service boundaries.
+const REQUEST_CORRELATION_HEADER: &str = "X-Correlation-Id";
 
 /// Operations for managing and applying service onboarding templates.
 pub struct TemplateManager;
