@@ -281,6 +281,8 @@ pub use response_validator::{
     SchemaVersion, VALIDATOR_SCHEMA_V1,
     // Issue #831: unknown SEP-6 status strings classify as Unknown, never success
     Sep6StatusClass, sep6_status_class,
+    // Issues #829 / #830: bounded, stable diagnostics for raw response bodies
+    validate_response_body, BodyRequirement, MAX_ERROR_BODY_LEN,
     // Issue #661: response shape compatibility checks for older anchors
     CompatibilityLevel, CompatibilityReport,
     check_deposit_compatibility, check_withdraw_compatibility,
@@ -299,6 +301,8 @@ pub use sep6::{
     poll_transaction_status, PollConfig, PollResult,
     StatusCategory, classify_status_str,
     VendorStatusMap, VendorStatusEntry,
+    // Issue #834: negative amount strings are rejected before typed conversion
+    parse_sep6_amount,
 };
 #[cfg(not(feature = "wasm"))]
 pub use sep31::{

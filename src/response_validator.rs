@@ -188,6 +188,80 @@ fn is_valid_positive_decimal(s: &str) -> bool {
     s.parse::<f64>().map(|v| v > 0.0).unwrap_or(false)
 }
 
+// ── Raw response body guards (#829, #830) ─────────────────────────────────────
+
+/// Maximum number of bytes of an untrusted response body echoed back inside an
+/// error message.
+///
+/// Diagnostic context is capped at this small limit so a pathological multi-
+/// megabyte body from an anchor cannot inflate log volume or error-string
+/// allocations. Bodies at or below this length are included verbatim.
+pub const MAX_ERROR_BODY_LEN: usize = 256;
+
+/// Whether an endpoint's response body is required to contain JSON.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BodyRequirement {
+    /// The endpoint must return a JSON body (e.g. `/deposit`, `/info`).
+    Required,
+    /// The endpoint may legitimately return an empty body (e.g. a `204`).
+    Optional,
+}
+
+/// Truncate an untrusted body to [`MAX_ERROR_BODY_LEN`] bytes for safe
+/// inclusion in an error message, appending an elision marker when bytes were
+/// dropped. The cut is made on a UTF-8 character boundary so the result is
+/// always valid text.
+fn body_for_error(body: &str) -> alloc::string::String {
+    if body.len() <= MAX_ERROR_BODY_LEN {
+        return alloc::string::String::from(body);
+    }
+    let mut end = MAX_ERROR_BODY_LEN;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = alloc::string::String::from(&body[..end]);
+    out.push_str("… (truncated)");
+    out
+}
+
+/// Validate a raw anchor response body before any field-level parsing.
+///
+/// This is the JSON validation entry point: callers pass the untrusted body
+/// string exactly as received from the anchor's HTTP response.
+///
+/// # Rules
+///
+/// - When `requirement` is [`BodyRequirement::Required`] an empty or
+///   whitespace-only body fails immediately with a stable reason, so callers
+///   get "response body is empty" instead of a generic parse failure and no
+///   parsing work is attempted (#829).
+/// - When `requirement` is [`BodyRequirement::Optional`] an empty body is
+///   accepted unchanged, preserving optional-empty response behavior (#829).
+/// - A non-empty body must look like a JSON object or array (its first
+///   non-whitespace byte is `{` or `[`); otherwise only the first
+///   [`MAX_ERROR_BODY_LEN`] bytes of the body appear in the error context
+///   (#830).
+/// - JSON-shaped bodies pass through untouched; full structural validation
+///   remains the responsibility of the field-level validators.
+pub fn validate_response_body(body: &str, requirement: BodyRequirement) -> Result<(), Error> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return match requirement {
+            BodyRequirement::Required => Err(Error::validation_error(
+                "response body is empty but a JSON body is required",
+            )),
+            BodyRequirement::Optional => Ok(()),
+        };
+    }
+    match trimmed.as_bytes()[0] {
+        b'{' | b'[' => Ok(()),
+        _ => Err(Error::validation_error(&alloc::format!(
+            "response body is not JSON: {}",
+            body_for_error(body),
+        ))),
+    }
+}
+
 // ── Validation functions (backward-compatible originals) ───────────────────────
 // Each existing function delegates to its versioned counterpart with
 // `SchemaVersion::LATEST`.
@@ -1747,5 +1821,67 @@ mod tests {
         assert!(validate_deposit_response("d1", unknown, "GADDR...", 0, 0).is_err());
         assert!(validate_withdraw_response("w1", unknown, 0).is_err());
         assert!(validate_transaction_status_response("t1", unknown, "deposit").is_err());
+    }
+
+    // ── Issue #829: reject empty response body where required ─────────────────
+
+    #[test]
+    fn test_required_body_rejects_empty_with_stable_reason() {
+        let e = validate_response_body("", BodyRequirement::Required).unwrap_err();
+        assert_eq!(e.code, crate::errors::ErrorCode::ValidationError);
+        assert!(e.context.as_deref().unwrap_or("").contains("empty"));
+    }
+
+    #[test]
+    fn test_required_body_rejects_whitespace_only() {
+        assert!(validate_response_body("   \n\t ", BodyRequirement::Required).is_err());
+    }
+
+    #[test]
+    fn test_optional_body_allows_empty() {
+        assert!(validate_response_body("", BodyRequirement::Optional).is_ok());
+        assert!(validate_response_body("   ", BodyRequirement::Optional).is_ok());
+    }
+
+    #[test]
+    fn test_valid_json_body_passes_unchanged() {
+        assert!(validate_response_body(r#"{"transaction_id":"x"}"#, BodyRequirement::Required).is_ok());
+        assert!(validate_response_body("  [1,2,3]  ", BodyRequirement::Required).is_ok());
+        assert!(validate_response_body(r#"{"a":1}"#, BodyRequirement::Optional).is_ok());
+    }
+
+    // ── Issue #830: error context from an untrusted body is bounded ──────────
+
+    #[test]
+    fn test_error_body_is_truncated_to_limit() {
+        let huge = "x".repeat(50_000); // not JSON-shaped
+        let e = validate_response_body(&huge, BodyRequirement::Required).unwrap_err();
+        let ctx = e.context.as_deref().unwrap_or("");
+        assert!(ctx.len() < huge.len(), "error context must not grow with the body");
+        // Fixed prefix + at most MAX_ERROR_BODY_LEN body bytes + elision marker.
+        assert!(ctx.len() <= MAX_ERROR_BODY_LEN + 64);
+        assert!(ctx.contains("truncated"));
+    }
+
+    #[test]
+    fn test_error_body_short_diagnostic_unchanged() {
+        let e = validate_response_body("nope", BodyRequirement::Required).unwrap_err();
+        let ctx = e.context.as_deref().unwrap_or("");
+        assert!(ctx.contains("nope"));
+        assert!(!ctx.contains("truncated"));
+    }
+
+    #[test]
+    fn test_body_for_error_respects_char_boundary() {
+        let s = "é".repeat(400); // 2 bytes each
+        let out = body_for_error(&s);
+        assert!(out.starts_with('é'));
+        assert!(out.len() <= MAX_ERROR_BODY_LEN + "… (truncated)".len());
+        assert!(out.ends_with("… (truncated)"));
+    }
+
+    #[test]
+    fn test_body_for_error_leaves_short_body_intact() {
+        assert_eq!(body_for_error("{\"ok\":true}"), "{\"ok\":true}");
     }
 }
