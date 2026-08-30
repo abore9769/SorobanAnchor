@@ -108,6 +108,37 @@ impl ParsedStellarToml {
     pub fn find_currency(&self, code: &str) -> Option<&ParsedCurrency> {
         self.currencies.iter().find(|c| c.code == code)
     }
+
+    /// Returns the anchor's discovered SEP service endpoints as
+    /// `(label, url)` pairs, deduplicated by URL in first-seen order.
+    ///
+    /// Anchors sometimes point multiple SEP endpoint fields at the same URL
+    /// (for example a combined SEP-6/SEP-31 server). Returning every field
+    /// verbatim would cause callers to probe the same host repeatedly and
+    /// would obscure which distinct service types are actually available.
+    /// Only the first field — in declaration order — that advertises a given
+    /// URL is retained, so its label and position are preserved; later
+    /// fields pointing at the same URL are dropped.
+    pub fn discovered_endpoints(&self) -> Vec<(&'static str, String)> {
+        let candidates: [(&'static str, &Option<String>); 6] = [
+            ("TRANSFER_SERVER", &self.transfer_server),
+            ("TRANSFER_SERVER_SEP0024", &self.transfer_server_sep0024),
+            ("KYC_SERVER", &self.kyc_server),
+            ("WEB_AUTH_ENDPOINT", &self.web_auth_endpoint),
+            ("DIRECT_PAYMENT_SERVER", &self.direct_payment_server),
+            ("ANCHOR_QUOTE_SERVER", &self.anchor_quote_server),
+        ];
+
+        let mut endpoints: Vec<(&'static str, String)> = Vec::new();
+        for (label, url) in candidates {
+            if let Some(url) = url {
+                if !endpoints.iter().any(|(_, seen_url)| seen_url == url) {
+                    endpoints.push((label, url.clone()));
+                }
+            }
+        }
+        endpoints
+    }
 }
 
 /// Constructs the well-known stellar.toml URL for a given domain.
@@ -190,7 +221,14 @@ pub fn parse_stellar_toml(raw: &str) -> Result<ParsedStellarToml, AnchorKitError
                     });
                     match key {
                         "code" => cur.code = value,
-                        "issuer" => cur.issuer = Some(value),
+                        "issuer" => {
+                            if value.trim().is_empty() {
+                                return Err(AnchorKitError::validation_error(
+                                    "CURRENCIES block has empty issuer field",
+                                ));
+                            }
+                            cur.issuer = Some(value);
+                        }
                         "status" => cur.status = Some(value),
                         _ => {}
                     }

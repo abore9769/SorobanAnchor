@@ -50,6 +50,12 @@ fn sign_payload(key: &[u8], payload: &str) -> String {
 /// The comparison is done byte-by-byte in constant time to prevent timing
 /// attacks.
 pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8]) -> bool {
+    // An empty signing secret would make HMAC verification meaningless: any
+    // signature computed against a blank key could be reproduced by anyone,
+    // so reject it outright before doing any HMAC work.
+    if key.is_empty() {
+        return false;
+    }
     let hex_digest = match signature_header.strip_prefix("sha256=") {
         Some(h) => h,
         None => return false,
