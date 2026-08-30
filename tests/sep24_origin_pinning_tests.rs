@@ -107,4 +107,50 @@ mod sep24_origin_pinning_tests {
                 .is_err()
         );
     }
+
+    // ── #836 non-HTTPS (cleartext) redirect URLs are rejected ─────────────
+
+    #[test]
+    fn validate_interactive_url_rejects_http_scheme() {
+        assert!(validate_interactive_url("http://anchor.example.com/deposit", None).is_err());
+        assert!(validate_interactive_url("https://anchor.example.com/deposit", None).is_ok());
+    }
+
+    #[test]
+    fn deposit_with_http_redirect_url_rejected() {
+        let raw = RawInteractiveDepositResponse {
+            url: "http://anchor.example.com/deposit".into(),
+            id: "tx-001".into(),
+        };
+        assert!(
+            initiate_interactive_deposit_with_origin(raw, Some("https://anchor.example.com"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn withdrawal_with_http_redirect_url_rejected() {
+        let raw = RawInteractiveWithdrawalResponse {
+            url: "http://anchor.example.com/withdraw".into(),
+            id: "tx-002".into(),
+        };
+        assert!(
+            initiate_interactive_withdrawal_with_origin(raw, Some("https://anchor.example.com"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn https_redirect_url_accepted_after_scheme_check() {
+        let raw = RawInteractiveDepositResponse {
+            url: "https://anchor.example.com/deposit".into(),
+            id: "tx-003".into(),
+        };
+        let out = initiate_interactive_deposit_with_origin(
+            raw,
+            Some("https://anchor.example.com"),
+        )
+        .expect("https redirect must pass");
+        assert_eq!(out.url, "https://anchor.example.com/deposit");
+    }
 }

@@ -276,6 +276,39 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AnchorKitError> {
     Ok(())
 }
 
+/// Reject a blank interactive redirect URL before any parsing or normalization.
+///
+/// The SEP-24 interactive flow cannot begin without a redirect URL, so an empty
+/// or whitespace-only value is rejected up front with a clear message rather
+/// than surfacing later as a generic parse error. This is the shared guard used
+/// by both the interactive deposit and interactive withdrawal normalizers so
+/// the two paths validate identically.
+fn require_redirect_url(url: &str) -> Result<(), AnchorKitError> {
+    if url.trim().is_empty() {
+        return Err(AnchorKitError::new(
+            ErrorCode::ValidationError,
+            "SEP-24 interactive redirect URL must not be blank",
+        ));
+    }
+    Ok(())
+}
+
+/// Require a non-blank anchor transaction ID without otherwise altering it.
+///
+/// SEP-24 transaction IDs are opaque, anchor-assigned tokens: later status
+/// lookups send the value back verbatim, so the normalizer must preserve it
+/// exactly. Only the required / non-empty check is enforced here — callers that
+/// want stricter structural checks can still opt into [`validate_transaction_id`].
+fn require_transaction_id(id: &str) -> Result<(), AnchorKitError> {
+    if id.trim().is_empty() {
+        return Err(AnchorKitError::new(
+            ErrorCode::ValidationError,
+            "SEP-24 transaction ID must not be empty",
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Service functions
 // ---------------------------------------------------------------------------
@@ -324,9 +357,10 @@ pub fn initiate_interactive_deposit_with_origin(
     raw: RawInteractiveDepositResponse,
     expected_origin: Option<&str>,
 ) -> Result<InteractiveDepositResponse, AnchorKitError> {
+    require_redirect_url(&raw.url)?;
     let normalized_url = normalize_url(&raw.url)?;
     validate_interactive_url(&normalized_url, expected_origin)?;
-    validate_transaction_id(&raw.id)?;
+    require_transaction_id(&raw.id)?;
     Ok(InteractiveDepositResponse {
         url: normalized_url,
         id: raw.id,
@@ -375,9 +409,10 @@ pub fn initiate_interactive_withdrawal_with_origin(
     raw: RawInteractiveWithdrawalResponse,
     expected_origin: Option<&str>,
 ) -> Result<InteractiveWithdrawalResponse, AnchorKitError> {
+    require_redirect_url(&raw.url)?;
     let normalized_url = normalize_url(&raw.url)?;
     validate_interactive_url(&normalized_url, expected_origin)?;
-    validate_transaction_id(&raw.id)?;
+    require_transaction_id(&raw.id)?;
     Ok(InteractiveWithdrawalResponse {
         url: normalized_url,
         id: raw.id,
@@ -963,5 +998,88 @@ mod tests {
         };
         let result = fetch_sep24_transaction_status(raw).unwrap();
         assert_eq!(result.status, TransactionStatus::Error);
+    }
+
+    // ── #835 blank interactive redirect URL is rejected ──────────────────────
+
+    #[test]
+    fn test_require_redirect_url_rejects_blank() {
+        assert!(require_redirect_url("").is_err());
+        assert!(require_redirect_url("   ").is_err());
+        assert!(require_redirect_url("\t\n").is_err());
+        assert!(require_redirect_url("https://anchor.example.com/deposit").is_ok());
+    }
+
+    #[test]
+    fn test_initiate_interactive_deposit_rejects_whitespace_only_url() {
+        let raw = RawInteractiveDepositResponse {
+            url: "   ".to_string(),
+            id: "tx-123".to_string(),
+        };
+        assert!(initiate_interactive_deposit(raw).is_err());
+    }
+
+    #[test]
+    fn test_initiate_interactive_withdrawal_rejects_whitespace_only_url() {
+        let raw = RawInteractiveWithdrawalResponse {
+            url: "   ".to_string(),
+            id: "tx-456".to_string(),
+        };
+        assert!(initiate_interactive_withdrawal(raw).is_err());
+    }
+
+    #[test]
+    fn test_initiate_interactive_deposit_valid_url_unchanged() {
+        let raw = RawInteractiveDepositResponse {
+            url: "https://anchor.example.com/deposit".to_string(),
+            id: "tx-123".to_string(),
+        };
+        let result = initiate_interactive_deposit(raw).unwrap();
+        assert_eq!(result.url, "https://anchor.example.com/deposit");
+    }
+
+    // ── #837 opaque transaction IDs round-trip unchanged ─────────────────────
+
+    #[test]
+    fn test_initiate_interactive_deposit_preserves_opaque_id() {
+        let opaque = "tx--001__2024.11.30:anchor";
+        let raw = RawInteractiveDepositResponse {
+            url: "https://anchor.example.com/deposit".to_string(),
+            id: opaque.to_string(),
+        };
+        let result = initiate_interactive_deposit(raw).unwrap();
+        assert_eq!(result.id, opaque);
+        // URL normalization is unaffected by the ID change.
+        assert_eq!(result.url, "https://anchor.example.com/deposit");
+    }
+
+    #[test]
+    fn test_initiate_interactive_withdrawal_preserves_opaque_id() {
+        let opaque = "WD_2024-11-30/abc..99";
+        let raw = RawInteractiveWithdrawalResponse {
+            url: "https://anchor.example.com/withdraw".to_string(),
+            id: opaque.to_string(),
+        };
+        let result = initiate_interactive_withdrawal(raw).unwrap();
+        assert_eq!(result.id, opaque);
+        assert_eq!(result.url, "https://anchor.example.com/withdraw");
+    }
+
+    #[test]
+    fn test_initiate_interactive_deposit_still_rejects_blank_id() {
+        let raw = RawInteractiveDepositResponse {
+            url: "https://anchor.example.com/deposit".to_string(),
+            id: "   ".to_string(),
+        };
+        assert!(initiate_interactive_deposit(raw).is_err());
+    }
+
+    #[test]
+    fn test_initiate_interactive_withdrawal_still_rejects_blank_id() {
+        let raw = RawInteractiveWithdrawalResponse {
+            url: "https://anchor.example.com/withdraw".to_string(),
+            id: "".to_string(),
+        };
+        assert!(initiate_interactive_withdrawal(raw).is_err());
     }
 }

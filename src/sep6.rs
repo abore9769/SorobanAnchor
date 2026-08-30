@@ -519,6 +519,23 @@ fn validate_memo_pair(memo: Option<&str>, memo_type: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// Validate SEP-6 amount-bound ordering.
+///
+/// When **both** `min_amount` and `max_amount` are present an inverted range
+/// (`min_amount > max_amount`) cannot describe a usable offer and is rejected
+/// with [`Error::invalid_transaction_intent`]. Equal bounds and correctly
+/// ordered bounds pass. When either bound is absent no constraint is applied,
+/// preserving the previous behavior. The numeric values themselves are never
+/// altered.
+fn validate_amount_ordering(min_amount: Option<u64>, max_amount: Option<u64>) -> Result<(), Error> {
+    if let (Some(min), Some(max)) = (min_amount, max_amount) {
+        if min > max {
+            return Err(Error::invalid_transaction_intent());
+        }
+    }
+    Ok(())
+}
+
 // ── Service functions ─────────────────────────────────────────────────────────
 
 /// Normalize a raw anchor deposit response into a canonical [`DepositResponse`].
@@ -574,11 +591,7 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
     if raw.transaction_id.trim().is_empty() || raw.how.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
-    if let (Some(min), Some(max)) = (raw.min_amount, raw.max_amount) {
-        if min > max {
-            return Err(Error::invalid_transaction_intent());
-        }
-    }
+    validate_amount_ordering(raw.min_amount, raw.max_amount)?;
     validate_memo_pair(raw.stellar_memo.as_deref(), raw.stellar_memo_type.as_deref())?;
     let asset_code = raw.asset_code.as_deref()
         .map(normalize_asset_code)
@@ -653,11 +666,7 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
     if raw.transaction_id.trim().is_empty() || raw.account_id.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
-    if let (Some(min), Some(max)) = (raw.min_amount, raw.max_amount) {
-        if min > max {
-            return Err(Error::invalid_transaction_intent());
-        }
-    }
+    validate_amount_ordering(raw.min_amount, raw.max_amount)?;
     validate_memo_pair(raw.memo.as_deref(), raw.memo_type.as_deref())?;
     let asset_code = raw.asset_code.as_deref()
         .map(normalize_asset_code)
@@ -1494,5 +1503,79 @@ mod tests {
         ] {
             assert_eq!(TransactionStatus::from_str(input), *expected, "mismatch for '{}'", input);
         }
+    }
+
+    // ── #833 SEP-6 amount-bound ordering ─────────────────────────────────────
+
+    #[test]
+    fn test_validate_amount_ordering_semantics() {
+        // Ordered and equal bounds pass.
+        assert!(validate_amount_ordering(Some(10), Some(20)).is_ok());
+        assert!(validate_amount_ordering(Some(20), Some(20)).is_ok());
+        // Inverted bounds fail.
+        assert!(validate_amount_ordering(Some(21), Some(20)).is_err());
+        // Absent bounds impose no constraint.
+        assert!(validate_amount_ordering(None, Some(5)).is_ok());
+        assert!(validate_amount_ordering(Some(5), None).is_ok());
+        assert!(validate_amount_ordering(None, None).is_ok());
+    }
+
+    #[test]
+    fn test_initiate_deposit_ordered_bounds_accepted() {
+        let mut raw = raw_deposit();
+        raw.min_amount = Some(10);
+        raw.max_amount = Some(20);
+        let resp = initiate_deposit(raw).unwrap();
+        assert_eq!(resp.min_amount, Some(10));
+        assert_eq!(resp.max_amount, Some(20));
+    }
+
+    #[test]
+    fn test_initiate_deposit_absent_min_bound_retains_behavior() {
+        let mut raw = raw_deposit();
+        raw.min_amount = None;
+        raw.max_amount = Some(1);
+        let resp = initiate_deposit(raw).unwrap();
+        assert_eq!(resp.min_amount, None);
+        assert_eq!(resp.max_amount, Some(1));
+    }
+
+    #[test]
+    fn test_initiate_deposit_absent_max_bound_retains_behavior() {
+        let mut raw = raw_deposit();
+        raw.min_amount = Some(9_999_999);
+        raw.max_amount = None;
+        let resp = initiate_deposit(raw).unwrap();
+        assert_eq!(resp.min_amount, Some(9_999_999));
+        assert_eq!(resp.max_amount, None);
+    }
+
+    #[test]
+    fn test_initiate_deposit_both_bounds_absent_retains_behavior() {
+        let mut raw = raw_deposit();
+        raw.min_amount = None;
+        raw.max_amount = None;
+        assert!(initiate_deposit(raw).is_ok());
+    }
+
+    #[test]
+    fn test_initiate_withdrawal_ordered_bounds_accepted() {
+        let mut raw = raw_withdrawal();
+        raw.min_amount = Some(5);
+        raw.max_amount = Some(6);
+        assert!(initiate_withdrawal(raw).is_ok());
+    }
+
+    #[test]
+    fn test_initiate_withdrawal_absent_bounds_retain_behavior() {
+        let mut raw = raw_withdrawal();
+        raw.min_amount = None;
+        raw.max_amount = Some(1);
+        assert!(initiate_withdrawal(raw).is_ok());
+
+        let mut raw2 = raw_withdrawal();
+        raw2.min_amount = Some(1_000_000);
+        raw2.max_amount = None;
+        assert!(initiate_withdrawal(raw2).is_ok());
     }
 }
