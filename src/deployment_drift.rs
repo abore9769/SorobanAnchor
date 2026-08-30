@@ -12,12 +12,17 @@
 //! - [`DeploymentSnapshot`] captures the observed state at a point in time.
 //! - [`detect_drift`] compares the two and returns a [`DriftReport`] listing
 //!   every [`DriftItem`] — fields that are missing, changed, or unexpected.
+//! - [`detect_drift_logged`] is a thin wrapper that additionally emits a
+//!   structured `deployment.drift_detected` warning through a
+//!   [`StructuredLogger`] whenever drift is found.
 //! - [`DriftSeverity`] classifies each drift item so operators can triage
 //!   critical divergences from cosmetic ones.
 
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
+
+use crate::structured_log::{StructuredLogger, LogLevel, events};
 
 // ---------------------------------------------------------------------------
 // Spec and snapshot types
@@ -217,8 +222,16 @@ pub fn detect_drift(spec: &DeploymentSpec, snapshot: &DeploymentSnapshot) -> Dri
     }
 
     // ── Admin address ────────────────────────────────────────────────────────
+    //
+    // Addresses are compared in normalized form (trimmed + uppercased) so that
+    // equivalent representations — e.g. a lowercase copy of a G-address or one
+    // with stray whitespace — do not produce a false-positive drift item.
+    // Original (un-modified) strings are preserved in the DriftItem output so
+    // that report formatting is unchanged.
     match (&spec.expected_admin, &snapshot.observed_admin) {
-        (Some(exp), Some(obs)) if exp != obs => {
+        (Some(exp), Some(obs))
+            if exp.trim().to_ascii_uppercase() != obs.trim().to_ascii_uppercase() =>
+        {
             items.push(DriftItem {
                 field: "admin".into(),
                 severity: DriftSeverity::Critical,
@@ -328,6 +341,78 @@ pub fn detect_drift(spec: &DeploymentSpec, snapshot: &DeploymentSnapshot) -> Dri
         medium_count,
         low_count,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Logged variant
+// ---------------------------------------------------------------------------
+
+/// Like [`detect_drift`], but emits a structured log entry through `logger`
+/// when drift is detected.
+///
+/// Positive drift (any item found) produces exactly one
+/// `deployment.drift_detected` warning carrying the environment name, total
+/// item count, and critical item count as fields.  A clean result emits
+/// nothing.  Result values are identical to [`detect_drift`]: calling code
+/// that already inspects the returned [`DriftReport`] requires no changes.
+///
+/// # Arguments
+///
+/// * `spec` — The intended deployment state.
+/// * `snapshot` — The observed deployment state.
+/// * `logger` — A [`StructuredLogger`] for the current workflow.
+/// * `timestamp` — Unix timestamp (seconds) to attach to the log entry.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::deployment_drift::{
+///     ConfigEntry, DeploymentSpec, DeploymentSnapshot, detect_drift_logged,
+/// };
+/// use anchorkit::structured_log::StructuredLogger;
+///
+/// let spec = DeploymentSpec {
+///     environment: "testnet".into(),
+///     expected_version: "0.1.0".into(),
+///     expected_network: "Test SDF Network ; September 2015".into(),
+///     expected_admin: Some("GABC123".into()),
+///     expected_config: vec![],
+/// };
+///
+/// let mut snapshot_drifted = DeploymentSnapshot {
+///     environment: "testnet".into(),
+///     captured_at: 9999,
+///     observed_version: "0.2.0".into(), // drifted
+///     observed_network: "Test SDF Network ; September 2015".into(),
+///     observed_admin: Some("GABC123".into()),
+///     observed_config: vec![],
+/// };
+///
+/// let logger = StructuredLogger::new();
+/// let report = detect_drift_logged(&spec, &snapshot_drifted, &logger, 9999);
+/// assert!(!report.is_clean);
+/// assert_eq!(logger.len(), 1); // one warning emitted
+/// ```
+pub fn detect_drift_logged(
+    spec: &DeploymentSpec,
+    snapshot: &DeploymentSnapshot,
+    logger: &StructuredLogger,
+    timestamp: u64,
+) -> DriftReport {
+    let report = detect_drift(spec, snapshot);
+    if !report.is_clean {
+        logger.log(
+            LogLevel::Warn,
+            events::DEPLOYMENT_DRIFT_DETECTED,
+            timestamp,
+            &[
+                ("environment", spec.environment.as_str().into()),
+                ("item_count", (report.items.len() as u64).into()),
+                ("critical_count", (report.critical_count as u64).into()),
+            ],
+        );
+    }
+    report
 }
 
 // ---------------------------------------------------------------------------
@@ -486,5 +571,82 @@ mod tests {
         let report = detect_drift(&base_spec(), &base_snapshot());
         assert_eq!(report.environment, "testnet");
         assert_eq!(report.snapshot_captured_at, 9999);
+    }
+
+    // ── Fix 3: detect_drift_logged emits one event on positive drift ─────────
+
+    #[test]
+    fn drift_detected_event_emitted_when_drift_found() {
+        use crate::structured_log::{StructuredLogger, FieldValue, events};
+
+        let mut snap = base_snapshot();
+        snap.observed_version = "0.2.0".into(); // introduce drift
+
+        let logger = StructuredLogger::new();
+        let report = super::detect_drift_logged(&base_spec(), &snap, &logger, 1234);
+
+        assert!(!report.is_clean, "report must show drift");
+        assert_eq!(logger.len(), 1, "exactly one event must be emitted");
+
+        let record = &logger.records()[0];
+        assert_eq!(record.event, events::DEPLOYMENT_DRIFT_DETECTED);
+        assert_eq!(
+            record.field("environment"),
+            Some(&FieldValue::Str("testnet".into()))
+        );
+        assert_eq!(record.timestamp, 1234);
+    }
+
+    #[test]
+    fn no_event_emitted_when_no_drift() {
+        use crate::structured_log::StructuredLogger;
+
+        let logger = StructuredLogger::new();
+        let report = super::detect_drift_logged(&base_spec(), &base_snapshot(), &logger, 1234);
+
+        assert!(report.is_clean, "clean deployment must produce no drift");
+        assert_eq!(logger.len(), 0, "no event must be emitted for a clean result");
+    }
+
+    // ── Fix 4: equivalent addresses must not produce false drift ─────────────
+
+    #[test]
+    fn equivalent_address_different_case_does_not_drift() {
+        let mut snap = base_snapshot();
+        // Same address as spec's "GABC123" but in lowercase — must not drift.
+        snap.observed_admin = Some("gabc123".into());
+
+        let report = detect_drift(&base_spec(), &snap);
+        assert!(
+            report.is_clean,
+            "addresses equal after normalization must not produce a drift item"
+        );
+    }
+
+    #[test]
+    fn equivalent_address_with_whitespace_does_not_drift() {
+        let mut snap = base_snapshot();
+        snap.observed_admin = Some("  GABC123  ".into());
+
+        let report = detect_drift(&base_spec(), &snap);
+        assert!(
+            report.is_clean,
+            "addresses equal after trimming must not produce a drift item"
+        );
+    }
+
+    #[test]
+    fn genuinely_different_address_still_drifts() {
+        let mut snap = base_snapshot();
+        snap.observed_admin = Some("GDIFFERENTADDRESS".into());
+
+        let report = detect_drift(&base_spec(), &snap);
+        assert!(!report.is_clean);
+        assert!(report.has_critical());
+        let item = report.items.iter().find(|i| i.field == "admin").unwrap();
+        assert_eq!(item.severity, DriftSeverity::Critical);
+        // Original (un-normalized) strings preserved in output.
+        assert_eq!(item.expected.as_deref(), Some("GABC123"));
+        assert_eq!(item.observed.as_deref(), Some("GDIFFERENTADDRESS"));
     }
 }

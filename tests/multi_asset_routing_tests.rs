@@ -508,6 +508,69 @@ fn test_route_mixed_strategies_in_single_call() {
     assert_eq!(btc.anchor, "anchor-c");
 }
 
+// ── Self-route exclusion ──────────────────────────────────────────────────────
+
+/// A CandidateQuote where base_asset == quote_asset is a self-route and must
+/// never be selected, even when it would otherwise score best.
+#[test]
+fn test_route_self_route_candidate_is_excluded() {
+    let quotes = vec![
+        // Self-route: XLM → XLM.  Has perfect fee and reputation scores; must
+        // be filtered out before selection despite this favourable profile.
+        make_quote(1, "anchor-self", "XLM", "XLM", 0, 1_000_000, 100, 1, 1, 0, NOW + 3600),
+        // Valid distinct-pair quote that should win.
+        make_quote(2, "anchor-valid", "XLM", "USDC", 20, 1_000_000, 80, 60, 1, 0, NOW + 3600),
+    ];
+    let requests = vec![req("XLM", "USDC", 100, "LowestFee")];
+    let result = route_multi_asset(&requests, &quotes, NOW).unwrap();
+
+    assert_eq!(result.filled.len(), 1, "self-route must not fill the corridor");
+    assert_eq!(result.filled[0].anchor, "anchor-valid");
+}
+
+/// When the only available candidate is a self-route the corridor is unfilled,
+/// not erroneously filled with the self-routing anchor.
+#[test]
+fn test_route_only_self_route_produces_unfilled() {
+    let quotes = vec![
+        make_quote(1, "anchor-self", "USDC", "USDC", 0, 1_000_000, 100, 1, 1, 0, NOW + 3600),
+    ];
+    let requests = vec![req("USDC", "USDC_COPY", 100, "LowestFee")];
+    let result = route_multi_asset(&requests, &quotes, NOW).unwrap();
+
+    assert_eq!(result.filled.len(), 0);
+    assert_eq!(result.unfilled.len(), 1);
+}
+
+// ── Empty-route input rejection ───────────────────────────────────────────────
+
+/// A CandidateQuote with an empty base_asset is an invalid empty-route input
+/// and must be rejected before scoring, regardless of the request.
+#[test]
+fn test_route_empty_base_asset_in_candidate_returns_error() {
+    let quotes = vec![
+        // Candidate with blank base_asset — this is the malformed input.
+        make_quote(1, "anchor-bad", "", "USDC", 10, 1_000_000, 80, 60, 1, 0, NOW + 3600),
+        // A perfectly valid quote in the same pool.
+        make_quote(2, "anchor-ok", "XLM", "USDC", 20, 1_000_000, 80, 60, 1, 0, NOW + 3600),
+    ];
+    let requests = vec![req("XLM", "USDC", 100, "LowestFee")];
+    let err = route_multi_asset(&requests, &quotes, NOW).unwrap_err();
+    assert_eq!(err, Error::InvalidAssetCode);
+}
+
+/// A CandidateQuote with an empty quote_asset must likewise be rejected before
+/// any scoring occurs.
+#[test]
+fn test_route_empty_quote_asset_in_candidate_returns_error() {
+    let quotes = vec![
+        make_quote(1, "anchor-bad", "XLM", "", 10, 1_000_000, 80, 60, 1, 0, NOW + 3600),
+    ];
+    let requests = vec![req("XLM", "USDC", 100, "LowestFee")];
+    let err = route_multi_asset(&requests, &quotes, NOW).unwrap_err();
+    assert_eq!(err, Error::InvalidAssetCode);
+}
+
 // ── Quote fields are propagated correctly ─────────────────────────────────────
 
 #[test]
