@@ -3217,7 +3217,7 @@ impl AnchorKitContract {
         // authentication impossible to diagnose and would cause a confusing
         // JWT-verification error later.  Fail fast before any state mutation.
         if sep10_token.len() == 0 {
-            panic_with_error!(&env, ErrorCode::InvalidRegistration);
+            panic_with_error!(&env, ErrorCode::ValidationError);
         }
         // Accept via primary admin, AttestorAdmin role, OR ManageAttestors capability.
         if !Self::has_role_internal(&env, &attestor, AdminRole::AttestorAdmin)
@@ -4356,7 +4356,8 @@ impl AnchorKitContract {
     ) -> u64 {
         Self::require_admin_or_capability(&env, &caller, AdminCapability::ToggleServices);
         let desc = Self::soroban_string_to_rust_string(&env, &description);
-        let snapshot_id = ServiceManager::create_snapshot(&env, &anchor, &services, desc.as_str());
+        let snapshot_id = ServiceManager::create_snapshot(&env, &anchor, &services, desc.as_str())
+            .expect("snapshot name must not be empty");
         AdminAuditLog::log_action(
             &env,
             &caller,
