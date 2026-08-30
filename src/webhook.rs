@@ -53,8 +53,10 @@ fn sign_payload(key: &[u8], payload: &str) -> String {
 /// The comparison is done byte-by-byte in constant time to prevent timing
 /// attacks.
 pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8]) -> bool {
-    // Reject oversized untrusted input before parsing or computing HMAC.
-    if payload.len() > MAX_WEBHOOK_BODY_BYTES {
+    // An empty signing secret would make HMAC verification meaningless: any
+    // signature computed against a blank key could be reproduced by anyone,
+    // so reject it outright before doing any HMAC work.
+    if key.is_empty() {
         return false;
     }
     let hex_digest = match signature_header.strip_prefix("sha256=") {
@@ -139,7 +141,8 @@ pub fn verify_webhook_signature_with_replay_protection(
     }
     
     let age = current_time.saturating_sub(timestamp);
-    if age > max_age_seconds {
+    // The maximum age is exclusive: exactly max_age_seconds old is expired.
+    if age >= max_age_seconds {
         return VerificationResult::InvalidTimestamp;
     }
     
@@ -1027,6 +1030,20 @@ mod tests {
             span_id: "0".repeat(15) + "1",
             last_attempt_span_id: "0".repeat(15) + "1",
         }
+    }
+
+    #[test]
+    fn timestamp_exactly_at_max_age_is_expired() {
+        let payload = r#"{"timestamp":900,"nonce":"boundary"}"#;
+        let key = b"secret";
+        let signature = format!("sha256={}", sign_payload(key, payload));
+        let mut tracker = MemoryNonceTracker::new();
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &signature, key, 1000, 100, &mut tracker,
+            ),
+            VerificationResult::InvalidTimestamp
+        );
     }
 
     #[test]

@@ -302,4 +302,32 @@ mod webhook_middleware_tests {
         let sig = sig_captured.lock().unwrap().clone();
         assert!(!verify_webhook_signature(payload, &sig, b"wrong-key"));
     }
+
+    // -----------------------------------------------------------------------
+    // 10. verify_webhook_signature — empty secret is rejected before HMAC work
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_verify_empty_secret_fails() {
+        let key = b"secret";
+        let payload = r#"{"event":"test"}"#;
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        // A blank secret must never validate a signature, even one produced
+        // with a real key.
+        assert!(!verify_webhook_signature(payload, &sig, b""));
+    }
 }

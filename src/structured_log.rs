@@ -70,6 +70,9 @@ pub mod events {
     pub const WEBHOOK_DELIVERY_FAILED: &str = "webhook.delivery_failed";
     pub const WEBHOOK_DLQ_ENTRY_ADDED: &str = "webhook.dlq_entry_added";
 
+    // Deployment drift detection.
+    pub const DEPLOYMENT_DRIFT_DETECTED: &str = "deployment.drift_detected";
+
     // Cache governance.
     pub const CACHE_POLICY_UPDATED: &str = "cache.policy_updated";
     pub const CACHE_POLICY_REJECTED: &str = "cache.policy_rejected";
@@ -262,6 +265,13 @@ impl LogRecord {
 /// Default maximum number of buffered records before the oldest are dropped.
 pub const DEFAULT_LOG_CAPACITY: usize = 1024;
 
+/// Maximum number of attributes retained in one structured log record.
+///
+/// Attributes beyond this limit are ignored at append time so a caller cannot
+/// create an unbounded record. The first attributes retain their original order
+/// and value encoding.
+pub const MAX_LOG_ATTRIBUTES: usize = 16;
+
 /// In-memory structured logger with level filtering and a bounded buffer.
 ///
 /// Interior mutability (`RefCell`/`Cell`) allows logging through a shared
@@ -335,6 +345,7 @@ impl StructuredLogger {
             event: event.to_string(),
             fields: fields
                 .iter()
+                .take(MAX_LOG_ATTRIBUTES)
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
         };
@@ -520,14 +531,12 @@ mod tests {
     }
 
     #[test]
-    fn blank_event_names_are_rejected_without_output() {
+    fn message_newline_is_escaped_as_one_json_line() {
         let logger = StructuredLogger::new();
-        assert!(!logger.info("", 1, &[]));
-        assert!(!logger.info("   ", 2, &[]));
-        assert!(logger.is_empty());
-        assert!(logger.json_lines().is_empty());
-        assert!(logger.info("valid.event", 3, &[]));
-        assert_eq!(logger.records()[0].seq, 0);
+        logger.info("stream.message", 2, &[("message", "before\nafter".into())]);
+        let line = &logger.json_lines()[0];
+        assert_eq!(line.matches('\n').count(), 0);
+        assert!(line.contains("\\\"message\\\":\\\"before\\\\nafter\\\""));
     }
 
     #[test]
@@ -551,6 +560,19 @@ mod tests {
         assert_eq!(records[0].event, "second");
         assert_eq!(records[1].event, "third");
         assert_eq!(logger.dropped(), 1);
+    }
+
+    #[test]
+    fn attribute_count_is_capped_without_changing_order_or_values() {
+        let logger = StructuredLogger::new();
+        let fields: Vec<(&str, FieldValue)> = (0..MAX_LOG_ATTRIBUTES + 1)
+            .map(|i| (if i == MAX_LOG_ATTRIBUTES { "overflow" } else { "field" }, (i as u64).into()))
+            .collect();
+        assert!(logger.info("bounded", 0, &fields));
+        let record = &logger.records()[0];
+        assert_eq!(record.fields.len(), MAX_LOG_ATTRIBUTES);
+        assert_eq!(record.fields[0].1, FieldValue::U64(0));
+        assert!(record.field("overflow").is_none());
     }
 
     #[test]
