@@ -9,6 +9,20 @@ use alloc::string::String;
 use crate::errors::Error;
 use crate::errors::normalize_asset_code;
 
+// ── Status normalization ──────────────────────────────────────────────────────
+
+/// Normalize a raw anchor status token before it is matched.
+///
+/// Anchors are inconsistent about the capitalization and surrounding
+/// whitespace of status strings (`"PENDING_USER"`, `" pending_user "`), so the
+/// token is trimmed and ASCII-lowercased at the single point where SEP-6
+/// status parsing and classification happen. Only the status token passes
+/// through here — free-form fields such as a transaction `message` are never
+/// normalized.
+fn normalize_status_token(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
 // ── Status classification ─────────────────────────────────────────────────────
 
 /// High-level category that a [`TransactionStatus`] belongs to.
@@ -41,7 +55,7 @@ pub enum StatusCategory {
 /// [`StatusCategory::Unknown`] rather than being silently treated as
 /// successful.
 pub fn classify_status_str(s: &str) -> StatusCategory {
-    let normalized = s.trim().to_ascii_lowercase();
+    let normalized = normalize_status_token(s);
     match normalized.as_str() {
         "pending_external"
         | "pending_anchor"
@@ -126,7 +140,7 @@ impl VendorStatusMap {
     /// If `vendor_status` is already registered the existing mapping is
     /// replaced.
     pub fn register(&mut self, vendor_status: &str, canonical: TransactionStatus) {
-        let key = vendor_status.trim().to_ascii_lowercase();
+        let key = normalize_status_token(vendor_status);
         if let Some(pos) = self.entries.iter().position(|e| e.vendor_status == key) {
             self.entries[pos].canonical = canonical;
         } else {
@@ -146,7 +160,7 @@ impl VendorStatusMap {
     /// The returned [`VendorStatusEntry`] always carries the original
     /// (trimmed) raw string so callers can log or forward vendor detail.
     pub fn resolve(&self, raw: &str) -> VendorStatusEntry {
-        let key = raw.trim().to_ascii_lowercase();
+        let key = normalize_status_token(raw);
         if let Some(entry) = self.entries.iter().find(|e| e.vendor_status == key) {
             return VendorStatusEntry {
                 vendor_status: raw.trim().into(),
@@ -161,13 +175,13 @@ impl VendorStatusMap {
 
     /// Returns `true` if the map contains a custom mapping for `vendor_status`.
     pub fn contains(&self, vendor_status: &str) -> bool {
-        let key = vendor_status.trim().to_ascii_lowercase();
+        let key = normalize_status_token(vendor_status);
         self.entries.iter().any(|e| e.vendor_status == key)
     }
 
     /// Remove the mapping for `vendor_status`. Returns `true` if it existed.
     pub fn remove(&mut self, vendor_status: &str) -> bool {
-        let key = vendor_status.trim().to_ascii_lowercase();
+        let key = normalize_status_token(vendor_status);
         if let Some(pos) = self.entries.iter().position(|e| e.vendor_status == key) {
             self.entries.remove(pos);
             true
@@ -253,7 +267,7 @@ impl TransactionStatus {
     /// assert_eq!(TransactionStatus::from_str("garbage"), TransactionStatus::Error);
     /// ```
     pub fn from_str(s: &str) -> Self {
-        let s = s.trim().to_ascii_lowercase();
+        let s = normalize_status_token(s);
         match s.as_str() {
             "pending_external" => Self::PendingExternal,
             "pending_anchor" => Self::PendingAnchor,
@@ -534,6 +548,60 @@ fn validate_amount_ordering(min_amount: Option<u64>, max_amount: Option<u64>) ->
         }
     }
     Ok(())
+}
+
+/// Parse a raw SEP-6 amount string into the canonical integer unit
+/// representation used by the `*_amount` fields of [`RawDepositResponse`],
+/// [`RawWithdrawalResponse`] and [`RawTransactionResponse`].
+///
+/// Anchors return amounts as JSON strings. This is the normalization boundary
+/// callers use to convert them before typed conversion, so an invalid sign
+/// never reaches a `u64` field.
+///
+/// # Policy
+///
+/// - A leading sign is rejected: the first character must be an ASCII digit.
+///   In particular a leading `-` (a negative deposit or withdrawal amount) is
+///   never a valid SEP-6 value even when it would parse numerically.
+/// - `"0"` is accepted and maps to `0`, matching the existing treatment of
+///   zero-valued amount bounds.
+/// - A fractional part is accepted only when every fractional digit is `0`
+///   (e.g. `"10.0"` → `10`); a non-zero fraction is rejected rather than
+///   silently truncated, so decimal precision is never dropped.
+/// - Surrounding whitespace is trimmed; an empty string is rejected.
+///
+/// # Errors
+///
+/// Returns [`Error::invalid_transaction_intent`] — the classification the rest
+/// of this module uses for malformed amount data — for any input that is
+/// empty, negative, non-numeric, overflows `u64`, or carries a non-zero
+/// fractional part.
+pub fn parse_sep6_amount(raw: &str) -> Result<u64, Error> {
+    let s = raw.trim();
+    // Reject empty input and any leading sign (notably `-`).
+    if !matches!(s.as_bytes().first(), Some(b) if b.is_ascii_digit()) {
+        return Err(Error::invalid_transaction_intent());
+    }
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (s, None),
+    };
+    if !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::invalid_transaction_intent());
+    }
+    if let Some(frac) = frac_part {
+        // A fractional part must be all digits and carry no precision we would
+        // otherwise have to drop.
+        if frac.is_empty()
+            || !frac.bytes().all(|b| b.is_ascii_digit())
+            || frac.bytes().any(|b| b != b'0')
+        {
+            return Err(Error::invalid_transaction_intent());
+        }
+    }
+    int_part
+        .parse::<u64>()
+        .map_err(|_| Error::invalid_transaction_intent())
 }
 
 // ── Service functions ─────────────────────────────────────────────────────────
@@ -1577,5 +1645,89 @@ mod tests {
         raw2.min_amount = Some(1_000_000);
         raw2.max_amount = None;
         assert!(initiate_withdrawal(raw2).is_ok());
+    }
+
+    // ── #832 SEP-6 status case normalization ────────────────────────────────
+
+    #[test]
+    fn test_normalize_status_token_trims_and_lowercases() {
+        assert_eq!(normalize_status_token("  PENDING_USER  "), "pending_user");
+        assert_eq!(normalize_status_token("Completed"), "completed");
+    }
+
+    #[test]
+    fn test_status_case_variants_map_identically() {
+        // Equivalent status casing must produce the same typed status.
+        for variant in ["completed", "COMPLETED", "Completed", "  cOmPlEtEd  "] {
+            let mut raw = raw_tx_status();
+            raw.status = variant.to_string();
+            assert_eq!(
+                fetch_transaction_status(raw).unwrap().status,
+                TransactionStatus::Completed,
+                "casing variant '{}' must map identically",
+                variant,
+            );
+        }
+    }
+
+    #[test]
+    fn test_status_case_normalization_preserves_message_byte_for_byte() {
+        let mut raw = raw_tx_status();
+        raw.status = "PENDING_EXTERNAL".to_string();
+        raw.message = Some("Awaiting BANK Transfer #42  ".to_string());
+        let resp = fetch_transaction_status(raw).unwrap();
+        assert_eq!(resp.status, TransactionStatus::PendingExternal);
+        // The free-form description must not be lowercased or trimmed.
+        assert_eq!(resp.message.as_deref(), Some("Awaiting BANK Transfer #42  "));
+    }
+
+    #[test]
+    fn test_status_case_unknown_stays_unknown_regardless_of_casing() {
+        for variant in ["Totally_Unknown", "TOTALLY_UNKNOWN", "  totally_unknown  "] {
+            assert_eq!(TransactionStatus::from_str(variant), TransactionStatus::Error);
+            assert_eq!(classify_status_str(variant), StatusCategory::Unknown);
+        }
+    }
+
+    #[test]
+    fn test_vendor_status_map_lookup_is_case_insensitive() {
+        let mut map = VendorStatusMap::new();
+        map.register("ACH_Processing", TransactionStatus::PendingExternal);
+        assert_eq!(map.resolve("ach_processing").canonical, TransactionStatus::PendingExternal);
+        assert_eq!(map.resolve("ACH_PROCESSING").canonical, TransactionStatus::PendingExternal);
+        assert!(map.contains("Ach_Processing"));
+    }
+
+    // ── #834 Reject negative SEP-6 amount text ──────────────────────────────
+
+    #[test]
+    fn test_parse_sep6_amount_rejects_negative() {
+        for neg in ["-1", "-0", "-0.0", "  -100  ", "-999999999"] {
+            assert!(parse_sep6_amount(neg).is_err(), "'{}' must be rejected", neg);
+        }
+        assert_eq!(
+            parse_sep6_amount("-5").unwrap_err(),
+            Error::invalid_transaction_intent(),
+        );
+    }
+
+    #[test]
+    fn test_parse_sep6_amount_accepts_positive_and_zero() {
+        assert_eq!(parse_sep6_amount("0").unwrap(), 0);
+        assert_eq!(parse_sep6_amount("1").unwrap(), 1);
+        assert_eq!(parse_sep6_amount("  10000  ").unwrap(), 10_000);
+        // A zero fractional part carries no precision and is accepted.
+        assert_eq!(parse_sep6_amount("10.0").unwrap(), 10);
+        assert_eq!(parse_sep6_amount("0.000").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_sep6_amount_rejects_malformed_and_lossy() {
+        for bad in [
+            "", "   ", "+1", "abc", "1.5", "1.", ".5", "1_000", "1e3", "1 000",
+            "99999999999999999999999999",
+        ] {
+            assert!(parse_sep6_amount(bad).is_err(), "'{}' must be rejected", bad);
+        }
     }
 }
