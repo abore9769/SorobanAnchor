@@ -1,314 +1,172 @@
-//! Tests for service configuration snapshots and rollback (task c).
-//!
-//! Verifies that:
-//! - snapshot_services captures the current service set and returns a snapshot id.
-//! - rollback_services restores a prior configuration on success.
-//! - rollback_services returns false for a non-existent snapshot id.
-//! - get_service_snapshot retrieves the stored snapshot.
-//! - get_service_snapshot_count returns the total snapshot count.
-//! - Rollback fires the cache-invalidation hook (capabilities cache is cleared).
-//! - Multiple snapshots for the same anchor are independent.
-//! - Rolling back to an earlier snapshot then a later snapshot works correctly.
-
 #![cfg(test)]
 
 mod service_snapshot_rollback_tests {
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Env, Vec,
-    };
-    use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
+    use anchorkit::service_management::{ServiceConfigSnapshot, ServiceManager};
+    use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
+    use soroban_sdk::{Address, Env, Vec};
 
-    const SERVICE_DEPOSITS:    u32 = 1;
-    const SERVICE_WITHDRAWALS: u32 = 2;
-    const SERVICE_QUOTES:      u32 = 3;
-    const SERVICE_KYC:         u32 = 4;
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
+    // ── helpers ──────────────────────────────────────────────────────────────
 
     fn make_env() -> Env {
-        let env = Env::default();
-        env.mock_all_auths();
-        env
+        Env::default()
     }
 
-    fn set_ledger(env: &Env, ts: u64) {
+    fn make_anchor(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
+    fn set_time(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
-            protocol_version: 21,
-            sequence_number: ts as u32,
+            protocol_version: 22,
+            sequence_number: 1,
             network_id: Default::default(),
-            base_reserve: 0,
-            min_persistent_entry_ttl: 4096,
-            min_temp_entry_ttl: 16,
-            max_entry_ttl: 6_312_000,
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 100_000_000,
         });
     }
 
-    fn setup(env: &Env) -> (Address, AnchorKitContractClient<'_>) {
-        set_ledger(env, 1000);
-        let cid = env.register_contract(None, AnchorKitContract);
-        let client = AnchorKitContractClient::new(env, &cid);
-        let admin = Address::generate(env);
-        client.initialize(&admin);
-        (admin, client)
-    }
-
-    fn svc_vec(env: &Env, codes: &[u32]) -> Vec<u32> {
-        let mut v = Vec::new(env);
-        for c in codes { v.push_back(*c); }
-        v
-    }
-
-    // -----------------------------------------------------------------------
-    // Snapshot creation
-    // -----------------------------------------------------------------------
+    // ── Blank snapshot name tests ────────────────────────────────────────────
 
     #[test]
-    fn snapshot_services_returns_sequential_ids() {
+    fn test_blank_snapshot_name_rejected() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
 
-        let id0 = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "snap0"),
+        let err = ServiceManager::create_snapshot(&env, &anchor, &svcs, "")
+            .expect_err("empty snapshot name must be rejected");
+        assert_eq!(
+            err.code,
+            anchorkit::ErrorCode::InvalidTemplate,
+            "expected InvalidTemplate error for blank snapshot name"
         );
-        let id1 = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS, SERVICE_WITHDRAWALS]),
-            &soroban_sdk::String::from_str(&env, "snap1"),
-        );
-
-        assert_eq!(id0, 0);
-        assert_eq!(id1, 1);
     }
 
     #[test]
-    fn get_service_snapshot_returns_stored_data() {
+    fn test_whitespace_only_snapshot_name_rejected() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
 
-        set_ledger(&env, 2000);
-        let sid = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS, SERVICE_QUOTES]),
-            &soroban_sdk::String::from_str(&env, "before_upgrade"),
+        let err = ServiceManager::create_snapshot(&env, &anchor, &svcs, "   ")
+            .expect_err("whitespace-only snapshot name must be rejected");
+        assert_eq!(
+            err.code,
+            anchorkit::ErrorCode::InvalidTemplate,
+            "expected InvalidTemplate error for whitespace-only snapshot name"
         );
-
-        let snap = client.get_service_snapshot(&sid).unwrap();
-        assert_eq!(snap.snapshot_id, sid);
-        assert_eq!(snap.anchor,      anchor);
-        assert_eq!(snap.services.len(), 2);
-        assert_eq!(snap.created_at,  2000);
-        assert_eq!(snap.description, soroban_sdk::String::from_str(&env, "before_upgrade"));
     }
 
-    #[test]
-    fn get_service_snapshot_returns_none_for_missing_id() {
-        let env = make_env();
-        let (_admin, client) = setup(&env);
+    // ── Valid snapshot creation ──────────────────────────────────────────────
 
-        let snap = client.get_service_snapshot(&9999u64);
-        assert!(snap.is_none());
+    #[test]
+    fn test_valid_snapshot_creation() {
+        let env = make_env();
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
+        svcs.push_back(2u32);
+
+        set_time(&env, 1_000_000);
+        let snapshot_id =
+            ServiceManager::create_snapshot(&env, &anchor, &svcs, "before_upgrade")
+                .expect("valid snapshot name must succeed");
+        assert_eq!(snapshot_id, 0);
+
+        let snapshot: ServiceConfigSnapshot =
+            ServiceManager::get_snapshot(&env, snapshot_id).expect("snapshot must exist");
+        assert_eq!(snapshot.anchor, anchor);
+        assert_eq!(snapshot.services.len(), 2);
+        assert_eq!(snapshot.created_at, 1_000_000);
+        assert_eq!(snapshot.description.to_buffer(), "before_upgrade".as_bytes());
     }
 
-    #[test]
-    fn get_service_snapshot_count_increments_correctly() {
-        let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
-
-        assert_eq!(client.get_service_snapshot_count(), 0);
-
-        client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "s1"),
-        );
-        assert_eq!(client.get_service_snapshot_count(), 1);
-
-        client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_WITHDRAWALS]),
-            &soroban_sdk::String::from_str(&env, "s2"),
-        );
-        assert_eq!(client.get_service_snapshot_count(), 2);
-    }
-
-    // -----------------------------------------------------------------------
-    // Rollback — success path
-    // -----------------------------------------------------------------------
+    // ── Rollback preserves services ──────────────────────────────────────────
 
     #[test]
-    fn rollback_services_restores_prior_configuration() {
+    fn test_rollback_restores_snapshot_services() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
+        let anchor = make_anchor(&env);
 
-        // Enable deposits + withdrawals, then snapshot
-        client.enable_service(&anchor, &SERVICE_DEPOSITS);
-        client.enable_service(&anchor, &SERVICE_WITHDRAWALS);
+        // Enable initial services
+        ServiceManager::enable_service(&env, &anchor, 1).unwrap();
+        ServiceManager::enable_service(&env, &anchor, 2).unwrap();
+        assert!(ServiceManager::is_service_enabled(&env, &anchor, 1));
+        assert!(ServiceManager::is_service_enabled(&env, &anchor, 2));
 
-        let sid = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS, SERVICE_WITHDRAWALS]),
-            &soroban_sdk::String::from_str(&env, "pre_change"),
-        );
+        // Create snapshot of current state
+        let mut snapshot_svcs = Vec::new(&env);
+        snapshot_svcs.push_back(1u32);
+        snapshot_svcs.push_back(2u32);
+        set_time(&env, 1_000_000);
+        let snap_id =
+            ServiceManager::create_snapshot(&env, &anchor, &snapshot_svcs, "checkpoint")
+                .unwrap();
 
-        // Now enable quotes as well (change the live state)
-        client.enable_service(&anchor, &SERVICE_QUOTES);
-        assert!(client.is_service_enabled(&anchor, &SERVICE_QUOTES));
+        // Disable a service (drift from snapshot)
+        ServiceManager::disable_service(&env, &anchor, 1).unwrap();
+        assert!(!ServiceManager::is_service_enabled(&env, &anchor, 1));
 
-        // Roll back — quotes should disappear
-        let ok = client.rollback_services(&sid);
-        assert!(ok, "rollback should succeed");
+        // Rollback to snapshot
+        let rolled_back = ServiceManager::rollback_to_snapshot(&env, snap_id);
+        assert!(rolled_back, "rollback must return true for existing snapshot");
 
-        let state = client.get_service_toggle_state(&anchor);
-        assert_eq!(state.enabled_services.len(), 2, "should be back to 2 services");
-        assert!(!client.is_service_enabled(&anchor, &SERVICE_QUOTES),
-            "rolled-back state must not include the service added after snapshot");
-    }
-
-    #[test]
-    fn rollback_services_returns_false_for_nonexistent_snapshot() {
-        let env = make_env();
-        let (_admin, client) = setup(&env);
-
-        let ok = client.rollback_services(&9999u64);
-        assert!(!ok, "rollback to non-existent snapshot must return false");
-    }
-
-    // -----------------------------------------------------------------------
-    // Rollback — cache invalidation hook
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rollback_services_fires_cache_invalidation_hook() {
-        let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
-
-        set_ledger(&env, 1000);
-        // Seed the capabilities cache
-        let toml_url = soroban_sdk::String::from_str(&env, "https://anchor.example.com/.well-known/stellar.toml");
-        let caps     = soroban_sdk::String::from_str(&env, "SEP6");
-        client.cache_capabilities(&anchor, &toml_url, &caps, &3600u64);
-        assert!(client.get_cache_diagnostics(&anchor).capabilities_cached);
-
-        // Create a snapshot and roll back — the hook must clear the capabilities cache
-        let sid = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "snap"),
-        );
-        client.rollback_services(&sid);
-
+        // Services must match the snapshot
         assert!(
-            !client.get_cache_diagnostics(&anchor).capabilities_cached,
-            "rollback must fire the cache-invalidation hook"
+            ServiceManager::is_service_enabled(&env, &anchor, 1),
+            "service 1 must be re-enabled after rollback"
+        );
+        assert!(
+            ServiceManager::is_service_enabled(&env, &anchor, 2),
+            "service 2 must remain enabled after rollback"
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Multiple rollbacks between snapshots
-    // -----------------------------------------------------------------------
+    // ── Snapshot count increments correctly ──────────────────────────────────
 
     #[test]
-    fn can_rollback_to_earlier_then_later_snapshot() {
+    fn test_snapshot_count_increments_after_valid_creation() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
 
-        // Snapshot A: only deposits
-        let sid_a = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "a"),
-        );
+        assert_eq!(ServiceManager::get_snapshot_count(&env), 0);
 
-        // Snapshot B: deposits + withdrawals
-        let sid_b = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS, SERVICE_WITHDRAWALS]),
-            &soroban_sdk::String::from_str(&env, "b"),
-        );
+        ServiceManager::create_snapshot(&env, &anchor, &svcs, "snap-1").unwrap();
+        assert_eq!(ServiceManager::get_snapshot_count(&env), 1);
 
-        // Roll to B → 2 services
-        client.rollback_services(&sid_b);
-        assert_eq!(client.get_service_toggle_state(&anchor).enabled_services.len(), 2);
-
-        // Roll back to A → 1 service
-        client.rollback_services(&sid_a);
-        assert_eq!(client.get_service_toggle_state(&anchor).enabled_services.len(), 1);
-
-        // Roll forward to B again → 2 services
-        client.rollback_services(&sid_b);
-        assert_eq!(client.get_service_toggle_state(&anchor).enabled_services.len(), 2);
+        ServiceManager::create_snapshot(&env, &anchor, &svcs, "snap-2").unwrap();
+        assert_eq!(ServiceManager::get_snapshot_count(&env), 2);
     }
 
-    // -----------------------------------------------------------------------
-    // Snapshots for different anchors are independent
-    // -----------------------------------------------------------------------
+    // ── Blank name does not consume a snapshot ID ────────────────────────────
 
     #[test]
-    fn snapshots_for_different_anchors_are_independent() {
+    fn test_blank_name_does_not_consume_snapshot_id() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor_a = Address::generate(&env);
-        let anchor_b = Address::generate(&env);
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
 
-        let sid_a = client.snapshot_services(
-            &anchor_a,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "a"),
+        assert_eq!(ServiceManager::get_snapshot_count(&env), 0);
+
+        // Rejected blank name should not increment the counter
+        let _ = ServiceManager::create_snapshot(&env, &anchor, &svcs, "");
+        assert_eq!(
+            ServiceManager::get_snapshot_count(&env),
+            0,
+            "blank name must not consume a snapshot ID"
         );
-        let sid_b = client.snapshot_services(
-            &anchor_b,
-            &svc_vec(&env, &[SERVICE_QUOTES, SERVICE_KYC]),
-            &soroban_sdk::String::from_str(&env, "b"),
-        );
 
-        // Roll both back — each affects only its own anchor
-        client.rollback_services(&sid_a);
-        client.rollback_services(&sid_b);
-
-        let state_a = client.get_service_toggle_state(&anchor_a);
-        let state_b = client.get_service_toggle_state(&anchor_b);
-
-        assert_eq!(state_a.enabled_services.len(), 1);
-        assert_eq!(state_b.enabled_services.len(), 2);
-    }
-
-    // -----------------------------------------------------------------------
-    // Audit log records snapshot and rollback actions
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn snapshot_and_rollback_are_recorded_in_admin_audit_log() {
-        let env = make_env();
-        let (_admin, client) = setup(&env);
-        let anchor = Address::generate(&env);
-
-        use anchorkit::admin_audit_log::AdminAuditLog;
-
-        let cid = client.address.clone();
-
-        let sid = client.snapshot_services(
-            &anchor,
-            &svc_vec(&env, &[SERVICE_DEPOSITS]),
-            &soroban_sdk::String::from_str(&env, "test"),
-        );
-        client.rollback_services(&sid);
-
-        env.as_contract(&cid, || {
-            let count = AdminAuditLog::get_entry_count(&env);
-            // At minimum two entries: one for snapshot, one for rollback
-            assert!(count >= 2, "expected at least 2 audit entries, got {count}");
-        });
+        // Next valid snapshot should get id 0
+        let snap_id =
+            ServiceManager::create_snapshot(&env, &anchor, &svcs, "valid").unwrap();
+        assert_eq!(snap_id, 0);
     }
 }

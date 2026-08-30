@@ -179,11 +179,6 @@ pub enum ErrorCode {
     /// No SLO has been configured for this anchor.
     SloNotConfigured          = 76,
 
-    // Retirement transition errors (77-78)
-    /// The requested retirement transition is invalid for the current state.
-    InvalidRetirementTransition = 77,
-    /// Environment fingerprint collection failed.
-    FingerprintCollectionFailed = 78,
 }
 
 impl ErrorCode {

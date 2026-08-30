@@ -178,7 +178,13 @@ impl ServiceManager {
         anchor: &Address,
         services: &Vec<u32>,
         description: &str,
-    ) -> u64 {
+    ) -> Result<u64, AnchorKitError> {
+        if description.trim().is_empty() {
+            return Err(AnchorKitError::invalid_template(
+                "snapshot name must not be empty",
+            ));
+        }
+
         let counter_key = soroban_sdk::Symbol::new(env, "SVC_SNAP_CNT");
         let snapshot_id: u64 = env
             .storage()
@@ -203,7 +209,7 @@ impl ServiceManager {
             .set(&counter_key, &(snapshot_id + 1));
         env.storage().instance().extend_ttl(31_536_000, 31_536_000);
 
-        snapshot_id
+        Ok(snapshot_id)
     }
 
     /// Get a service configuration snapshot
