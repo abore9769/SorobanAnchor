@@ -178,7 +178,13 @@ impl ServiceManager {
         anchor: &Address,
         services: &Vec<u32>,
         description: &str,
-    ) -> u64 {
+    ) -> Result<u64, AnchorKitError> {
+        if description.trim().is_empty() {
+            return Err(AnchorKitError::invalid_template(
+                "snapshot name must not be empty",
+            ));
+        }
+
         let counter_key = soroban_sdk::Symbol::new(env, "SVC_SNAP_CNT");
         let snapshot_id: u64 = env
             .storage()
@@ -203,7 +209,7 @@ impl ServiceManager {
             .set(&counter_key, &(snapshot_id + 1));
         env.storage().instance().extend_ttl(31_536_000, 31_536_000);
 
-        snapshot_id
+        Ok(snapshot_id)
     }
 
     /// Get a service configuration snapshot
@@ -676,6 +682,11 @@ mod tests {
 
     fn make_anchor(env: &Env) -> Address { Address::generate(env) }
 
+    #[test]
+    fn test_request_correlation_header_uses_canonical_name() {
+        assert_eq!(REQUEST_CORRELATION_HEADER, "X-Correlation-Id");
+    }
+
     fn set_time(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
@@ -1034,6 +1045,10 @@ pub struct TemplateApplication {
 pub const TEMPLATE_FIAT_ON_RAMP:       &str = "fiat-on-ramp";
 pub const TEMPLATE_REMITTANCE:         &str = "remittance";
 pub const TEMPLATE_STABLECOIN_ISSUER:  &str = "stablecoin-issuer";
+
+/// Canonical request correlation header name used when propagating a single
+/// correlation ID across service boundaries.
+const REQUEST_CORRELATION_HEADER: &str = "X-Correlation-Id";
 
 /// Operations for managing and applying service onboarding templates.
 pub struct TemplateManager;

@@ -179,10 +179,6 @@ pub enum ErrorCode {
     /// No SLO has been configured for this anchor.
     SloNotConfigured          = 76,
 
-    // Registration input errors (80)
-    /// Registration was rejected because a required text field is blank
-    /// (e.g. the SEP-10 token supplied to `register_attestor` is empty).
-    InvalidRegistration       = 80,
 }
 
 impl ErrorCode {
