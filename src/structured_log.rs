@@ -333,7 +333,7 @@ impl StructuredLogger {
         timestamp: u64,
         fields: &[(&str, FieldValue)],
     ) -> bool {
-        if level < self.min_level {
+        if level < self.min_level || event.trim().is_empty() {
             return false;
         }
         let seq = self.seq.get();

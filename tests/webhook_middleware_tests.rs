@@ -7,7 +7,10 @@ mod webhook_middleware_tests {
     use anchorkit::{
         errors::ErrorCode,
         retry::RetryConfig,
-        webhook::{deliver_webhook, get_dead_letter_webhooks, verify_webhook_signature, DlqEntry, WebhookDeliveryConfig},
+        webhook::{
+            deliver_webhook, get_dead_letter_webhooks, verify_webhook_signature, DlqEntry,
+            WebhookDeliveryConfig, MAX_WEBHOOK_BODY_BYTES,
+        },
     };
 
     fn config(max_retries: u32) -> WebhookDeliveryConfig {
@@ -246,7 +249,37 @@ mod webhook_middleware_tests {
     }
 
     // -----------------------------------------------------------------------
-    // 9. verify_webhook_signature — wrong key returns false
+    // 9. verify_webhook_signature — body limit is checked before HMAC
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_verify_rejects_oversized_body_but_accepts_limit() {
+        let key = b"secret";
+        let at_limit = "a".repeat(MAX_WEBHOOK_BODY_BYTES);
+        let oversized = "a".repeat(MAX_WEBHOOK_BODY_BYTES + 1);
+        let signature = Arc::new(Mutex::new(String::new()));
+        let captured = signature.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let result = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            &at_limit,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(sig) = sig {
+                    *captured.lock().unwrap() = sig.to_string();
+                }
+                Ok(200)
+            },
+            |_| {},
+            || 0,
+        );
+        assert!(result.is_ok());
+        let signature = signature.lock().unwrap().clone();
+        assert!(verify_webhook_signature(&at_limit, &signature, key));
+        assert!(!verify_webhook_signature(&oversized, &signature, key));
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. verify_webhook_signature — wrong key returns false
     // -----------------------------------------------------------------------
     #[test]
     fn test_verify_wrong_key_fails() {
