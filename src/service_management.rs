@@ -220,6 +220,9 @@ impl ServiceManager {
 
     /// Rollback to a previous service configuration
     pub fn rollback_to_snapshot(env: &Env, snapshot_id: u64) -> bool {
+        if snapshot_id >= Self::get_snapshot_count(env) {
+            return false;
+        }
         if let Some(snapshot) = Self::get_snapshot(env, snapshot_id) {
             let state_key = (soroban_sdk::Symbol::new(env, "SVC_STATE"), &snapshot.anchor);
 
