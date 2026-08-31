@@ -2406,7 +2406,11 @@ impl AnchorKitContract {
                 panic_with_error!(&env, ErrorCode::UnsupportedCapabilityVersion);
             }
             Err(migration::MigrationError::VersionNotAdvancing) => {
-                panic_with_error!(&env, ErrorCode::ValidationError);
+                // A target at or below the current stored schema version is a
+                // downgrade (or a no-op re-request). Reject it explicitly so
+                // operator mistakes are surfaced clearly instead of silently
+                // running no migration steps.
+                panic_with_error!(&env, ErrorCode::IllegalTransition);
             }
             Err(migration::MigrationError::NoStepFound) => {
                 panic_with_error!(&env, ErrorCode::ValidationError);

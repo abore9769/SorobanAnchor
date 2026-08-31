@@ -10,7 +10,10 @@
 #![cfg(test)]
 
 mod migration_tests {
+    extern crate alloc;
+
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+    use soroban_sdk::xdr::ToXdr;
     use soroban_sdk::{Address, Bytes, BytesN, Env, IntoVal};
 
     use anchorkit::admin_audit_log::AdminAuditLog;
@@ -280,6 +283,32 @@ mod migration_tests {
         client.migrate(&2u32, &100u32);
         // Attempting to migrate to zero should fail
         client.migrate(&0u32, &100u32);
+    }
+
+    /// A rejected downgrade must fail clearly and leave the stored schema
+    /// version untouched: no migration steps run and no partial state is left
+    /// behind (an operator mistake must not look like a successful rollback).
+    #[test]
+    fn migration_downgrade_fails_clearly_without_partial_state() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let env = make_env();
+        set_ledger(&env, 1000);
+        let (client, admin) = deploy(&env);
+        client.initialize(&admin);
+
+        // Reach schema V2 first.
+        client.migrate(&2u32, &100u32);
+        assert_eq!(client.get_schema_version(), 2);
+        assert_eq!(client.get_migration_count(), 1);
+
+        // A downgrade request (V2 -> V1) must be rejected, never silently no-op.
+        let outcome = catch_unwind(AssertUnwindSafe(|| client.migrate(&1u32, &100u32)));
+        assert!(outcome.is_err(), "downgrade request must be rejected");
+
+        // No partial state: version unchanged, no extra migration recorded.
+        assert_eq!(client.get_schema_version(), 2);
+        assert_eq!(client.get_migration_count(), 1);
     }
 
     // -----------------------------------------------------------------------
