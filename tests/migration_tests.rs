@@ -10,6 +10,8 @@
 #![cfg(test)]
 
 mod migration_tests {
+    extern crate alloc;
+
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
     use soroban_sdk::xdr::ToXdr;
     use soroban_sdk::{Address, Bytes, BytesN, Env, IntoVal};
