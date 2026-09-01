@@ -11,6 +11,7 @@
 
 mod migration_tests {
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+    use soroban_sdk::xdr::ToXdr;
     use soroban_sdk::{Address, Bytes, BytesN, Env, IntoVal};
 
     use anchorkit::admin_audit_log::AdminAuditLog;
@@ -70,7 +71,7 @@ mod migration_tests {
 
     fn write_legacy_quote_v1(env: &Env, anchor: &Address, quote: QuoteV1) {
         let xdr = anchor.to_xdr(env);
-        let anchor_raw: alloc::vec::Vec<u8> =
+        let anchor_raw: std::vec::Vec<u8> =
             (0..xdr.len()).map(|i| xdr.get(i).unwrap()).collect();
         let q_key = make_storage_key(env, &[b"QUOTE", &anchor_raw, &quote.quote_id.to_be_bytes()]);
         env.storage().persistent().set(&q_key, &quote);
@@ -280,6 +281,31 @@ mod migration_tests {
         client.migrate(&2u32, &100u32);
         // Attempting to migrate to zero should fail
         client.migrate(&0u32, &100u32);
+    }
+
+    /// Rejecting an empty/invalid migration version (#876) must happen before
+    /// any migration state change: an empty (zero) target cannot be ordered
+    /// against the current schema and must never be treated as a no-op success.
+    /// This guards against a call that silently bumps or corrupts the schema
+    /// version or appends bogus history entries.
+    #[test]
+    #[should_panic(expected = "#15")]
+    fn migration_to_zero_target_fails_before_mutation() {
+        let env = make_env();
+        set_ledger(&env, 1000);
+        let (client, admin) = deploy(&env);
+        client.initialize(&admin);
+
+        let schema_before = client.get_schema_version();
+        let count_before = client.get_migration_count();
+
+        // A zero/empty target must be rejected outright (ErrorCode::ValidationError).
+        client.migrate(&0u32, &100u32);
+
+        // Unreachable if validation rejects the zero target; kept to make the
+        // “fail before mutation” guarantee explicit in the failure message.
+        assert_eq!(client.get_schema_version(), schema_before);
+        assert_eq!(client.get_migration_count(), count_before);
     }
 
     // -----------------------------------------------------------------------
