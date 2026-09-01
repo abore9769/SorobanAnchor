@@ -1726,6 +1726,15 @@ const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
 /// unpredictable.
 const MAX_QUOTE_VALIDITY_SECONDS: u64 = 30 * 24 * 60 * 60;
 
+/// Upper bound (in days) for the configurable audit-log retention period.
+///
+/// Matches the `audit_log_retention_days.maximum` enforced by
+/// `config_schema.json`. Values above this are rejected by
+/// [`set_audit_log_retention`](AnchorKitContract::set_audit_log_retention)
+/// because they would otherwise keep sensitive request data indefinitely and
+/// bloat the expiry arithmetic (`retention_days * 86400`) used by auto-pruning.
+pub const MAX_AUDIT_LOG_RETENTION_DAYS: u64 = 3650;
+
 fn current_kyc_status(env: &Env, record: &KycRecord) -> KycStatus {
     if let Some(expiry) = record.expiry {
         if env.ledger().timestamp() > expiry {
@@ -6238,8 +6247,16 @@ impl AnchorKitContract {
 
     /// Set the audit log retention policy in days (admin-only).
     /// A value of 0 means no automatic retention limit is enforced.
+    ///
+    /// Rejects [`retention_days`] above [`MAX_AUDIT_LOG_RETENTION_DAYS`] with a
+    /// validation error: an unbounded retention period would retain sensitive
+    /// request data indefinitely and overflow the `days * 86400` expiry
+    /// arithmetic used during auto-pruning.
     pub fn set_audit_log_retention(env: Env, retention_days: u64) {
         Self::require_admin(&env);
+        if retention_days > MAX_AUDIT_LOG_RETENTION_DAYS {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
         let key = audit_retention_key(&env);
         env.storage().instance().set(&key, &retention_days);
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);

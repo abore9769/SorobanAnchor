@@ -93,6 +93,30 @@ mod audit_log_retention_tests {
         assert_eq!(client.get_audit_log_retention(), 7);
     }
 
+    /// Binding the retention policy (#874): an over-limit retention duration
+    /// must be rejected before it is stored. Overflowing the `days * 86400`
+    /// expiry arithmetic would otherwise keep sensitive request data
+    /// indefinitely and exceed the storage policy's supported maximum.
+    #[test]
+    #[should_panic(expected = "#15")]
+    fn test_over_limit_retention_is_rejected() {
+        let env = make_env(); let (_admin, client) = setup(&env);
+        // MAX_AUDIT_LOG_RETENTION_DAYS = 3650; anything above must be rejected
+        // with ErrorCode::ValidationError (contract code 15).
+        client.set_audit_log_retention(&(3650 + 1));
+    }
+
+    /// Regression guard (#874): the boundary value itself and values below it
+    /// remain valid and are stored exactly.
+    #[test]
+    fn test_max_retention_boundary_is_accepted_exactly() {
+        let env = make_env(); let (admin, client) = setup(&env);
+        client.set_audit_log_retention(&3650);
+        assert_eq!(client.get_audit_log_retention(), 3650);
+        client.set_audit_log_retention(&1);
+        assert_eq!(client.get_audit_log_retention(), 1);
+    }
+
     // ── Audit log count ───────────────────────────────────────────────────────
 
     #[test]
