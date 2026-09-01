@@ -1517,6 +1517,26 @@ struct AuditLogEvent {
     result_data: u64,
 }
 
+/// Allocate the next audit-log record ID using a checked increment.
+///
+/// The record ID counter must never wrap: at `u64::MAX` a plain `+ 1` would
+/// wrap to `0` and reuse an existing record's identifier, silently breaking
+/// retrieval (`get_audit_log`) and audit ordering. Fail closed at the upper
+/// boundary instead — the allocation is rejected with
+/// [`ErrorCode::AuditLogCapacityExceeded`] and no record is written. Ordinary
+/// (non-boundary) allocations stay strictly sequential.
+fn next_audit_log_id(env: &Env) -> u64 {
+    let inst = env.storage().instance();
+    let acnt_key = make_storage_key(env, &[b"ACNT"]);
+    let log_id: u64 = inst.get(&acnt_key).unwrap_or(0u64);
+    let next = log_id
+        .checked_add(1)
+        .unwrap_or_else(|| panic_with_error!(env, ErrorCode::AuditLogCapacityExceeded));
+    inst.set(&acnt_key, &next);
+    inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    log_id
+}
+
 #[contracttype]
 #[derive(Clone)]
 struct AttestEvent {
@@ -6002,11 +6022,7 @@ impl AnchorKitContract {
         env.storage().persistent().set(&sopcnt_key, &(op_index + 1));
         env.storage().persistent().extend_ttl(&sopcnt_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
-        let inst = env.storage().instance();
-        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
-        let log_id: u64 = inst.get(&acnt_key).unwrap_or(0u64);
-        inst.set(&acnt_key, &(log_id + 1));
-        inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        let log_id = next_audit_log_id(&env);
 
         let now = env.ledger().timestamp();
         let audit = AuditLog {
@@ -6072,11 +6088,7 @@ impl AnchorKitContract {
         env.storage().persistent().set(&sopcnt_key, &(op_index + 1));
         env.storage().persistent().extend_ttl(&sopcnt_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
-        let inst = env.storage().instance();
-        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
-        let log_id: u64 = inst.get(&acnt_key).unwrap_or(0u64);
-        inst.set(&acnt_key, &(log_id + 1));
-        inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        let log_id = next_audit_log_id(&env);
 
         let now = env.ledger().timestamp();
         let audit = AuditLog {
@@ -6137,11 +6149,7 @@ impl AnchorKitContract {
         env.storage().persistent().set(&sopcnt_key, &(op_index + 1));
         env.storage().persistent().extend_ttl(&sopcnt_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
-        let inst = env.storage().instance();
-        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
-        let log_id: u64 = inst.get(&acnt_key).unwrap_or(0u64);
-        inst.set(&acnt_key, &(log_id + 1));
-        inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        let log_id = next_audit_log_id(&env);
 
         let now = env.ledger().timestamp();
         let audit = AuditLog {

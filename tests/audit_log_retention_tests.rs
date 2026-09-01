@@ -371,4 +371,56 @@ mod audit_log_retention_tests {
         // Since there are only 2 logs, it should only return 2, but the cap logic is exercised internally.
         assert!(json_str.starts_with('['));
     }
+
+    // ── Request-record / audit-log ID allocation boundary (#875) ────────────
+
+    #[test]
+    fn test_audit_log_ids_remain_sequential() {
+        let env = make_env();
+        let (_, client) = setup(&env);
+        let (attestor, sk) = add_attestor(&env, &client);
+
+        emit_audit_log(&env, &client, &attestor, &sk, 10_000);
+        emit_audit_log(&env, &client, &attestor, &sk, 20_000);
+        emit_audit_log(&env, &client, &attestor, &sk, 30_000);
+
+        // Ordinary allocations stay strictly sequential: records 0, 1, 2 are
+        // written and the counter lands on 3.
+        assert_eq!(client.get_audit_log_count(), 3);
+        let log0 = client.get_audit_log(&0);
+        assert_eq!(log0.log_id, 0);
+        let log2 = client.get_audit_log(&2);
+        assert_eq!(log2.log_id, 2);
+    }
+
+    #[test]
+    fn test_audit_log_id_space_exhaustion_fails_closed() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let env = make_env();
+        set_ledger(&env, 1000);
+        let cid = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let (attestor, sk) = add_attestor(&env, &client);
+
+        // Push the audit-log record counter to the integer maximum. A naive
+        // `log_id + 1` would wrap to 0 and reuse the first record's ID.
+        let acnt_key = anchorkit::deterministic_hash::make_storage_key(&env, &[b"ACNT"]);
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&acnt_key, &u64::MAX);
+        });
+        assert_eq!(client.get_audit_log_count(), u64::MAX);
+
+        // The next audited operation must fail closed (no wrap).
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            emit_audit_log(&env, &client, &attestor, &sk, 2000);
+        }));
+        assert!(outcome.is_err(), "audit logging must reject ID-space exhaustion");
+
+        // The failed write leaves no partial record: the counter did not wrap,
+        // so no record identifier was reused.
+        assert_eq!(client.get_audit_log_count(), u64::MAX);
+    }
 }

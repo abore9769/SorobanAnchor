@@ -108,7 +108,6 @@ pub enum ErrorCode {
     AttestorCapacityExceeded  = 54,
     /// Maximum number of cache entries exceeded
     CacheCapacityExceeded     = 55,
-
     // Profile / metadata validation errors (50–52)
     /// Attestor profile not found (no profile record exists yet).
     AttestorProfileNotFound   = 50,
@@ -178,6 +177,12 @@ pub enum ErrorCode {
     InvalidSloConfig          = 75,
     /// No SLO has been configured for this anchor.
     SloNotConfigured          = 76,
+
+    // Audit-log capacity errors (80)
+    /// The audit-log record ID counter has reached `u64::MAX`; a further
+    /// increment would wrap and reuse an existing record's identifier, breaking
+    /// retrieval and audit ordering. The write is rejected (fail closed).
+    AuditLogCapacityExceeded  = 80,
 
 }
 
@@ -447,6 +452,7 @@ impl AnchorKitError {
     pub fn quote_expired() -> Self { Self::from_code(ErrorCode::QuoteExpired) }
     pub fn signature_verification_failed() -> Self { Self::from_code(ErrorCode::SignatureVerificationFailed) }
     pub fn fingerprint_collection_failed() -> Self { Self::from_code(ErrorCode::FingerprintCollectionFailed) }
+    pub fn audit_log_capacity_exceeded() -> Self { Self::from_code(ErrorCode::AuditLogCapacityExceeded) }
     /// Build an invalid retirement transition error with from/to state labels.
     pub fn invalid_retirement_transition(from: &str, to: &str) -> Self {
         Self::with_context(
