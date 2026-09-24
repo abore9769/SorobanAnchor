@@ -22,7 +22,7 @@
 //! Policies are stored under a separate key from the governance config so they
 //! can be updated independently by admins.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, BytesN, Env, Vec};
 use crate::deterministic_hash::make_storage_key;
 use crate::errors::{AnchorKitError, ErrorCode};
 
@@ -421,12 +421,23 @@ pub fn enforce_write_policy(
 /// - `(true, true)`   — entry has fully expired; it must not be served.
 ///
 /// The tuple is `(needs_refresh, is_expired)`.
+///
+/// # Panics
+///
+/// Panics with [`ErrorCode::ValidationError`] when `ttl_seconds == 0`. A zero
+/// TTL is meaningless for policy evaluation — it classifies the entry as both
+/// expired and refresh-needed, so every read would refresh and the stored
+/// policy would be invalid. Rejecting it keeps the fresh/stale/expired
+/// classification unambiguous.
 pub fn enforce_read_policy(
     env: &Env,
     entry_type: CacheEntryType,
     age_seconds: u64,
     ttl_seconds: u64,
 ) -> (bool, bool) {
+    if ttl_seconds == 0 {
+        panic_with_error!(env, ErrorCode::ValidationError);
+    }
     let policy = get_policy(env, entry_type);
     let expired = policy.is_expired(age_seconds, ttl_seconds);
     let refresh = policy.needs_refresh(age_seconds, ttl_seconds);
@@ -517,6 +528,15 @@ pub fn endorse(env: &Env, endorser: &Address, proposal_id: u64) -> Result<(), An
         if proposal.endorsements.get(i).unwrap() == *endorser {
             return Ok(());
         }
+    }
+
+    // Bound endorsements at the configured quorum threshold so a proposal
+    // cannot be inflated with redundant endorsements after quorum is met.
+    let cfg = get_config(env);
+    if proposal.endorsements.len() >= cfg.quorum_threshold {
+        return Err(AnchorKitError::validation_error(
+            "maximum endorsement count reached",
+        ));
     }
 
     proposal.endorsements.push_back(endorser.clone());
