@@ -242,16 +242,25 @@ impl AlertSuppressor {
         Self::default()
     }
 
-    /// Suppress alerts matching `fingerprint` until `expires_at` (Unix seconds).
+    /// Suppress alerts matching `fingerprint` from time `now` until `expires_at`
+    /// (Unix seconds).
     ///
     /// If an entry already exists for the fingerprint it is overwritten so the
     /// operator can extend or shorten an active suppression.
+    ///
+    /// A suppression whose `expires_at` is already in the past (`<= now`) is
+    /// rejected — it could never suppress a real alert and would only occupy
+    /// suppression state until lazily purged.
     pub fn suppress(
         &self,
         fingerprint: impl Into<String>,
+        now: u64,
         expires_at: u64,
         reason: impl Into<String>,
     ) {
+        if expires_at <= now {
+            return;
+        }
         let key: String = fingerprint.into();
         self.entries.borrow_mut().insert(
             key.clone(),
@@ -556,8 +565,8 @@ mod tests {
     #[test]
     fn purge_expired_removes_stale_entries() {
         let s = AlertSuppressor::new();
-        s.suppress("old", 100, "expired");
-        s.suppress("current", 9999, "active");
+        s.suppress("old", 0, 100, "expired");
+        s.suppress("current", 0, 9999, "active");
         s.purge_expired(500);
         assert_eq!(s.active_count(500), 1);
     }
@@ -565,17 +574,44 @@ mod tests {
     #[test]
     fn active_count_excludes_expired() {
         let s = AlertSuppressor::new();
-        s.suppress("a", 100, "expired");
-        s.suppress("b", 9999, "active");
+        s.suppress("a", 0, 100, "expired");
+        s.suppress("b", 0, 9999, "active");
         assert_eq!(s.active_count(500), 1);
     }
 
     #[test]
     fn overwriting_suppression_extends_expiry() {
         let s = AlertSuppressor::new();
-        s.suppress("k", 1500, "short window");
-        s.suppress("k", 9999, "extended");
+        s.suppress("k", 1000, 1500, "short window");
+        s.suppress("k", 1000, 9999, "extended");
         assert!(s.is_suppressed("k", 5000));
+    }
+
+    // ── Rejecting already-expired suppressions (#1055) ───────────────────────
+
+    #[test]
+    fn zero_duration_suppression_is_rejected() {
+        let s = AlertSuppressor::new();
+        // expires_at == now → can never suppress a real alert.
+        s.suppress("k", 1000, 1000, "zero duration");
+        assert!(!s.is_suppressed("k", 1000));
+        assert_eq!(s.active_count(1000), 0);
+    }
+
+    #[test]
+    fn already_expired_suppression_is_rejected() {
+        let s = AlertSuppressor::new();
+        s.suppress("k", 1000, 900, "expired in the past");
+        assert!(!s.is_suppressed("k", 1000));
+        assert_eq!(s.active_count(1000), 0);
+    }
+
+    #[test]
+    fn future_dated_suppression_still_accepted() {
+        let s = AlertSuppressor::new();
+        s.suppress("k", 1000, 2000, "future window");
+        assert!(s.is_suppressed("k", 1500));
+        assert_eq!(s.active_count(1500), 1);
     }
 
     // ── AlertFilter ──────────────────────────────────────────────────────────
@@ -596,7 +632,7 @@ mod tests {
     #[test]
     fn filter_respects_manual_suppression() {
         let f = AlertFilter::new(DedupConfig { window_seconds: 300, max_keys: 100 });
-        f.suppressor().suppress("maint:anchor.com", 9999, "maintenance");
+        f.suppressor().suppress("maint:anchor.com", 0, 9999, "maintenance");
         // Would fire on first occurrence via dedup alone, but suppressor blocks it.
         assert!(!f.should_deliver("maint:anchor.com", 1000));
     }
@@ -604,7 +640,7 @@ mod tests {
     #[test]
     fn filter_delivers_after_suppression_expires() {
         let f = AlertFilter::new(DedupConfig { window_seconds: 60, max_keys: 100 });
-        f.suppressor().suppress("k", 1500, "short maintenance");
+        f.suppressor().suppress("k", 0, 1500, "short maintenance");
         // Suppressed within window.
         assert!(!f.should_deliver("k", 1000));
         // Suppression expired and dedup window also passed → fires.
