@@ -119,9 +119,9 @@ impl AlertDeduplicator {
                 // #819: saturating increment prevents counter overflow.
                 entry.1 = entry.1.saturating_add(1);
                 // #820: record suppression with the alert key for operator correlation.
-                self.suppression_log.borrow_mut().push(
-                    alloc::format!(r#"{{"alert_key":"{}"}}"#, fingerprint)
-                );
+                // #1053: bound the diagnostic collection by the same max_keys
+                // config so suppressed alerts cannot grow it without limit.
+                self.push_suppression_diagnostic(fingerprint);
                 return false;
             }
             // Window expired — update entry in place and fire.
@@ -148,9 +148,29 @@ impl AlertDeduplicator {
     /// Drain and return all buffered suppression log entries.
     ///
     /// Each entry is a JSON object containing at least the `alert_key` field
-    /// identifying which fingerprint was suppressed.
+    /// identifying which fingerprint was suppressed. The collection is bounded
+    /// by [`DedupConfig::max_keys`] so it cannot grow without limit.
     pub fn drain_suppression_log(&self) -> Vec<String> {
         self.suppression_log.borrow_mut().drain(..).collect()
+    }
+
+    /// Append a suppression diagnostic for `fingerprint`, evicting the oldest
+    /// diagnostics when the collection exceeds [`DedupConfig::max_keys`].
+    ///
+    /// The fingerprint is serialised as a JSON string literal so quotes,
+    /// backslashes, and control characters cannot produce an invalid entry.
+    fn push_suppression_diagnostic(&self, fingerprint: &str) {
+        let mut diagnostic = String::from("{\"alert_key\":");
+        crate::structured_log::write_json_string(&mut diagnostic, fingerprint);
+        diagnostic.push('}');
+
+        let mut log = self.suppression_log.borrow_mut();
+        if self.config.max_keys > 0 && log.len() >= self.config.max_keys {
+            // Drop the oldest entries so the newest diagnostic stays available.
+            let overflow = log.len() - self.config.max_keys + 1;
+            log.drain(0..overflow);
+        }
+        log.push(diagnostic);
     }
 
     /// Forcibly clear the suppression record for `fingerprint`, allowing the
@@ -469,26 +489,66 @@ mod tests {
             "suppression log entry must be a JSON object");
     }
 
+    /// The fingerprint is embedded as untrusted data, so quotes, backslashes,
+    /// and newlines must be escaped instead of interpolated verbatim.
+    #[test]
+    fn suppression_log_escapes_fingerprint_json() {
+        let d = AlertDeduplicator::new(DedupConfig { window_seconds: 300, max_keys: 100 });
+        let tricky = "alert\"key\\with\nnewline";
+        d.should_fire(tricky, 1000); // fires — no log entry
+        d.should_fire(tricky, 1100); // suppressed — log entry added
+        let log = d.drain_suppression_log();
+        assert_eq!(log.len(), 1);
+        // JSON text: {"alert_key":"alert\"key\\with\nnewline"}
+        let expected = "{\"alert_key\":\"alert\\\"key\\\\with\\nnewline\"}";
+        assert_eq!(log[0], expected, "fingerprint must be JSON-escaped verbatim");
+        // The raw entry must not contain an unescaped newline or a bare quote
+        // directly attached to the key value.
+        assert!(!log[0].contains('\n'), "raw newline would break the JSON line");
+    }
+
+    /// The suppression diagnostic collection must stay bounded by max_keys
+    /// (same cap the alert-key map uses) while keeping the newest entries.
+    #[test]
+    fn suppression_log_is_bounded_by_max_keys() {
+        let d = AlertDeduplicator::new(DedupConfig { window_seconds: 300, max_keys: 2 });
+        assert!(d.should_fire("k1", 1000), "first occurrence fires");
+        for i in 1..=5u64 {
+            assert!(!d.should_fire("k1", 1000 + i), "repeat within window suppressed");
+        }
+        let log = d.drain_suppression_log();
+        assert_eq!(
+            log.len(),
+            2,
+            "repeated suppression must not grow the log past max_keys"
+        );
+        // Ordinary single-alert suppression is unchanged.
+        assert!(!d.should_fire("k1", 1006));
+        assert_eq!(d.drain_suppression_log().len(), 1);
+        // The tracked fingerprint map itself stays bounded too.
+        assert_eq!(d.tracked_count(), 1);
+    }
+
     // ── AlertSuppressor ──────────────────────────────────────────────────────
 
     #[test]
     fn suppressed_fingerprint_is_active() {
         let s = AlertSuppressor::new();
-        s.suppress("maint:anchor.com", 2000, "planned maintenance");
+        s.suppress("maint:anchor.com", 1000, 2000, "planned maintenance");
         assert!(s.is_suppressed("maint:anchor.com", 1000));
     }
 
     #[test]
     fn expired_suppression_is_not_active() {
         let s = AlertSuppressor::new();
-        s.suppress("maint:anchor.com", 1500, "window ended");
+        s.suppress("maint:anchor.com", 1000, 1500, "window ended");
         assert!(!s.is_suppressed("maint:anchor.com", 2000));
     }
 
     #[test]
     fn unsuppress_lifts_immediately() {
         let s = AlertSuppressor::new();
-        s.suppress("k", 9999, "test");
+        s.suppress("k", 1000, 9999, "test");
         s.unsuppress("k");
         assert!(!s.is_suppressed("k", 1000));
     }
