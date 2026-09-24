@@ -492,9 +492,13 @@ pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> Result<u64, A
         executed: false,
     };
 
+    let key = proposal_key(env, proposal_id);
+    env.storage().persistent().set(&key, &proposal);
+    // Bound each proposal's storage lifetime to its configured expiry so stale
+    // proposals cannot accumulate until unrelated storage cleanup runs.
     env.storage()
         .persistent()
-        .set(&proposal_key(env, proposal_id), &proposal);
+        .extend_ttl(&key, cfg.proposal_expiry_ledgers, cfg.proposal_expiry_ledgers);
     env.storage()
         .persistent()
         .set(&proposal_count_key(env), &next_id);

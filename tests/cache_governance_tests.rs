@@ -205,3 +205,45 @@ fn test_proposal_id_counter_at_max_fails_cleanly() {
         assert_eq!(stored, u64::MAX, "counter must keep its exhausted value");
     });
 }
+
+/// a proposal is available for its configured lifetime and becomes
+/// un-actionable after the stored expiry has passed
+#[test]
+fn test_proposal_lifetime_is_bounded_by_configuration() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    let pid = env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 2, proposal_expiry_ledgers: 10 },
+        );
+
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+
+        // Within its configured lifetime the proposal is available.
+        assert!(cache_governance::get_proposal(&env, pid).is_some());
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_ok(),
+            "proposal must be usable before its expiry"
+        );
+        pid
+    });
+
+    // Advance to the ledger where created_at + expiry has lapsed.
+    set_ledger(&env, 11);
+
+    env.as_contract(&cid, || {
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_err(),
+            "endorse after the configured lifetime must fail"
+        );
+        assert!(
+            cache_governance::execute(&env, pid).is_err(),
+            "execute after the configured lifetime must fail"
+        );
+    });
+}
