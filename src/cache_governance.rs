@@ -349,8 +349,24 @@ pub fn get_config(env: &Env) -> CacheGovernanceConfig {
 
 /// Persist updated governance configuration (admin-only enforcement is in the
 /// contract layer).
-pub fn set_config(env: &Env, config: CacheGovernanceConfig) {
+///
+/// Rejects configurations with a zero `quorum_threshold` (would let a single
+/// endorser reach quorum) or a zero `proposal_expiry_ledgers` (would make
+/// every proposal immediately unusable) *before* any persistent state changes.
+/// Returns `Err(ValidationError)` naming the offending field in those cases.
+pub fn set_config(env: &Env, config: CacheGovernanceConfig) -> Result<(), AnchorKitError> {
+    if config.quorum_threshold == 0 {
+        return Err(AnchorKitError::validation_error(
+            "quorum_threshold must be greater than zero",
+        ));
+    }
+    if config.proposal_expiry_ledgers == 0 {
+        return Err(AnchorKitError::validation_error(
+            "proposal_expiry_ledgers must be greater than zero",
+        ));
+    }
     env.storage().persistent().set(&config_key(env), &config);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

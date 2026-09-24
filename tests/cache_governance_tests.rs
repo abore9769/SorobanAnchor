@@ -75,7 +75,7 @@ fn test_quorum_met_triggers_invalidation() {
 
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
 
         let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap(); // 1 endorsement
         cache_governance::endorse(&env, &endorser1, pid).unwrap();     // 2
@@ -103,7 +103,7 @@ fn test_expired_proposal_cannot_be_executed() {
 
     let pid = env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 10 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
         let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &endorser1, pid).unwrap();
         cache_governance::endorse(&env, &endorser2, pid).unwrap();
@@ -131,7 +131,7 @@ fn test_executed_proposal_cannot_be_reexecuted() {
 
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
         let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &e1, pid).unwrap();
         cache_governance::endorse(&env, &e2, pid).unwrap();
@@ -148,7 +148,7 @@ fn test_admin_can_configure_quorum_and_expiry() {
     set_ledger(&env, 1);
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 5, proposal_expiry_ledgers: 500 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
         let stored = cache_governance::get_config(&env);
         assert_eq!(stored.quorum_threshold, 5);
         assert_eq!(stored.proposal_expiry_ledgers, 500);
@@ -220,7 +220,8 @@ fn test_proposal_lifetime_is_bounded_by_configuration() {
         cache_governance::set_config(
             &env,
             CacheGovernanceConfig { quorum_threshold: 2, proposal_expiry_ledgers: 10 },
-        );
+        )
+        .unwrap();
 
         let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
 
@@ -245,5 +246,54 @@ fn test_proposal_lifetime_is_bounded_by_configuration() {
             cache_governance::execute(&env, pid).is_err(),
             "execute after the configured lifetime must fail"
         );
+    });
+}
+
+/// a zero quorum threshold is rejected before any state is persisted
+#[test]
+fn test_set_config_rejects_zero_quorum_threshold() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        let err = cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 0, proposal_expiry_ledgers: 100 },
+        )
+        .expect_err("zero quorum threshold must be rejected");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::ValidationError);
+        assert!(
+            err.context.as_deref().unwrap_or("").contains("quorum_threshold"),
+            "error must name the offending field"
+        );
+
+        // Nothing was written: config falls back to defaults.
+        let stored = cache_governance::get_config(&env);
+        let default = CacheGovernanceConfig::default_config();
+        assert_eq!(stored.quorum_threshold, default.quorum_threshold);
+        assert_eq!(stored.proposal_expiry_ledgers, default.proposal_expiry_ledgers);
+    });
+}
+
+/// a zero proposal expiry is rejected before any state is persisted
+#[test]
+fn test_set_config_rejects_zero_proposal_expiry() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        let err = cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 0 },
+        )
+        .expect_err("zero proposal expiry must be rejected");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::ValidationError);
+        assert!(
+            err.context.as_deref().unwrap_or("").contains("proposal_expiry_ledgers"),
+            "error must name the offending field"
+        );
+
+        let stored = cache_governance::get_config(&env);
+        let default = CacheGovernanceConfig::default_config();
+        assert_eq!(stored.quorum_threshold, default.quorum_threshold);
+        assert_eq!(stored.proposal_expiry_ledgers, default.proposal_expiry_ledgers);
     });
 }
