@@ -249,6 +249,44 @@ mod quote_ordering_tests {
     }
 }
 
+// ── Storage-key segment bounds (#1064) ───────────────────────────────────────
+
+mod storage_key_segment_bounds_tests {
+    use soroban_sdk::Env;
+    use anchorkit::deterministic_hash::make_storage_key;
+
+    #[test]
+    fn valid_segments_remain_deterministic() {
+        let env = Env::default();
+        let parts = [&b"CGOV_CFG"[..], &b"AA"[..], &b"B"[..]];
+        let k1 = make_storage_key(&env, &parts);
+        let k2 = make_storage_key(&env, &parts);
+        assert_eq!(k1, k2, "identical segments must hash identically");
+    }
+
+    #[test]
+    fn segment_order_is_significant_for_keys() {
+        let env = Env::default();
+        let k_ab = make_storage_key(&env, &[&b"a"[..], &b"b"[..]]);
+        let k_ba = make_storage_key(&env, &[&b"b"[..], &b"a"[..]]);
+        assert_ne!(k_ab, k_ba, "length-prefixed ordering must not be normalized away");
+    }
+
+    /// An oversized segment (length above `u32::MAX`) must be rejected before
+    /// the length prefix is encoded, so it can never collide with a valid key
+    /// through truncation. The slice is constructed without allocating 4 GiB:
+    /// only its length metadata is read before the checked conversion panics.
+    #[test]
+    #[should_panic]
+    fn oversized_segment_rejected() {
+        let env = Env::default();
+        let pointer = 0x1usize as *const u8; // non-null; never dereferenced
+        let huge: &[u8] =
+            unsafe { core::slice::from_raw_parts(pointer, 0x1_0000_0000usize) };
+        let _ = make_storage_key(&env, &[huge]);
+    }
+}
+
 // ── Attestation ordering tests (#663) ─────────────────────────────────────────
 
 mod attestation_ordering_tests {

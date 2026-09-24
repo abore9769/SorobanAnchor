@@ -76,7 +76,12 @@ pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
     let mut input = Bytes::new(env);
     for part in parts {
         // 4-byte big-endian length prefix prevents cross-segment collisions.
-        let len = part.len() as u32;
+        // Reject segments that cannot be represented in the prefix so the
+        // encoded key can never be ambiguous through length truncation.
+        let len: u32 = part
+            .len()
+            .try_into()
+            .unwrap_or_else(|_| panic_with_error!(env, ErrorCode::ValidationError));
         for b in len.to_be_bytes().iter() {
             input.push_back(*b);
         }
