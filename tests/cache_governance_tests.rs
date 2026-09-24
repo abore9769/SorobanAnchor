@@ -63,6 +63,34 @@ fn test_duplicate_endorsement_ignored() {
     });
 }
 
+/// endorsement count is bounded by the configured quorum: the first
+/// over-limit endorsement fails before mutating the proposal
+#[test]
+fn test_endorsement_beyond_quorum_rejected() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let e2 = Address::generate(&env);
+    let e3 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
+        cache_governance::set_config(&env, cfg);
+
+        let pid = cache_governance::propose(&env, &proposer, &anchor); // 1 endorsement
+        cache_governance::endorse(&env, &e1, pid).unwrap();             // 2
+        cache_governance::endorse(&env, &e2, pid).unwrap();             // 3 = quorum
+        assert!(cache_governance::endorse(&env, &e3, pid).is_err(),
+            "endorsement beyond the quorum limit must fail");
+
+        // proposal must be unchanged by the rejected endorsement
+        let proposal = cache_governance::get_proposal(&env, pid).unwrap();
+        assert_eq!(proposal.endorsements.len(), 3);
+    });
+}
+
 /// quorum met triggers invalidation exactly once
 #[test]
 fn test_quorum_met_triggers_invalidation() {
