@@ -460,13 +460,23 @@ pub fn enforce_invalidation_policy(
 ///
 /// Returns the new `proposal_id`. The `proposer` must be a registered
 /// attestor; that check is enforced by the contract layer.
-pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> u64 {
+///
+/// Returns `Err(CacheCapacityExceeded)` when the proposal ID counter is at
+/// `u64::MAX` and the next ID would wrap and collide with an existing
+/// proposal. In that case nothing is written.
+pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> Result<u64, AnchorKitError> {
     let cfg = get_config(env);
     let proposal_id: u64 = env
         .storage()
         .persistent()
         .get::<_, u64>(&proposal_count_key(env))
         .unwrap_or(0);
+
+    // Guard the increment before writing anything: a wrap to 0 would collide
+    // with the first proposal ever created.
+    let next_id = proposal_id
+        .checked_add(1)
+        .ok_or_else(AnchorKitError::cache_capacity_exceeded)?;
 
     // Build the initial endorsements list with the proposer as first endorser.
     let mut endorsements = Vec::new(env);
@@ -487,9 +497,9 @@ pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> u64 {
         .set(&proposal_key(env, proposal_id), &proposal);
     env.storage()
         .persistent()
-        .set(&proposal_count_key(env), &(proposal_id + 1));
+        .set(&proposal_count_key(env), &next_id);
 
-    proposal_id
+    Ok(proposal_id)
 }
 
 /// Add an endorsement to an existing proposal.
@@ -677,14 +687,14 @@ mod logged {
         result
     }
 
-    /// [`propose`] plus a `cache.proposal_created` (info) entry.
+    /// [`propose`] plus a `cache.proposal_created` (info) entry on success.
     pub fn propose_logged(
         env: &Env,
         proposer: &Address,
         anchor: &Address,
         logger: &StructuredLogger,
-    ) -> u64 {
-        let proposal_id = propose(env, proposer, anchor);
+    ) -> Result<u64, AnchorKitError> {
+        let proposal_id = propose(env, proposer, anchor)?;
         logger.info(
             events::CACHE_PROPOSAL_CREATED,
             env.ledger().timestamp(),
@@ -695,7 +705,7 @@ mod logged {
                 ("ledger", env.ledger().sequence().into()),
             ],
         );
-        proposal_id
+        Ok(proposal_id)
     }
 
     /// [`endorse`] plus a `cache.proposal_endorsed` (info) entry with the

@@ -6626,6 +6626,7 @@ impl AnchorKitContract {
         caller.require_auth();
         Self::check_attestor(&env, &caller);
         crate::cache_governance::propose(&env, &caller, &anchor)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::CacheCapacityExceeded))
     }
 
     /// Endorse an existing cache invalidation proposal (registered attestors only).

@@ -35,7 +35,7 @@ fn test_proposal_creation_and_retrieval() {
     let proposer = Address::generate(&env);
     let anchor = Address::generate(&env);
     env.as_contract(&cid, || {
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         let proposal = cache_governance::get_proposal(&env, pid).unwrap();
         assert_eq!(proposal.proposer, proposer);
         assert_eq!(proposal.anchor, anchor);
@@ -53,7 +53,7 @@ fn test_duplicate_endorsement_ignored() {
     let anchor = Address::generate(&env);
 
     env.as_contract(&cid, || {
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         // proposer already endorsed on creation; endorsing again is a no-op
         let r = cache_governance::endorse(&env, &proposer, pid);
         assert!(r.is_ok());
@@ -77,7 +77,7 @@ fn test_quorum_met_triggers_invalidation() {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
         cache_governance::set_config(&env, cfg);
 
-        let pid = cache_governance::propose(&env, &proposer, &anchor); // 1 endorsement
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap(); // 1 endorsement
         cache_governance::endorse(&env, &endorser1, pid).unwrap();     // 2
         cache_governance::endorse(&env, &endorser2, pid).unwrap();     // 3 — quorum
 
@@ -104,7 +104,7 @@ fn test_expired_proposal_cannot_be_executed() {
     let pid = env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 10 };
         cache_governance::set_config(&env, cfg);
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &endorser1, pid).unwrap();
         cache_governance::endorse(&env, &endorser2, pid).unwrap();
         pid
@@ -132,7 +132,7 @@ fn test_executed_proposal_cannot_be_reexecuted() {
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
         cache_governance::set_config(&env, cfg);
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &e1, pid).unwrap();
         cache_governance::endorse(&env, &e2, pid).unwrap();
         cache_governance::execute(&env, pid).unwrap();
@@ -152,5 +152,56 @@ fn test_admin_can_configure_quorum_and_expiry() {
         let stored = cache_governance::get_config(&env);
         assert_eq!(stored.quorum_threshold, 5);
         assert_eq!(stored.proposal_expiry_ledgers, 500);
+    });
+}
+
+/// normal proposal IDs remain consecutive
+#[test]
+fn test_proposal_ids_are_consecutive() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        let p0 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        let p1 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        let p2 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 2);
+    });
+}
+
+/// the proposal ID counter pinned at u64::MAX must fail cleanly on the next
+/// propose instead of wrapping to 0 and colliding with the first proposal
+#[test]
+fn test_proposal_id_counter_at_max_fails_cleanly() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        // Force the counter to exhaustion.
+        let counter_key = anchorkit::deterministic_hash::make_storage_key(&env, &[b"CGOV_CNT"]);
+        env.storage().persistent().set(&counter_key, &u64::MAX);
+
+        let result = cache_governance::propose(&env, &proposer, &anchor);
+        let err = result.expect_err("propose must fail when the counter is exhausted");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::CacheCapacityExceeded);
+
+        // Nothing may have been written: no colliding proposal for MAX, and
+        // the counter must still read MAX (unrelated governance state intact).
+        let colliding = anchorkit::deterministic_hash::make_storage_key(
+            &env,
+            &[b"CGOV_PROP", &u64::MAX.to_be_bytes()],
+        );
+        assert!(
+            !env.storage().persistent().has(&colliding),
+            "no colliding proposal may be written at the wrapped ID"
+        );
+        let stored: u64 = env.storage().persistent().get(&counter_key).unwrap();
+        assert_eq!(stored, u64::MAX, "counter must keep its exhausted value");
     });
 }
