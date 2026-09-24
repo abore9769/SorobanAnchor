@@ -366,6 +366,16 @@ pub fn set_config(env: &Env, config: CacheGovernanceConfig) -> Result<(), Anchor
         ));
     }
     env.storage().persistent().set(&config_key(env), &config);
+    // Keep the configuration key alive for the configured proposal window so a
+    // quorum/expiry change cannot silently expire away before the proposals
+    // governed by it do.
+    let live_until = env
+        .ledger()
+        .sequence()
+        .saturating_add(config.proposal_expiry_ledgers);
+    env.storage()
+        .persistent()
+        .extend_ttl(&config_key(env), live_until, live_until);
     Ok(())
 }
 
@@ -512,9 +522,11 @@ pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> Result<u64, A
     env.storage().persistent().set(&key, &proposal);
     // Bound each proposal's storage lifetime to its configured expiry so stale
     // proposals cannot accumulate until unrelated storage cleanup runs.
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, cfg.proposal_expiry_ledgers, cfg.proposal_expiry_ledgers);
+    let live_until = env
+        .ledger()
+        .sequence()
+        .saturating_add(cfg.proposal_expiry_ledgers);
+    env.storage().persistent().extend_ttl(&key, live_until, live_until);
     env.storage()
         .persistent()
         .set(&proposal_count_key(env), &next_id);

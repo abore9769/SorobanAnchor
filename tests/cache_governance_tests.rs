@@ -297,3 +297,70 @@ fn test_set_config_rejects_zero_proposal_expiry() {
         assert_eq!(stored.proposal_expiry_ledgers, default.proposal_expiry_ledgers);
     });
 }
+
+/// a configuration change extends the config key's storage lifetime across
+/// the configured proposal window: the config stays readable and stable deep
+/// inside the configured window, long after the change was made
+#[test]
+fn test_config_key_lifetime_is_bounded_within_proposal_window() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 7, proposal_expiry_ledgers: 6000 },
+        )
+        .unwrap();
+
+        // Configuration is durable immediately after the change.
+        let stored = cache_governance::get_config(&env);
+        assert_eq!(stored.quorum_threshold, 7);
+        assert_eq!(stored.proposal_expiry_ledgers, 6000);
+    });
+
+    // Deep inside the configured 6000-ledger proposal window the stored
+    // config must still be intact (regression: a config write must not let
+    // its key expire before the proposals governed by it do).
+    set_ledger(&env, 3000);
+
+    env.as_contract(&cid, || {
+        let stored = cache_governance::get_config(&env);
+        assert_eq!(stored.quorum_threshold, 7, "config must survive the proposal window");
+        assert_eq!(stored.proposal_expiry_ledgers, 6000);
+    });
+}
+
+/// a proposal created with a long configured window remains present and
+/// usable throughout that window
+#[test]
+fn test_proposal_storage_is_bounded_by_lifetime() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    let pid = env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 2, proposal_expiry_ledgers: 6000 },
+        )
+        .unwrap();
+        cache_governance::propose(&env, &proposer, &anchor).unwrap()
+    });
+
+    // 3000 ledgers in, well inside the 6000-ledger proposal window: the
+    // proposal storage must have been kept alive and remain actionable.
+    set_ledger(&env, 3000);
+
+    env.as_contract(&cid, || {
+        assert!(
+            cache_governance::get_proposal(&env, pid).is_some(),
+            "proposal must remain readable within its configured lifetime"
+        );
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_ok(),
+            "proposal must remain usable within its configured lifetime"
+        );
+    });
+}
