@@ -189,7 +189,7 @@ impl CorrelationContext {
         self.baggage.get(key).map(String::as_str)
     }
 
-    pub fn add_correlation_link(&mut self, links: &mut Vec<String>) {
+    pub fn add_correlation_link(&self, links: &mut Vec<String>) {
     if !links.iter().any(|id| id == &self.correlation_id) {
         links.push(self.correlation_id.clone());
     }
