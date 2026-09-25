@@ -10,8 +10,9 @@
 
 use std::collections::HashMap;
 use anchorkit::{
-    BuildMetadata, ConfigMetadata, DriftItem, EnvironmentFingerprint, ToolVersions,
+    BuildMetadata, ConfigMetadata, ToolVersions, EnvironmentFingerprint,
 };
+use anchorkit::env_fingerprint::DriftItem;
 
 // ---------------------------------------------------------------------------
 // Helpers

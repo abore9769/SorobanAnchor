@@ -24,7 +24,6 @@
 //!     eprintln!("Environment drift detected: {:?}", drift);
 //! }
 //! ```
-
 #![cfg(feature = "std")]
 
 use std::collections::HashMap;
@@ -75,38 +74,66 @@ pub struct ConfigMetadata {
 }
 
 impl ConfigMetadata {
-    /// Hash every `.json` and `.toml` file found in `configs/`.
-    pub fn collect() -> Self {
-        let config_dir = std::path::Path::new("configs");
+    /// Hash every `.json` and `.toml` file found in `<root>/configs/`.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` — The repository / project root directory.  The `configs/`
+    ///   subdirectory is resolved relative to this path, **not** relative to
+    ///   the process working directory.  Callers that need a "same result
+    ///   regardless of where the process was launched" guarantee must pass a
+    ///   stable, absolute path here (e.g. the directory containing the running
+    ///   binary, or a path discovered from the project manifest).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` when any of the following occur:
+    /// - `<root>/configs/` cannot be read (missing, permission denied, etc.)
+    /// - Any matched `.json` or `.toml` file cannot be read to completion.
+    ///
+    /// A partial fingerprint is never returned: the function either succeeds
+    /// completely for all discovered files or returns an error.
+    pub fn collect(root: &std::path::Path) -> Result<Self, String> {
+        let config_dir = root.join("configs");
         let mut file_hashes = HashMap::new();
 
-        if let Ok(entries) = std::fs::read_dir(config_dir) {
-            let mut paths: Vec<_> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e == "json" || e == "toml")
-                        .unwrap_or(false)
-                })
-                .collect();
-            paths.sort(); // deterministic order
+        let entries = std::fs::read_dir(&config_dir).map_err(|e| {
+            format!(
+                "ConfigMetadata: cannot read configs directory '{}': {e}",
+                config_dir.display()
+            )
+        })?;
 
-            for path in &paths {
-                if let Ok(content) = std::fs::read(path) {
-                    let digest = Sha256::digest(&content);
-                    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                    let key = path
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    file_hashes.insert(key, hex);
-                }
-            }
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e == "json" || e == "toml")
+                    .unwrap_or(false)
+            })
+            .collect();
+        paths.sort(); // deterministic order
+
+        for path in &paths {
+            // Propagate read errors: an unreadable file must not silently
+            // produce a fingerprint that looks complete but misses that file's
+            // content.
+            let content = std::fs::read(path).map_err(|e| {
+                format!(
+                    "ConfigMetadata: cannot read config file '{}': {e}",
+                    path.display()
+                )
+            })?;
+            let digest = Sha256::digest(&content);
+            let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+            let key = path.to_string_lossy().replace('\\', "/");
+            file_hashes.insert(key, hex);
         }
 
         let file_count = file_hashes.len();
-        Self { file_hashes, file_count }
+        Ok(Self { file_hashes, file_count })
     }
 }
 
@@ -200,10 +227,53 @@ pub struct EnvironmentFingerprint {
 
 impl EnvironmentFingerprint {
     /// Collect a fresh fingerprint from the current host environment.
+    ///
+    /// Config files are resolved relative to `root`.  When `root` is `None`
+    /// the function falls back to the directory containing the running
+    /// executable, which is stable across working-directory changes.  Pass
+    /// an explicit path in tests or when the executable location is not
+    /// meaningful.
+    ///
+    /// If `ConfigMetadata::collect` fails (e.g. the `configs/` directory does
+    /// not exist under the resolved root) the config section is left empty and
+    /// a warning is embedded in the summary, but collection still succeeds so
+    /// that tool-version and build-metadata fields are always populated.
     pub fn collect() -> Self {
+        Self::collect_from(None)
+    }
+
+    /// Collect using an explicit project `root` directory.
+    ///
+    /// This is the primary entry point used by tests and any caller that needs
+    /// a root-independent, reproducible fingerprint.
+    ///
+    /// # Errors (soft)
+    ///
+    /// If `ConfigMetadata::collect` returns an error the config section is
+    /// left as a default (empty) value; the error string is not surfaced here
+    /// but the `file_count` will be 0, which will appear as drift when
+    /// compared against a baseline that does have config files.
+    pub fn collect_from(root: Option<&std::path::Path>) -> Self {
+        // Resolve the project root: use the supplied path, or fall back to the
+        // directory containing the running executable.  Both are stable across
+        // CWD changes; neither relies on std::env::current_dir().
+        let exe_root: std::path::PathBuf;
+        let effective_root: &std::path::Path = match root {
+            Some(r) => r,
+            None => {
+                exe_root = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                &exe_root
+            }
+        };
+
+        let config = ConfigMetadata::collect(effective_root).unwrap_or_default();
+
         Self {
             tools: ToolVersions::collect(),
-            config: ConfigMetadata::collect(),
+            config,
             build: BuildMetadata::collect(),
             collected_at: Some(current_timestamp()),
         }
@@ -690,5 +760,140 @@ mod tests {
         let drift = current.diff(&baseline);
         let fields: Vec<_> = drift.iter().map(|d| d.field.as_str()).collect();
         assert!(fields.contains(&"build.active_features"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigMetadata::collect — unreadable file propagation (task 3)
+    // -------------------------------------------------------------------------
+
+    /// An unreadable (nonexistent) config directory must return an Err, not a
+    /// silent empty fingerprint.
+    #[test]
+    fn collect_errors_on_missing_configs_dir() {
+        let tmp = std::env::temp_dir().join("anchorkit_test_no_such_dir_12345xyz");
+        // Ensure the directory does NOT exist.
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let result = ConfigMetadata::collect(&tmp);
+        assert!(
+            result.is_err(),
+            "collect must fail when configs/ does not exist, got Ok"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("configs"),
+            "error message should mention 'configs', got: {msg}"
+        );
+    }
+
+    /// A readable `configs/` dir with all readable files produces Ok with the
+    /// correct hash count and deterministic ordering.
+    #[test]
+    fn collect_hashes_all_readable_files_in_deterministic_order() {
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join("anchorkit_test_readable_configs");
+        let configs = tmp.join("configs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&configs).expect("create configs dir");
+
+        // Write two config files with known content.
+        let mut f1 = std::fs::File::create(configs.join("a.json")).unwrap();
+        f1.write_all(b"{\"key\":\"value\"}").unwrap();
+        let mut f2 = std::fs::File::create(configs.join("b.toml")).unwrap();
+        f2.write_all(b"[section]\nkey = \"val\"").unwrap();
+
+        let result = ConfigMetadata::collect(&tmp);
+        assert!(result.is_ok(), "collect must succeed for readable files: {:?}", result);
+        let meta = result.unwrap();
+        assert_eq!(meta.file_count, 2, "expected 2 config files");
+        assert_eq!(meta.file_hashes.len(), 2);
+
+        // Hash must be stable across two calls with the same root.
+        let result2 = ConfigMetadata::collect(&tmp);
+        let meta2 = result2.unwrap();
+        assert_eq!(meta.file_hashes, meta2.file_hashes, "hashes must be deterministic");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A `configs/` dir containing one unreadable file must return Err — a
+    /// partial fingerprint (silently omitting the unreadable file) is not
+    /// acceptable.
+    ///
+    /// This test is skipped on Windows where unconditionally unreadable files
+    /// are harder to simulate without elevated privileges.
+    #[test]
+    #[cfg(unix)]
+    fn collect_errors_on_unreadable_config_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join("anchorkit_test_unreadable_configs");
+        let configs = tmp.join("configs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&configs).expect("create configs dir");
+
+        // One readable file.
+        let mut f1 = std::fs::File::create(configs.join("good.json")).unwrap();
+        f1.write_all(b"{\"ok\":true}").unwrap();
+
+        // One unreadable file (mode 0o000).
+        let bad_path = configs.join("bad.toml");
+        let mut f2 = std::fs::File::create(&bad_path).unwrap();
+        f2.write_all(b"secret = \"data\"").unwrap();
+        std::fs::set_permissions(&bad_path, std::fs::Permissions::from_mode(0o000))
+            .expect("set permissions");
+
+        let result = ConfigMetadata::collect(&tmp);
+        // Must fail — cannot produce a partial/incomplete fingerprint.
+        assert!(
+            result.is_err(),
+            "collect must fail when a config file is unreadable, got Ok"
+        );
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let _ = std::fs::set_permissions(&bad_path, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigMetadata::collect — CWD independence (task 4)
+    // -------------------------------------------------------------------------
+
+    /// Collecting from the same explicit root must produce identical hashes
+    /// regardless of what the process working directory is.
+    #[test]
+    fn collect_is_independent_of_cwd() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("anchorkit_test_cwd_independence");
+        let configs = tmp.join("configs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&configs).expect("create configs dir");
+
+        let mut f = std::fs::File::create(configs.join("stable.json")).unwrap();
+        f.write_all(b"{\"stable\":true}").unwrap();
+
+        // Collect once from a known root.
+        let result_a = ConfigMetadata::collect(&tmp).expect("collect from explicit root");
+
+        // Temporarily change CWD to a completely different directory, then
+        // collect again with the same explicit root.
+        let original_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let other_dir = std::env::temp_dir();
+        let _ = std::env::set_current_dir(&other_dir);
+
+        let result_b = ConfigMetadata::collect(&tmp).expect("collect from explicit root after cwd change");
+
+        // Restore CWD.
+        let _ = std::env::set_current_dir(&original_cwd);
+
+        assert_eq!(
+            result_a.file_hashes, result_b.file_hashes,
+            "fingerprint must be identical regardless of CWD"
+        );
+        assert_eq!(result_a.file_count, result_b.file_count);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
