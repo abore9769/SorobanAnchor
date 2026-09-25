@@ -8,8 +8,9 @@ mod webhook_middleware_tests {
         errors::ErrorCode,
         retry::RetryConfig,
         webhook::{
-            deliver_webhook, get_dead_letter_webhooks, verify_webhook_signature, DlqEntry,
-            WebhookDeliveryConfig, MAX_WEBHOOK_BODY_BYTES,
+            deliver_webhook, get_dead_letter_webhooks, verify_webhook_signature,
+            verify_webhook_signature_with_replay_protection, DlqEntry,
+            MemoryNonceTracker, VerificationResult, WebhookDeliveryConfig, MAX_WEBHOOK_BODY_BYTES,
         },
     };
 
@@ -329,5 +330,184 @@ mod webhook_middleware_tests {
         // A blank secret must never validate a signature, even one produced
         // with a real key.
         assert!(!verify_webhook_signature(payload, &sig, b""));
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. max_age_seconds == 0 is treated as "unlimited" (no age check)
+    // -----------------------------------------------------------------------
+
+    /// max_age_seconds = 0 must not silently reject every message.
+    /// Zero is defined as "unlimited" (skip the age check).
+    #[test]
+    fn test_max_age_zero_means_unlimited() {
+        // Capture the signature for a payload with a timestamp far in the past.
+        let payload = r#"{"timestamp":1,"nonce":"old-but-valid"}"#;
+        let key = b"secret";
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        let mut tracker = MemoryNonceTracker::new();
+        // current_time = 1_000_000, timestamp = 1 → age = 999_999 seconds
+        // With max_age_seconds = 0, this must succeed (unlimited).
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &sig, key, 1_000_000, 0, &mut tracker,
+            ),
+            VerificationResult::Valid,
+            "max_age_seconds=0 must behave as unlimited, not reject every message"
+        );
+    }
+
+    /// A positive max_age_seconds still enforces the age limit correctly.
+    #[test]
+    fn test_positive_max_age_still_enforced() {
+        let payload = r#"{"timestamp":900,"nonce":"aged-out"}"#;
+        let key = b"secret";
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        let mut tracker = MemoryNonceTracker::new();
+        // age = 1000 - 900 = 100, limit = 99 → should be expired
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &sig, key, 1000, 99, &mut tracker,
+            ),
+            VerificationResult::InvalidTimestamp,
+            "message older than max_age_seconds must be rejected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Empty nonce is rejected before tracker mutation
+    // -----------------------------------------------------------------------
+
+    /// An empty nonce must fail before the nonce tracker is consulted or mutated.
+    #[test]
+    fn test_empty_nonce_rejected_before_tracker_mutation() {
+        let payload = r#"{"timestamp":1000,"nonce":""}"#;
+        let key = b"secret";
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        let mut tracker = MemoryNonceTracker::new();
+        let result = verify_webhook_signature_with_replay_protection(
+            payload, &sig, key, 1000, 0, &mut tracker,
+        );
+        assert_eq!(
+            result,
+            VerificationResult::InvalidSignature,
+            "empty nonce must be rejected as InvalidSignature before tracker mutation"
+        );
+    }
+
+    /// Two signed payloads with an empty nonce both fail independently,
+    /// proving the tracker was never mutated by the first call.
+    #[test]
+    fn test_two_empty_nonce_payloads_both_fail() {
+        let payload = r#"{"timestamp":1000,"nonce":""}"#;
+        let key = b"secret";
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        let mut tracker = MemoryNonceTracker::new();
+        for i in 0..2 {
+            assert_eq!(
+                verify_webhook_signature_with_replay_protection(
+                    payload, &sig, key, 1000, 0, &mut tracker,
+                ),
+                VerificationResult::InvalidSignature,
+                "empty-nonce call #{} must fail as InvalidSignature", i
+            );
+        }
+    }
+
+    /// Non-empty nonces retain their normal signature, age, and replay semantics.
+    #[test]
+    fn test_nonempty_nonce_normal_semantics() {
+        let payload = r#"{"timestamp":1000,"nonce":"unique-xyz"}"#;
+        let key = b"secret";
+        let sig_captured: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sc = sig_captured.clone();
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+        let _ = deliver_webhook(
+            &signed_config(1, key.to_vec()),
+            payload,
+            &mut dlq,
+            move |_url, _body, sig| {
+                if let Some(s) = sig { *sc.lock().unwrap() = s.to_string(); }
+                Ok(200)
+            },
+            |_| {},
+            || 0u64,
+        );
+        let sig = sig_captured.lock().unwrap().clone();
+
+        let mut tracker = MemoryNonceTracker::new();
+        // First call: Valid
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &sig, key, 1000, 0, &mut tracker,
+            ),
+            VerificationResult::Valid
+        );
+        // Second call: ReplayDetected
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &sig, key, 1000, 0, &mut tracker,
+            ),
+            VerificationResult::ReplayDetected
+        );
     }
 }

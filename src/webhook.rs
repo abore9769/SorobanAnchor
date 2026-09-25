@@ -52,7 +52,18 @@ fn sign_payload(key: &[u8], payload: &str) -> String {
 ///
 /// The comparison is done byte-by-byte in constant time to prevent timing
 /// attacks.
+///
+/// # Body size limit
+///
+/// Bodies larger than [`MAX_WEBHOOK_BODY_BYTES`] are rejected immediately,
+/// before any parsing or HMAC computation, to prevent avoidable memory and
+/// CPU consumption. Payloads at exactly the limit are accepted.
 pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8]) -> bool {
+    // Reject bodies that exceed the documented size limit before doing any
+    // cryptographic or parsing work.
+    if payload.len() > MAX_WEBHOOK_BODY_BYTES {
+        return false;
+    }
     // An empty signing secret would make HMAC verification meaningless: any
     // signature computed against a blank key could be reproduced by anyone,
     // so reject it outright before doing any HMAC work.
@@ -140,13 +151,24 @@ pub fn verify_webhook_signature_with_replay_protection(
         return VerificationResult::InvalidTimestamp;
     }
     
-    let age = current_time.saturating_sub(timestamp);
-    // The maximum age is exclusive: exactly max_age_seconds old is expired.
-    if age >= max_age_seconds {
-        return VerificationResult::InvalidTimestamp;
+    // A max_age_seconds of 0 would make the age check `age >= 0` — always
+    // true — silently rejecting every message.  Treat 0 as "unlimited" (skip
+    // the age check) to give it a single, explicit, non-destructive meaning.
+    if max_age_seconds > 0 {
+        let age = current_time.saturating_sub(timestamp);
+        // The maximum age is exclusive: exactly max_age_seconds old is expired.
+        if age >= max_age_seconds {
+            return VerificationResult::InvalidTimestamp;
+        }
     }
     
-    // Check for replay attacks using nonce
+    // Check for replay attacks using nonce.
+    // Reject trimmed-empty nonces before any tracker mutation.  An empty
+    // nonce cannot uniquely identify a message, so multiple payloads could
+    // share it and trivially bypass replay protection.
+    if nonce.trim().is_empty() {
+        return VerificationResult::InvalidSignature;
+    }
     if !nonce_tracker.check_and_record(&nonce, timestamp) {
         return VerificationResult::ReplayDetected;
     }
@@ -1043,6 +1065,156 @@ mod tests {
                 payload, &signature, key, 1000, 100, &mut tracker,
             ),
             VerificationResult::InvalidTimestamp
+        );
+    }
+
+    // ── max_age_seconds == 0: defined as "unlimited" (no age check) ──────────
+
+    /// max_age_seconds = 0 is treated as "unlimited" — a very old message
+    /// must still pass the age check so the setting is not silently destructive.
+    #[test]
+    fn max_age_seconds_zero_means_unlimited() {
+        // Payload is 999 999 seconds old — any non-zero max_age would reject it.
+        let payload = r#"{"timestamp":1,"nonce":"old-but-valid"}"#;
+        let key = b"secret";
+        let signature = format!("sha256={}", sign_payload(key, payload));
+        let mut tracker = MemoryNonceTracker::new();
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &signature, key, 1_000_000, 0, &mut tracker,
+            ),
+            VerificationResult::Valid,
+            "max_age_seconds=0 must behave as unlimited, not reject every message"
+        );
+    }
+
+    /// A positive max_age_seconds still rejects messages older than the limit.
+    #[test]
+    fn positive_max_age_seconds_still_enforced() {
+        let payload = r#"{"timestamp":900,"nonce":"aged-out"}"#;
+        let key = b"secret";
+        let signature = format!("sha256={}", sign_payload(key, payload));
+        let mut tracker = MemoryNonceTracker::new();
+        // age = 1000 - 900 = 100, limit = 99 → expired
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &signature, key, 1000, 99, &mut tracker,
+            ),
+            VerificationResult::InvalidTimestamp
+        );
+    }
+
+    // ── verify_webhook_signature: body size limit ─────────────────────────────
+
+    /// A body exactly at MAX_WEBHOOK_BODY_BYTES is accepted.
+    #[test]
+    fn verify_signature_accepts_body_at_limit() {
+        let key = b"secret";
+        let at_limit = "a".repeat(MAX_WEBHOOK_BODY_BYTES);
+        let sig = format!("sha256={}", sign_payload(key, &at_limit));
+        assert!(
+            verify_webhook_signature(&at_limit, &sig, key),
+            "body at the exact limit must be accepted"
+        );
+    }
+
+    /// A body one byte over MAX_WEBHOOK_BODY_BYTES is rejected immediately,
+    /// before any HMAC computation, so even a correctly signed oversized body fails.
+    #[test]
+    fn verify_signature_rejects_oversized_body() {
+        let key = b"secret";
+        // Build a correctly-signed limit-sized payload, then extend by one byte.
+        let at_limit = "a".repeat(MAX_WEBHOOK_BODY_BYTES);
+        let valid_sig = format!("sha256={}", sign_payload(key, &at_limit));
+        let oversized = "a".repeat(MAX_WEBHOOK_BODY_BYTES + 1);
+        // The signature was produced for the at-limit body, but the oversized
+        // body must be rejected before HMAC work even begins.
+        assert!(
+            !verify_webhook_signature(&oversized, &valid_sig, key),
+            "body exceeding the limit must be rejected immediately"
+        );
+    }
+
+    // ── empty nonce rejection before tracker mutation ─────────────────────────
+
+    /// An empty nonce must be rejected before the tracker is consulted or mutated.
+    #[test]
+    fn empty_nonce_rejected_before_tracker_mutation() {
+        let payload = r#"{"timestamp":1000,"nonce":""}"#;
+        let key = b"secret";
+        let signature = format!("sha256={}", sign_payload(key, payload));
+        let mut tracker = MemoryNonceTracker::new();
+        let result = verify_webhook_signature_with_replay_protection(
+            payload, &signature, key, 1000, 0, &mut tracker,
+        );
+        assert_eq!(
+            result,
+            VerificationResult::InvalidSignature,
+            "empty nonce must be rejected as InvalidSignature"
+        );
+    }
+
+    /// A whitespace-only nonce is treated the same as an empty nonce.
+    #[test]
+    fn whitespace_nonce_rejected_before_tracker_mutation() {
+        let payload = r#"{"timestamp":1000,"nonce":"   "}"#;
+        let key = b"secret";
+        let signature = format!("sha256={}", sign_payload(key, payload));
+        let mut tracker = MemoryNonceTracker::new();
+        let result = verify_webhook_signature_with_replay_protection(
+            payload, &signature, key, 1000, 0, &mut tracker,
+        );
+        assert_eq!(
+            result,
+            VerificationResult::InvalidSignature,
+            "whitespace-only nonce must be rejected as InvalidSignature"
+        );
+    }
+
+    /// Two signed payloads with the same empty nonce both fail; the tracker
+    /// must not have been mutated by the first call.
+    #[test]
+    fn two_empty_nonce_payloads_both_fail_independently() {
+        let key = b"secret";
+        let mut tracker = MemoryNonceTracker::new();
+
+        for i in 0..2 {
+            let payload = format!(r#"{{"timestamp":1000,"nonce":""}}"#);
+            let signature = format!("sha256={}", sign_payload(key, &payload));
+            let result = verify_webhook_signature_with_replay_protection(
+                &payload, &signature, key, 1000, 0, &mut tracker,
+            );
+            assert_eq!(
+                result,
+                VerificationResult::InvalidSignature,
+                "empty-nonce payload #{} must be rejected before tracker mutation", i
+            );
+        }
+    }
+
+    /// Non-empty nonces retain their normal signature, age, and replay semantics.
+    #[test]
+    fn nonempty_nonce_retains_normal_semantics() {
+        let key = b"secret";
+        let mut tracker = MemoryNonceTracker::new();
+
+        let payload = r#"{"timestamp":1000,"nonce":"unique-abc"}"#;
+        let signature = format!("sha256={}", sign_payload(key, payload));
+
+        // First call: valid
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &signature, key, 1000, 0, &mut tracker,
+            ),
+            VerificationResult::Valid
+        );
+
+        // Second call with same nonce: replay detected
+        assert_eq!(
+            verify_webhook_signature_with_replay_protection(
+                payload, &signature, key, 1000, 0, &mut tracker,
+            ),
+            VerificationResult::ReplayDetected
         );
     }
 
