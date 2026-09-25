@@ -452,10 +452,10 @@ mod tests {
     #[test]
     fn run_all_records_executed_at() {
         let runner = SyntheticProbeRunner::new(make_probes());
-        let mut ts = 1000u64;
+        let ts = core::cell::Cell::new(1000u64);
         let reports = runner.run_all(
             |c| Ok(ProbeResult::success(c.id, 50)),
-            || { let t = ts; ts += 1; t },
+            || { let t = ts.get(); ts.set(t + 1); t },
         );
         assert_eq!(reports[0].executed_at, 1000);
         assert_eq!(reports[1].executed_at, 1001);
@@ -621,10 +621,10 @@ mod tests {
     fn window_timestamps_span_probe_execution_times() {
         let runner = SyntheticProbeRunner::new(make_probes());
         let ts_values = alloc::vec![1000u64, 1005, 1010];
-        let mut ts_idx = 0usize;
+        let ts_idx = core::cell::Cell::new(0usize);
         let reports = runner.run_all(
             |c| Ok(ProbeResult::success(c.id, 50)),
-            || { let t = ts_values[ts_idx]; ts_idx += 1; t },
+            || { let i = ts_idx.get(); ts_idx.set(i + 1); ts_values[i] },
         );
         let w = probe_results_to_health_window(&reports);
         assert_eq!(w.started_at, 1000);

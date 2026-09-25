@@ -338,7 +338,7 @@ mod tests {
 
         let result = execute_with_budget(
             &mut budget,
-            |_| { calls += 1; Err("permanent") },
+            |_| { calls += 1; Err::<(), _>("permanent") },
             |_| false,
             |_| {},
             |_| "exhausted",
@@ -356,7 +356,7 @@ mod tests {
 
         let result = execute_with_budget(
             &mut budget,
-            |_| { calls += 1; Err("transient") },
+            |_| { calls += 1; Err::<(), _>("transient") },
             |_| true,
             |_| {},
             |_| "exhausted",
