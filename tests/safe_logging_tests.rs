@@ -281,6 +281,7 @@ mod safe_logging_tests {
 
         let opts = OutboundRequestOptions::with_idempotency_key("txn-825")
             .with_signing_key(b"hmac-signing-secret")
+            .expect("non-empty signing key")
             .with_bearer_token("sep10-jwt-bearer-secret");
 
         let debug_output = format!("{opts:?}");

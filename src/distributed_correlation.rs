@@ -454,8 +454,8 @@ mod tests {
 
         #[test]
     fn duplicate_correlation_link_is_ignored() {
-        let ctx = CorrelationContext::new("svc", "txn-001");
-        let other = CorrelationContext::new("svc", "txn-002");
+        let mut ctx = CorrelationContext::new("svc", "txn-001");
+        let mut other = CorrelationContext::new("svc", "txn-002");
 
         let mut links = Vec::new();
 

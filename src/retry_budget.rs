@@ -336,7 +336,7 @@ mod tests {
         let mut budget = RetryBudget::new("req-7", 5);
         let mut calls = 0u32;
 
-        let result = execute_with_budget(
+        let result: Result<u32, &str> = execute_with_budget(
             &mut budget,
             |_| { calls += 1; Err("permanent") },
             |_| false,
@@ -354,7 +354,7 @@ mod tests {
         let mut budget = RetryBudget::new("req-8", 3);
         let mut calls = 0u32;
 
-        let result = execute_with_budget(
+        let result: Result<u32, &str> = execute_with_budget(
             &mut budget,
             |_| { calls += 1; Err("transient") },
             |_| true,
