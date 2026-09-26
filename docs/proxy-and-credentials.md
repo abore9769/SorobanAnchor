@@ -114,8 +114,11 @@ idempotency and HMAC-signature headers, for both the injectable-transport path
 (`post_with_options`) and the reqwest-backed helpers.
 
 `OutboundRequestOptions::validate()` / `RequestCredentials::validate()` reject
-empty tokens, usernames containing `:`, malformed header names, and CR/LF in
-any credential value.
+empty tokens, usernames containing `:`, malformed header names, CR/LF in
+any credential value, and empty or whitespace-only signing keys.
+`build_headers` (and therefore `post_with_options`) runs `validate()` first and
+returns its error, so invalid input never becomes a request header.
+`with_signing_key` returns the same error for an empty key.
 
 ## Handling credentials safely
 

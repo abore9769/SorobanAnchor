@@ -300,21 +300,27 @@ impl AlertRouterConfig {
     /// - `severity`  → [`AlertSeverity`] parsed from the string value.
     /// - `recipients` → one [`AlertRoute::webhook`] per entry.
     ///
-    /// Entries with an unrecognised severity are skipped.
+    /// Returns a [`crate::errors::AnchorKitError::validation_error`] when an
+    /// entry's `severity` is unknown or blank instead of silently coercing it
+    /// to `Warning`, so a configuration typo fails loudly during loading.
     pub fn from_monitoring_config(
         monitoring: Option<&crate::config::MonitoringConfig>,
-    ) -> Self {
+    ) -> Result<Self, crate::errors::AnchorKitError> {
         let Some(monitoring) = monitoring else {
-            return Self::default();
+            return Ok(Self::default());
         };
         let Some(alerts) = &monitoring.alerts else {
-            return Self::default();
+            return Ok(Self::default());
         };
 
         let mut rules = Vec::new();
         for alert in alerts {
-            let severity = AlertSeverity::from_str(&alert.severity)
-                .unwrap_or(AlertSeverity::Warning);
+            let severity = AlertSeverity::from_str(&alert.severity).ok_or_else(|| {
+                crate::errors::AnchorKitError::validation_error(&alloc::format!(
+                    "monitoring.alerts[].severity: invalid severity {:?} (expected info|warning|error|critical)",
+                    alert.severity
+                ))
+            })?;
             let scope = if alert.condition.is_empty() {
                 None
             } else {
@@ -331,10 +337,10 @@ impl AlertRouterConfig {
             }
         }
 
-        AlertRouterConfig {
+        Ok(AlertRouterConfig {
             rules,
             default_routes: Vec::new(),
-        }
+        })
     }
 }
 
@@ -626,5 +632,70 @@ mod tests {
             let rule = AlertRule { severity: sev, scope: None, routes: alloc::vec![] };
             assert_eq!(rule.severity, sev);
         }
+    }
+
+    // ── Fix: reject unknown alert severity (#1056) ───────────────────────────
+
+    #[cfg(feature = "std")]
+    fn monitoring_with_severities(severities: &[&str]) -> crate::config::MonitoringConfig {
+        let alerts = severities
+            .iter()
+            .map(|sev| crate::config::AlertConfig {
+                condition: "payments".into(),
+                severity: (*sev).into(),
+                recipients: alloc::vec!["https://hooks.example.com/a".into()],
+                extra: alloc::collections::BTreeMap::new(),
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        crate::config::MonitoringConfig {
+            enable_metrics: None,
+            log_all_operations: None,
+            alert_on_failed_attestations: None,
+            alert_on_replay_attempts: None,
+            metrics_namespace: None,
+            alerts: Some(alerts),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn from_monitoring_config_accepts_known_severities() {
+        let config = monitoring_with_severities(&["critical", "warning", "info", "error"]);
+        let router = AlertRouterConfig::from_monitoring_config(Some(&config));
+        let router = router.expect("all severities are known");
+        assert_eq!(router.rules.len(), 4);
+        assert_eq!(router.rules[0].severity, AlertSeverity::Critical);
+        assert_eq!(router.rules[3].severity, AlertSeverity::Error);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn from_monitoring_config_accepts_none() {
+        assert!(AlertRouterConfig::from_monitoring_config(None).is_ok());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn from_monitoring_config_rejects_unknown_severity() {
+        let config = monitoring_with_severities(&["urgent"]);
+        let result = AlertRouterConfig::from_monitoring_config(Some(&config));
+        let err = result.expect_err("unknown severity must fail configuration");
+        assert_eq!(err.code, crate::errors::ErrorCode::ValidationError);
+        let context = err.context.as_deref().unwrap_or("");
+        assert!(
+            context.contains("severity") && context.contains("urgent"),
+            "error must identify the offending field and value: {context}"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn from_monitoring_config_rejects_blank_severity() {
+        let config = monitoring_with_severities(&[""]);
+        let result = AlertRouterConfig::from_monitoring_config(Some(&config));
+        assert!(
+            result.is_err(),
+            "blank severity must fail instead of defaulting to Warning"
+        );
     }
 }

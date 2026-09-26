@@ -101,7 +101,8 @@ use crate::trace_context::TraceContext;
 ///
 /// // Add HMAC signing on top.
 /// let opts = OutboundRequestOptions::with_idempotency_key("txn-001-deposit")
-///     .with_signing_key(b"my-secret-key");
+///     .with_signing_key(b"my-secret-key")
+///     .expect("non-empty signing key");
 ///
 /// // Authenticate against the anchor with a bearer token.
 /// let opts = OutboundRequestOptions::with_idempotency_key("txn-001-deposit")
@@ -155,9 +156,15 @@ impl OutboundRequestOptions {
     }
 
     /// Attach an HMAC-SHA256 signing key to this options set.
-    pub fn with_signing_key(mut self, key: &[u8]) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `key` is empty or consists only of ASCII
+    /// whitespace, since such a key provides no secret material.
+    pub fn with_signing_key(mut self, key: &[u8]) -> Result<Self, String> {
+        validate_signing_key(key)?;
         self.signing_key = Some(key.to_vec());
-        self
+        Ok(self)
     }
 
     /// Attach an explicit [`RequestCredentials`] value to this options set.
@@ -205,7 +212,7 @@ impl OutboundRequestOptions {
     /// let opts = OutboundRequestOptions::with_idempotency_key("txn-001")
     ///     .with_trace(&trace);
     ///
-    /// let names: Vec<String> = opts.build_headers("{}").into_iter().map(|(k, _)| k).collect();
+    /// let names: Vec<String> = opts.build_headers("{}").unwrap().into_iter().map(|(k, _)| k).collect();
     /// assert!(names.contains(&"traceparent".to_string()));
     /// ```
     pub fn with_trace(mut self, trace: &TraceContext) -> Self {
@@ -241,15 +248,28 @@ impl OutboundRequestOptions {
     /// Build the extra headers that should be sent with an outbound request.
     ///
     /// Returns a list of `(header_name, header_value)` pairs.
-    /// - `Idempotency-Key` — when `idempotency_key` is set.
+    /// - `Idempotency-Key` — when `idempotency_key` is set to a non-empty value.
     /// - `X-Request-Id` — same value as `Idempotency-Key` (correlation).
     /// - `X-Anchor-Signature: sha256=<hex>` — when `signing_key` is set.
     /// - `traceparent`, `X-Trace-Id`, `X-Span-Id` — when `trace` is set.
-    pub fn build_headers(&self, body: &str) -> alloc::vec::Vec<(String, String)> {
+    ///
+    /// # Errors
+    ///
+    /// Runs [`OutboundRequestOptions::validate`] first and returns its error,
+    /// so malformed values (e.g. CR/LF in a credential) never become headers.
+    pub fn build_headers(&self, body: &str) -> Result<alloc::vec::Vec<(String, String)>, String> {
+        self.validate()?;
         let mut headers = alloc::vec::Vec::new();
+        // Only emit the idempotency key when it is non-empty, consistent with
+        // `has_idempotency_key`.  An empty `Some("")` is treated the same as
+        // `None` — it would produce an `Idempotency-Key: ` header with a blank
+        // value, which is useless for deduplication and inconsistent with how
+        // `has_idempotency_key` reports the key's presence.
         if let Some(ref key) = self.idempotency_key {
-            headers.push(("Idempotency-Key".into(), key.clone()));
-            headers.push(("X-Request-Id".into(), key.clone()));
+            if !key.is_empty() {
+                headers.push(("Idempotency-Key".into(), key.clone()));
+                headers.push(("X-Request-Id".into(), key.clone()));
+            }
         }
         if let Some(ref sk) = self.signing_key {
             let sig = compute_hmac_hex(sk, body);
@@ -261,7 +281,7 @@ impl OutboundRequestOptions {
         if let Some(ref creds) = self.credentials {
             headers.push(creds.to_header());
         }
-        headers
+        Ok(headers)
     }
 
     /// Return `true` when this options set carries a trace context.
@@ -284,10 +304,13 @@ impl OutboundRequestOptions {
         self.credentials.is_some()
     }
 
-    /// Validate the options, rejecting credential values that would produce
-    /// malformed or header-injecting requests. See
+    /// Validate the options, rejecting an empty signing key and credential
+    /// values that would produce malformed or header-injecting requests. See
     /// [`RequestCredentials::validate`].
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(ref sk) = self.signing_key {
+            validate_signing_key(sk)?;
+        }
         if let Some(ref creds) = self.credentials {
             creds.validate()?;
         }
@@ -421,6 +444,14 @@ impl RequestCredentials {
     }
 }
 
+/// Reject signing keys that are empty or ASCII-whitespace-only.
+fn validate_signing_key(key: &[u8]) -> Result<(), String> {
+    if key.trim_ascii().is_empty() {
+        return Err("signing key cannot be empty or whitespace-only".into());
+    }
+    Ok(())
+}
+
 /// Reject control characters (notably CR/LF) that would allow header injection.
 fn reject_ctl(what: &str, value: &str) -> Result<(), String> {
     if value.chars().any(|c| c.is_ascii_control()) {
@@ -431,24 +462,42 @@ fn reject_ctl(what: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Compute `HMAC-SHA256(key, payload)` and return a lowercase hex string.
-fn compute_hmac_hex(key: &[u8], payload: &str) -> String {
+/// Compute the raw `HMAC-SHA256(key, payload)` digest.
+fn compute_hmac_bytes(key: &[u8], payload: &str) -> [u8; SIGNATURE_HEX_LEN / 2] {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload.as_bytes());
-    let result = mac.finalize().into_bytes();
-    result.iter().fold(String::new(), |mut s, b| {
+    mac.finalize().into_bytes().into()
+}
+
+/// Compute `HMAC-SHA256(key, payload)` and return a lowercase hex string.
+fn compute_hmac_hex(key: &[u8], payload: &str) -> String {
+    compute_hmac_bytes(key, payload).iter().fold(String::new(), |mut s, b| {
         s.push_str(&alloc::format!("{:02x}", b));
         s
     })
 }
 
+/// Scheme prefix of the `X-Anchor-Signature` header value.
+const SIGNATURE_PREFIX: &str = "sha256=";
+/// Hex length of an HMAC-SHA256 digest (32 bytes).
+const SIGNATURE_HEX_LEN: usize = 64;
+
 /// Verify an `X-Anchor-Signature: sha256=<hex>` header value against a known
 /// signing key and request body.
 ///
 /// Uses constant-time comparison (XOR-fold) to prevent timing attacks.
+///
+/// # Wire format
+///
+/// Following the project's HTTP header convention, surrounding whitespace is
+/// trimmed and the `sha256=` scheme prefix is matched case-insensitively
+/// (`SHA256=` is accepted). The digest must then be exactly 64 hex digits
+/// (either case). Anything else is rejected before any decoding or HMAC
+/// computation, so oversized or malformed headers cost no work proportional
+/// to their length.
 ///
 /// # Arguments
 ///
@@ -460,53 +509,33 @@ fn compute_hmac_hex(key: &[u8], payload: &str) -> String {
 ///
 /// `true` when the signature matches; `false` otherwise.
 pub fn verify_outbound_signature(body: &str, signature_header: &str, key: &[u8]) -> bool {
-    let hex_digest = match signature_header.strip_prefix("sha256=") {
-        Some(h) => h,
-        None => return false,
-    };
-    if hex_digest.len() % 2 != 0 {
+    let value = signature_header.trim();
+    // Check the total length first: a valid value is exactly prefix + 64 hex
+    // digits, so anything else is rejected without inspecting its contents.
+    if value.len() != SIGNATURE_PREFIX.len() + SIGNATURE_HEX_LEN {
         return false;
     }
-    let mut received: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(hex_digest.len() / 2);
-    let mut chars = hex_digest.chars();
-    loop {
-        match (chars.next(), chars.next()) {
-            (Some(a), Some(b)) => {
-                let byte = match (a.to_digit(16), b.to_digit(16)) {
-                    (Some(hi), Some(lo)) => (hi << 4 | lo) as u8,
-                    _ => return false,
-                };
-                received.push(byte);
-            }
-            (None, None) => break,
+    let (prefix, hex_digest) = match (
+        value.get(..SIGNATURE_PREFIX.len()),
+        value.get(SIGNATURE_PREFIX.len()..),
+    ) {
+        (Some(p), Some(h)) => (p, h),
+        _ => return false,
+    };
+    if !prefix.eq_ignore_ascii_case(SIGNATURE_PREFIX) {
+        return false;
+    }
+    let mut received = [0u8; SIGNATURE_HEX_LEN / 2];
+    for (byte, pair) in received.iter_mut().zip(hex_digest.as_bytes().chunks_exact(2)) {
+        match ((pair[0] as char).to_digit(16), (pair[1] as char).to_digit(16)) {
+            (Some(hi), Some(lo)) => *byte = (hi << 4 | lo) as u8,
             _ => return false,
         }
     }
-    let expected_hex = compute_hmac_hex(key, body);
-    let expected_bytes: alloc::vec::Vec<u8> = {
-        let mut bytes = alloc::vec::Vec::with_capacity(expected_hex.len() / 2);
-        let mut ec = expected_hex.chars();
-        loop {
-            match (ec.next(), ec.next()) {
-                (Some(a), Some(b)) => {
-                    if let (Some(hi), Some(lo)) = (a.to_digit(16), b.to_digit(16)) {
-                        bytes.push((hi << 4 | lo) as u8);
-                    } else {
-                        return false;
-                    }
-                }
-                (None, None) => break,
-                _ => return false,
-            }
-        }
-        bytes
-    };
-    if received.len() != expected_bytes.len() {
-        return false;
-    }
+    let expected = compute_hmac_bytes(key, body);
     let diff: u8 = received
         .iter()
-        .zip(expected_bytes.iter())
+        .zip(expected.iter())
         .fold(0u8, |acc, (a, b)| acc | (a ^ b));
     diff == 0
 }
@@ -544,7 +573,10 @@ where
     if !is_https_endpoint(url) {
         return Err("outbound request rejected: endpoint URL must use the https:// scheme".into());
     }
-    let headers = opts.map(|o| o.build_headers(body)).unwrap_or_default();
+    let headers = match opts {
+        Some(o) => o.build_headers(body)?,
+        None => alloc::vec::Vec::new(),
+    };
     http_post(url, body, &headers)
 }
 
@@ -1415,6 +1447,8 @@ pub fn fetch_stellar_toml_with_proxy(
 ///     retry_config: RetryConfig::default(),
 ///     dead_letter_storage_key: "anchor-hook".to_string(),
 ///     signing_key: None,
+///     max_payload_age_seconds: None,
+///     require_nonce_for_replay_protection: false,
 /// };
 /// let proxy = ProxyConfig {
 ///     proxy_url: Some("http://proxy.corp.example.com:3128".to_string()),
@@ -1813,7 +1847,7 @@ mod tests {
     #[test]
     fn outbound_options_default_has_no_headers() {
         let opts = OutboundRequestOptions::default();
-        let headers = opts.build_headers("body");
+        let headers = opts.build_headers("body").unwrap();
         assert!(headers.is_empty());
         assert!(!opts.has_idempotency_key());
         assert!(!opts.has_signing_key());
@@ -1822,7 +1856,7 @@ mod tests {
     #[test]
     fn outbound_options_with_idempotency_key_emits_two_headers() {
         let opts = OutboundRequestOptions::with_idempotency_key("txn-001");
-        let headers = opts.build_headers("payload");
+        let headers = opts.build_headers("payload").unwrap();
         let names: alloc::vec::Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"Idempotency-Key"), "should include Idempotency-Key");
         assert!(names.contains(&"X-Request-Id"), "should include X-Request-Id");
@@ -1836,9 +1870,9 @@ mod tests {
 
     #[test]
     fn outbound_options_with_signing_key_emits_signature_header() {
-        let opts = OutboundRequestOptions::default().with_signing_key(b"secret");
+        let opts = OutboundRequestOptions::default().with_signing_key(b"secret").unwrap();
         let body = r#"{"event":"deposit"}"#;
-        let headers = opts.build_headers(body);
+        let headers = opts.build_headers(body).unwrap();
         let sig_header = headers.iter().find(|(k, _)| k == "X-Anchor-Signature");
         assert!(sig_header.is_some(), "should include X-Anchor-Signature");
         let (_, sig_val) = sig_header.unwrap();
@@ -1850,8 +1884,8 @@ mod tests {
     fn outbound_options_signature_is_verifiable() {
         let key = b"my-hmac-key";
         let body = r#"{"event":"withdrawal","amount":100}"#;
-        let opts = OutboundRequestOptions::default().with_signing_key(key);
-        let headers = opts.build_headers(body);
+        let opts = OutboundRequestOptions::default().with_signing_key(key).unwrap();
+        let headers = opts.build_headers(body).unwrap();
         let sig_val = &headers.iter()
             .find(|(k, _)| k == "X-Anchor-Signature")
             .unwrap().1;
@@ -1864,8 +1898,8 @@ mod tests {
         let key = b"correct-key";
         let wrong_key = b"wrong-key";
         let body = "payload";
-        let opts = OutboundRequestOptions::default().with_signing_key(key);
-        let headers = opts.build_headers(body);
+        let opts = OutboundRequestOptions::default().with_signing_key(key).unwrap();
+        let headers = opts.build_headers(body).unwrap();
         let sig_val = &headers.iter()
             .find(|(k, _)| k == "X-Anchor-Signature")
             .unwrap().1;
@@ -1877,13 +1911,155 @@ mod tests {
     fn outbound_options_tampered_body_fails_verification() {
         let key = b"hmac-key";
         let body = "original body";
-        let opts = OutboundRequestOptions::default().with_signing_key(key);
-        let headers = opts.build_headers(body);
+        let opts = OutboundRequestOptions::default().with_signing_key(key).unwrap();
+        let headers = opts.build_headers(body).unwrap();
         let sig_val = &headers.iter()
             .find(|(k, _)| k == "X-Anchor-Signature")
             .unwrap().1;
         assert!(!verify_outbound_signature("tampered body", sig_val, key),
             "verification should fail when body is tampered");
+    }
+
+    fn signed_header(key: &[u8], body: &str) -> String {
+        let opts = OutboundRequestOptions::default().with_signing_key(key).unwrap();
+        opts.build_headers(body)
+            .unwrap()
+            .into_iter()
+            .find(|(k, _)| k == "X-Anchor-Signature")
+            .unwrap()
+            .1
+    }
+
+    // ── #1076: signature prefix / whitespace normalization ───────────────────
+
+    #[test]
+    fn verify_signature_trims_surrounding_whitespace() {
+        let (key, body) = (b"ws-key", "ws body");
+        let sig = signed_header(key, body);
+        for padded in [
+            alloc::format!(" {}", sig),
+            alloc::format!("{} ", sig),
+            alloc::format!("\t {} \t", sig),
+        ] {
+            assert!(verify_outbound_signature(body, &padded, key), "{padded:?}");
+        }
+    }
+
+    #[test]
+    fn verify_signature_prefix_is_case_insensitive() {
+        let (key, body) = (b"case-key", "case body");
+        let digest = signed_header(key, body)["sha256=".len()..].to_string();
+        for prefix in ["sha256=", "SHA256=", "Sha256="] {
+            let header = alloc::format!("{}{}", prefix, digest);
+            assert!(verify_outbound_signature(body, &header, key), "{header}");
+        }
+        // Hex digits are accepted in either case too.
+        let upper = alloc::format!("sha256={}", digest.to_ascii_uppercase());
+        assert!(verify_outbound_signature(body, &upper, key));
+    }
+
+    #[test]
+    fn verify_signature_rejects_malformed_prefixes() {
+        let (key, body) = (b"prefix-key", "prefix body");
+        let digest = signed_header(key, body)["sha256=".len()..].to_string();
+        for bad in [
+            digest.clone(),                              // no prefix
+            alloc::format!("sha256 ={}", digest),        // inner whitespace
+            alloc::format!("sha256= {}", digest),        // whitespace after '='
+            alloc::format!("sha256:{}", digest),         // wrong separator
+            alloc::format!("sha512={}", digest),         // wrong scheme
+            alloc::format!("sha256=={}", &digest[1..]),  // doubled '='
+        ] {
+            assert!(!verify_outbound_signature(body, &bad, key), "{bad:?}");
+        }
+    }
+
+    // ── #1075: bound signature header parsing ────────────────────────────────
+
+    #[test]
+    fn verify_signature_rejects_oversized_header() {
+        let (key, body) = (b"big-key", "big body");
+        let sig = signed_header(key, body);
+        // A valid signature followed by a huge (valid-hex) tail must fail.
+        let huge = alloc::format!("{}{}", sig, "0".repeat(1 << 20));
+        assert!(!verify_outbound_signature(body, &huge, key));
+        let huge_prefixless = "a".repeat(1 << 20);
+        assert!(!verify_outbound_signature(body, &huge_prefixless, key));
+    }
+
+    #[test]
+    fn verify_signature_rejects_wrong_length_and_non_hex_digests() {
+        let (key, body) = (b"len-key", "len body");
+        let sig = signed_header(key, body);
+        assert!(!verify_outbound_signature(body, &sig[..sig.len() - 2], key), "short");
+        assert!(!verify_outbound_signature(body, &alloc::format!("{}00", sig), key), "long");
+        assert!(!verify_outbound_signature(body, &alloc::format!("{}0", sig), key), "odd");
+        let non_hex = alloc::format!("{}zz", &sig[..sig.len() - 2]);
+        assert!(!verify_outbound_signature(body, &non_hex, key), "non-hex");
+        // A multi-byte char that makes the byte length match must not panic.
+        let multibyte = alloc::format!("sha256={}é", "0".repeat(62));
+        assert_eq!(multibyte.len(), "sha256=".len() + 64);
+        assert!(!verify_outbound_signature(body, &multibyte, key));
+        // A multi-byte char straddling the prefix boundary must not panic.
+        let straddle = alloc::format!("sha25é{}", "0".repeat(64));
+        assert_eq!(straddle.len(), "sha256=".len() + 64);
+        assert!(!verify_outbound_signature(body, &straddle, key));
+        assert!(!verify_outbound_signature(body, "", key));
+    }
+
+    // ── #1074: reject empty signing keys ─────────────────────────────────────
+
+    #[test]
+    fn with_signing_key_rejects_empty_and_whitespace_keys() {
+        for key in [&b""[..], b" ", b"\t\r\n  "] {
+            let err = OutboundRequestOptions::default().with_signing_key(key).unwrap_err();
+            assert!(err.contains("signing key"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn with_signing_key_accepts_nonempty_keys() {
+        // Surrounding whitespace is kept as-is; only all-whitespace keys fail.
+        let opts = OutboundRequestOptions::default().with_signing_key(b" k ").unwrap();
+        assert_eq!(opts.signing_key.as_deref(), Some(&b" k "[..]));
+        assert!(opts.has_signing_key());
+    }
+
+    #[test]
+    fn validate_rejects_empty_signing_key_set_directly() {
+        let opts = OutboundRequestOptions {
+            signing_key: Some(alloc::vec::Vec::new()),
+            ..Default::default()
+        };
+        assert!(opts.validate().is_err());
+        assert!(opts.build_headers("body").is_err());
+    }
+
+    // ── #1073: validate before building headers ──────────────────────────────
+
+    #[test]
+    fn build_headers_rejects_crlf_credential() {
+        let opts = OutboundRequestOptions::with_idempotency_key("idem-crlf")
+            .with_header_credential("X-Api-Key", "v\r\nX-Injected: 1");
+        let err = opts.build_headers("body").unwrap_err();
+        assert!(err.contains("control characters"), "got: {err}");
+    }
+
+    #[test]
+    fn post_with_options_rejects_invalid_options_before_transport() {
+        let opts = OutboundRequestOptions::default().with_bearer_token("tok\nen");
+        let mut called = false;
+        let result = post_with_options(
+            "https://example.com/sep6",
+            "body",
+            Some(&opts),
+            |_url, _body, _hdrs| {
+                called = true;
+                Ok(200u16)
+            },
+        );
+        assert!(result.is_err());
+        assert!(!called, "transport must not be reached with invalid headers");
     }
 
     #[test]
@@ -1907,7 +2083,7 @@ mod tests {
     fn post_with_options_passes_headers_to_transport() {
         let key = b"signing-key";
         let opts = OutboundRequestOptions::with_idempotency_key("idem-42")
-            .with_signing_key(key);
+            .with_signing_key(key).unwrap();
         let body = r#"{"amount":50}"#;
 
         let mut captured_headers: alloc::vec::Vec<(String, String)> = alloc::vec::Vec::new();
@@ -1938,7 +2114,7 @@ mod tests {
         let opts = OutboundRequestOptions::with_idempotency_key("idem-1").with_trace(&trace);
         assert!(opts.has_trace());
 
-        let headers = opts.build_headers("{}");
+        let headers = opts.build_headers("{}").unwrap();
         let find = |name: &str| {
             headers
                 .iter()
@@ -1955,7 +2131,7 @@ mod tests {
     fn outbound_options_without_trace_emit_no_trace_headers() {
         let opts = OutboundRequestOptions::with_idempotency_key("idem-1");
         assert!(!opts.has_trace());
-        let headers = opts.build_headers("{}");
+        let headers = opts.build_headers("{}").unwrap();
         assert!(!headers.iter().any(|(k, _)| k == "traceparent"));
         assert!(!headers.iter().any(|(k, _)| k == "X-Trace-Id"));
     }
@@ -2008,7 +2184,7 @@ mod tests {
         let call_count = core::cell::Cell::new(0u32);
 
         let make_call = |count: &core::cell::Cell<u32>| {
-            let headers = opts.build_headers(body);
+            let headers = opts.build_headers(body).unwrap();
             let idem_key = headers.iter()
                 .find(|(k, _)| k == "Idempotency-Key")
                 .map(|(_, v)| v.clone())
@@ -2418,7 +2594,7 @@ mod tests {
     #[test]
     fn outbound_options_debug_redacts_signing_key_and_credentials() {
         let opts = OutboundRequestOptions::with_idempotency_key("idem-1")
-            .with_signing_key(b"hmac-secret")
+            .with_signing_key(b"hmac-secret").unwrap()
             .with_bearer_token("bearer-secret");
         let shown = alloc::format!("{:?}", opts);
         assert!(shown.contains("idem-1"), "idempotency key is not a secret: {shown}");
@@ -2522,9 +2698,9 @@ mod tests {
     #[test]
     fn build_headers_includes_credentials_alongside_existing_headers() {
         let opts = OutboundRequestOptions::with_idempotency_key("idem-7")
-            .with_signing_key(b"sk")
+            .with_signing_key(b"sk").unwrap()
             .with_basic_auth("user", "pass");
-        let headers = opts.build_headers("body");
+        let headers = opts.build_headers("body").unwrap();
         let names: alloc::vec::Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"Idempotency-Key"));
         assert!(names.contains(&"X-Request-Id"));
@@ -2721,5 +2897,69 @@ mod tests {
         assert!(ConnectionPolicy::default().max_redirects >= 1);
         assert!(build_client(None, 5).is_ok());
         assert!(build_client(None, 0).is_ok());
+    }
+
+    // ── Idempotency-Key empty-key consistency (Bug 4) ─────────────────────────
+
+    /// `build_headers` must not emit an `Idempotency-Key` header when the key
+    /// is `Some("")` — consistent with `has_idempotency_key` which already
+    /// treats an empty `Some` as absent.
+    #[test]
+    fn build_headers_empty_some_idempotency_key_emits_no_header() {
+        let opts = OutboundRequestOptions {
+            idempotency_key: Some(alloc::string::String::new()),
+            signing_key: None,
+            trace: None,
+            credentials: None,
+        };
+        // has_idempotency_key must agree: empty key is absent.
+        assert!(!opts.has_idempotency_key(), "has_idempotency_key should be false for Some(\"\")");
+        let headers = opts.build_headers("body");
+        let names: alloc::vec::Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.contains(&"Idempotency-Key"),
+            "build_headers must not emit Idempotency-Key for an empty key, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"X-Request-Id"),
+            "build_headers must not emit X-Request-Id for an empty key, got: {names:?}"
+        );
+    }
+
+    /// A non-empty idempotency key must still be emitted exactly once.
+    #[test]
+    fn build_headers_non_empty_idempotency_key_emits_header_once() {
+        let opts = OutboundRequestOptions::with_idempotency_key("txn-xyz");
+        assert!(opts.has_idempotency_key());
+        let headers = opts.build_headers("body");
+        let ik_count = headers.iter().filter(|(k, _)| k == "Idempotency-Key").count();
+        let ri_count = headers.iter().filter(|(k, _)| k == "X-Request-Id").count();
+        assert_eq!(ik_count, 1, "Idempotency-Key should appear exactly once");
+        assert_eq!(ri_count, 1, "X-Request-Id should appear exactly once");
+        // The value must be the key itself.
+        let val = headers.iter().find(|(k, _)| k == "Idempotency-Key").map(|(_, v)| v.as_str());
+        assert_eq!(val, Some("txn-xyz"));
+    }
+
+    /// `has_idempotency_key` and `build_headers` must agree: if `has_idempotency_key`
+    /// returns `false`, no `Idempotency-Key` header is emitted and vice versa.
+    #[test]
+    fn has_idempotency_key_and_build_headers_are_consistent() {
+        for key in &[None, Some(""), Some("txn-001")] {
+            let opts = OutboundRequestOptions {
+                idempotency_key: key.map(|s| s.to_string()),
+                signing_key: None,
+                trace: None,
+                credentials: None,
+            };
+            let reported = opts.has_idempotency_key();
+            let emitted = opts.build_headers("x")
+                .iter()
+                .any(|(k, _)| k == "Idempotency-Key");
+            assert_eq!(
+                reported, emitted,
+                "has_idempotency_key={reported} but Idempotency-Key emitted={emitted} for key={key:?}"
+            );
+        }
     }
 }

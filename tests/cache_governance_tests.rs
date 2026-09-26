@@ -35,7 +35,7 @@ fn test_proposal_creation_and_retrieval() {
     let proposer = Address::generate(&env);
     let anchor = Address::generate(&env);
     env.as_contract(&cid, || {
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         let proposal = cache_governance::get_proposal(&env, pid).unwrap();
         assert_eq!(proposal.proposer, proposer);
         assert_eq!(proposal.anchor, anchor);
@@ -53,13 +53,41 @@ fn test_duplicate_endorsement_ignored() {
     let anchor = Address::generate(&env);
 
     env.as_contract(&cid, || {
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         // proposer already endorsed on creation; endorsing again is a no-op
         let r = cache_governance::endorse(&env, &proposer, pid);
         assert!(r.is_ok());
         let proposal = cache_governance::get_proposal(&env, pid).unwrap();
         // still only 1 endorsement (the proposer)
         assert_eq!(proposal.endorsements.len(), 1);
+    });
+}
+
+/// endorsement count is bounded by the configured quorum: the first
+/// over-limit endorsement fails before mutating the proposal
+#[test]
+fn test_endorsement_beyond_quorum_rejected() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let e2 = Address::generate(&env);
+    let e3 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
+        cache_governance::set_config(&env, cfg);
+
+        let pid = cache_governance::propose(&env, &proposer, &anchor); // 1 endorsement
+        cache_governance::endorse(&env, &e1, pid).unwrap();             // 2
+        cache_governance::endorse(&env, &e2, pid).unwrap();             // 3 = quorum
+        assert!(cache_governance::endorse(&env, &e3, pid).is_err(),
+            "endorsement beyond the quorum limit must fail");
+
+        // proposal must be unchanged by the rejected endorsement
+        let proposal = cache_governance::get_proposal(&env, pid).unwrap();
+        assert_eq!(proposal.endorsements.len(), 3);
     });
 }
 
@@ -75,9 +103,9 @@ fn test_quorum_met_triggers_invalidation() {
 
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
 
-        let pid = cache_governance::propose(&env, &proposer, &anchor); // 1 endorsement
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap(); // 1 endorsement
         cache_governance::endorse(&env, &endorser1, pid).unwrap();     // 2
         cache_governance::endorse(&env, &endorser2, pid).unwrap();     // 3 — quorum
 
@@ -103,8 +131,8 @@ fn test_expired_proposal_cannot_be_executed() {
 
     let pid = env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 10 };
-        cache_governance::set_config(&env, cfg);
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        cache_governance::set_config(&env, cfg).unwrap();
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &endorser1, pid).unwrap();
         cache_governance::endorse(&env, &endorser2, pid).unwrap();
         pid
@@ -131,8 +159,8 @@ fn test_executed_proposal_cannot_be_reexecuted() {
 
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 17_280 };
-        cache_governance::set_config(&env, cfg);
-        let pid = cache_governance::propose(&env, &proposer, &anchor);
+        cache_governance::set_config(&env, cfg).unwrap();
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
         cache_governance::endorse(&env, &e1, pid).unwrap();
         cache_governance::endorse(&env, &e2, pid).unwrap();
         cache_governance::execute(&env, pid).unwrap();
@@ -148,9 +176,219 @@ fn test_admin_can_configure_quorum_and_expiry() {
     set_ledger(&env, 1);
     env.as_contract(&cid, || {
         let cfg = CacheGovernanceConfig { quorum_threshold: 5, proposal_expiry_ledgers: 500 };
-        cache_governance::set_config(&env, cfg);
+        cache_governance::set_config(&env, cfg).unwrap();
         let stored = cache_governance::get_config(&env);
         assert_eq!(stored.quorum_threshold, 5);
         assert_eq!(stored.proposal_expiry_ledgers, 500);
+    });
+}
+
+/// normal proposal IDs remain consecutive
+#[test]
+fn test_proposal_ids_are_consecutive() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        let p0 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        let p1 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        let p2 = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 2);
+    });
+}
+
+/// the proposal ID counter pinned at u64::MAX must fail cleanly on the next
+/// propose instead of wrapping to 0 and colliding with the first proposal
+#[test]
+fn test_proposal_id_counter_at_max_fails_cleanly() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        // Force the counter to exhaustion.
+        let counter_key = anchorkit::deterministic_hash::make_storage_key(&env, &[b"CGOV_CNT"]);
+        env.storage().persistent().set(&counter_key, &u64::MAX);
+
+        let result = cache_governance::propose(&env, &proposer, &anchor);
+        let err = result.expect_err("propose must fail when the counter is exhausted");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::CacheCapacityExceeded);
+
+        // Nothing may have been written: no colliding proposal for MAX, and
+        // the counter must still read MAX (unrelated governance state intact).
+        let colliding = anchorkit::deterministic_hash::make_storage_key(
+            &env,
+            &[b"CGOV_PROP", &u64::MAX.to_be_bytes()],
+        );
+        assert!(
+            !env.storage().persistent().has(&colliding),
+            "no colliding proposal may be written at the wrapped ID"
+        );
+        let stored: u64 = env.storage().persistent().get(&counter_key).unwrap();
+        assert_eq!(stored, u64::MAX, "counter must keep its exhausted value");
+    });
+}
+
+/// a proposal is available for its configured lifetime and becomes
+/// un-actionable after the stored expiry has passed
+#[test]
+fn test_proposal_lifetime_is_bounded_by_configuration() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    let pid = env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 2, proposal_expiry_ledgers: 10 },
+        )
+        .unwrap();
+
+        let pid = cache_governance::propose(&env, &proposer, &anchor).unwrap();
+
+        // Within its configured lifetime the proposal is available.
+        assert!(cache_governance::get_proposal(&env, pid).is_some());
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_ok(),
+            "proposal must be usable before its expiry"
+        );
+        pid
+    });
+
+    // Advance to the ledger where created_at + expiry has lapsed.
+    set_ledger(&env, 11);
+
+    env.as_contract(&cid, || {
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_err(),
+            "endorse after the configured lifetime must fail"
+        );
+        assert!(
+            cache_governance::execute(&env, pid).is_err(),
+            "execute after the configured lifetime must fail"
+        );
+    });
+}
+
+/// a zero quorum threshold is rejected before any state is persisted
+#[test]
+fn test_set_config_rejects_zero_quorum_threshold() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        let err = cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 0, proposal_expiry_ledgers: 100 },
+        )
+        .expect_err("zero quorum threshold must be rejected");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::ValidationError);
+        assert!(
+            err.context.as_deref().unwrap_or("").contains("quorum_threshold"),
+            "error must name the offending field"
+        );
+
+        // Nothing was written: config falls back to defaults.
+        let stored = cache_governance::get_config(&env);
+        let default = CacheGovernanceConfig::default_config();
+        assert_eq!(stored.quorum_threshold, default.quorum_threshold);
+        assert_eq!(stored.proposal_expiry_ledgers, default.proposal_expiry_ledgers);
+    });
+}
+
+/// a zero proposal expiry is rejected before any state is persisted
+#[test]
+fn test_set_config_rejects_zero_proposal_expiry() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        let err = cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 3, proposal_expiry_ledgers: 0 },
+        )
+        .expect_err("zero proposal expiry must be rejected");
+        assert_eq!(err.code, anchorkit::errors::ErrorCode::ValidationError);
+        assert!(
+            err.context.as_deref().unwrap_or("").contains("proposal_expiry_ledgers"),
+            "error must name the offending field"
+        );
+
+        let stored = cache_governance::get_config(&env);
+        let default = CacheGovernanceConfig::default_config();
+        assert_eq!(stored.quorum_threshold, default.quorum_threshold);
+        assert_eq!(stored.proposal_expiry_ledgers, default.proposal_expiry_ledgers);
+    });
+}
+
+/// a configuration change extends the config key's storage lifetime across
+/// the configured proposal window: the config stays readable and stable deep
+/// inside the configured window, long after the change was made
+#[test]
+fn test_config_key_lifetime_is_bounded_within_proposal_window() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 7, proposal_expiry_ledgers: 6000 },
+        )
+        .unwrap();
+
+        // Configuration is durable immediately after the change.
+        let stored = cache_governance::get_config(&env);
+        assert_eq!(stored.quorum_threshold, 7);
+        assert_eq!(stored.proposal_expiry_ledgers, 6000);
+    });
+
+    // Deep inside the configured 6000-ledger proposal window the stored
+    // config must still be intact (regression: a config write must not let
+    // its key expire before the proposals governed by it do).
+    set_ledger(&env, 3000);
+
+    env.as_contract(&cid, || {
+        let stored = cache_governance::get_config(&env);
+        assert_eq!(stored.quorum_threshold, 7, "config must survive the proposal window");
+        assert_eq!(stored.proposal_expiry_ledgers, 6000);
+    });
+}
+
+/// a proposal created with a long configured window remains present and
+/// usable throughout that window
+#[test]
+fn test_proposal_storage_is_bounded_by_lifetime() {
+    let (env, cid) = make_env();
+    set_ledger(&env, 1);
+    let proposer = Address::generate(&env);
+    let e1 = Address::generate(&env);
+    let anchor = Address::generate(&env);
+
+    let pid = env.as_contract(&cid, || {
+        cache_governance::set_config(
+            &env,
+            CacheGovernanceConfig { quorum_threshold: 2, proposal_expiry_ledgers: 6000 },
+        )
+        .unwrap();
+        cache_governance::propose(&env, &proposer, &anchor).unwrap()
+    });
+
+    // 3000 ledgers in, well inside the 6000-ledger proposal window: the
+    // proposal storage must have been kept alive and remain actionable.
+    set_ledger(&env, 3000);
+
+    env.as_contract(&cid, || {
+        assert!(
+            cache_governance::get_proposal(&env, pid).is_some(),
+            "proposal must remain readable within its configured lifetime"
+        );
+        assert!(
+            cache_governance::endorse(&env, &e1, pid).is_ok(),
+            "proposal must remain usable within its configured lifetime"
+        );
     });
 }

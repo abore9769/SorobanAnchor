@@ -76,7 +76,12 @@ pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
     let mut input = Bytes::new(env);
     for part in parts {
         // 4-byte big-endian length prefix prevents cross-segment collisions.
-        let len = part.len() as u32;
+        // Reject segments that cannot be represented in the prefix so the
+        // encoded key can never be ambiguous through length truncation.
+        let len: u32 = part
+            .len()
+            .try_into()
+            .unwrap_or_else(|_| panic_with_error!(env, ErrorCode::ValidationError));
         for b in len.to_be_bytes().iter() {
             input.push_back(*b);
         }
@@ -341,7 +346,20 @@ pub fn compute_canonical_hash(env: &Env, fields: &[CanonicalField]) -> BytesN<32
                 write_length_prefixed(&mut input, &bytes);
             }
             CanonicalField::Bool(v) => {
+                // Same type-tag || 4-byte-BE-length || content framing used by
+                // all other scalar encodings.  Previously the length prefix was
+                // missing, which made the Bool encoding shorter than every other
+                // scalar and created ambiguity at adjacent field boundaries
+                // (e.g. `[Bool(true), U32(0)]` was indistinguishable from a
+                // `[Bool]` whose value byte happened to equal a neighbouring
+                // tag).  Adding the explicit length (always 1) matches the
+                // `1-byte type tag || 4-byte BE length || content` invariant
+                // documented in the module-level comment.
                 input.push_back(CanonicalTag::Bool as u8);
+                let bool_len: u32 = 1;
+                for b in bool_len.to_be_bytes().iter() {
+                    input.push_back(*b);
+                }
                 input.push_back(if *v { 1u8 } else { 0u8 });
             }
             CanonicalField::Option(opt) => match opt {
@@ -355,7 +373,14 @@ pub fn compute_canonical_hash(env: &Env, fields: &[CanonicalField]) -> BytesN<32
             },
             CanonicalField::List(items) => {
                 input.push_back(CanonicalTag::List as u8);
-                let count = items.len() as u32;
+                // Use a checked cast so that a list longer than u32::MAX cannot
+                // silently wrap the encoded length and produce a truncated prefix
+                // that makes two distinct lists appear identical.  Reject the
+                // call with ValidationError before any bytes are appended.
+                let count: u32 = match u32::try_from(items.len()) {
+                    Ok(n) => n,
+                    Err(_) => panic_with_error!(env, ErrorCode::ValidationError),
+                };
                 for b in count.to_be_bytes().iter() {
                     input.push_back(*b);
                 }
@@ -634,6 +659,72 @@ mod deterministic_hash_tests {
         let h1 = compute_canonical_hash(&env, &[]);
         let h2 = compute_canonical_hash(&env, &[]);
         assert_eq!(h1, h2, "hashing zero fields must still be deterministic");
+    }
+
+    // -------------------------------------------------------------------------
+    // Bool framing fix — distinguishes adjacent field boundaries
+    // -------------------------------------------------------------------------
+
+    /// A Bool field followed by a U32 field must produce a different digest than
+    /// a Bool field alone, even when the Bool value byte (0x01 or 0x00) happens
+    /// to match the tag byte of the next field type.
+    ///
+    /// Before the fix the Bool arm wrote only `tag || value_byte` (2 bytes), so
+    /// the value byte bled into the surrounding encoding and created ambiguous
+    /// boundaries.  With the 4-byte length prefix the framing is
+    /// `tag || 0x00_00_00_01 || value_byte`, which is 6 bytes — unambiguous.
+    #[test]
+    fn test_bool_adjacent_field_boundary_is_unambiguous() {
+        let env = Env::default();
+
+        // [Bool(true)] must differ from [Bool(true), U32(0)]
+        let h_bool_only = compute_canonical_hash(&env, &[CanonicalField::Bool(true)]);
+        let h_bool_then_u32 =
+            compute_canonical_hash(&env, &[CanonicalField::Bool(true), CanonicalField::U32(0)]);
+        assert_ne!(
+            h_bool_only, h_bool_then_u32,
+            "Bool(true) alone must not collide with Bool(true) followed by U32(0)"
+        );
+
+        // [Bool(false), U32(1)] must differ from [Bool(false)] — the U32's tag
+        // byte is 2 (CanonicalTag::U32), so without framing `false` (0x00) could
+        // create an off-by-one boundary that masks the trailing field.
+        let h_false_only = compute_canonical_hash(&env, &[CanonicalField::Bool(false)]);
+        let h_false_then_u32 =
+            compute_canonical_hash(&env, &[CanonicalField::Bool(false), CanonicalField::U32(1)]);
+        assert_ne!(
+            h_false_only, h_false_then_u32,
+            "Bool(false) alone must not collide with Bool(false) followed by U32(1)"
+        );
+
+        // [Bool(true)] and [Bool(false)] must still differ from each other after
+        // the framing fix (regression guard for the basic bool discrimination).
+        assert_ne!(
+            h_bool_only, h_false_only,
+            "Bool(true) must still differ from Bool(false) after framing fix"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // List-length overflow guard
+    // -------------------------------------------------------------------------
+
+    /// Lists within u32 range must still hash stably (regression guard).
+    #[test]
+    fn test_list_within_u32_range_hashes_stably() {
+        let env = Env::default();
+        let a = Bytes::from_slice(&env, b"item-a");
+        let b_item = Bytes::from_slice(&env, b"item-b");
+        let items = [a.clone(), b_item.clone()];
+
+        let h1 = compute_canonical_hash(&env, &[CanonicalField::List(&items)]);
+        let h2 = compute_canonical_hash(&env, &[CanonicalField::List(&items)]);
+        assert_eq!(h1, h2, "same list must always hash identically");
+
+        // Confirm a different list produces a different hash.
+        let single = [a];
+        let h3 = compute_canonical_hash(&env, &[CanonicalField::List(&single)]);
+        assert_ne!(h1, h3, "lists of different lengths must not collide");
     }
 
     // -------------------------------------------------------------------------
