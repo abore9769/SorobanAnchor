@@ -175,6 +175,9 @@ pub enum ProbeOutcome {
     SlowSuccess,
     /// Probe failed (network error, unexpected response, timeout, etc.).
     Failure(String),
+    /// Probe failed and also took longer than `latency_threshold_ms`.
+    /// Carries the underlying failure reason.
+    SlowFailure(String),
 }
 
 impl ProbeOutcome {
@@ -187,7 +190,9 @@ impl ProbeOutcome {
     pub fn to_endpoint_outcome(&self) -> EndpointOutcome {
         match self {
             ProbeOutcome::Success | ProbeOutcome::SlowSuccess => EndpointOutcome::Success,
-            ProbeOutcome::Failure(r) => EndpointOutcome::Failure(r.clone()),
+            ProbeOutcome::Failure(r) | ProbeOutcome::SlowFailure(r) => {
+                EndpointOutcome::Failure(r.clone())
+            }
         }
     }
 }
@@ -268,13 +273,16 @@ pub struct ProbeReport {
 }
 
 impl ProbeReport {
-    /// Apply the slow-success threshold: if the result was `Success` but
-    /// `latency_ms > config.latency_threshold_ms`, reclassify as `SlowSuccess`.
+    /// Apply the latency threshold: when `latency_ms > config.latency_threshold_ms`,
+    /// reclassify `Success` as `SlowSuccess` and `Failure` as `SlowFailure`
+    /// (keeping the underlying failure reason).
     fn apply_latency_threshold(mut result: ProbeResult, config: &ProbeConfig) -> ProbeResult {
-        if result.outcome == ProbeOutcome::Success
-            && result.latency_ms > config.latency_threshold_ms
-        {
-            result.outcome = ProbeOutcome::SlowSuccess;
+        if result.latency_ms > config.latency_threshold_ms {
+            result.outcome = match result.outcome {
+                ProbeOutcome::Success => ProbeOutcome::SlowSuccess,
+                ProbeOutcome::Failure(reason) => ProbeOutcome::SlowFailure(reason),
+                other => other,
+            };
         }
         result
     }
@@ -405,10 +413,15 @@ pub fn probe_results_to_health_window(reports: &[ProbeReport]) -> HealthWindow {
         .map(|r| r.result.latency_ms)
         .collect();
     ok_latencies.sort_unstable();
-    let p50_latency_ms = if ok_latencies.is_empty() {
+    // Median convention: middle value for odd counts, mean of the two middle
+    // values for even counts.
+    let n = ok_latencies.len();
+    let p50_latency_ms = if n == 0 {
         0.0
+    } else if n % 2 == 1 {
+        ok_latencies[n / 2] as f64
     } else {
-        ok_latencies[ok_latencies.len() / 2] as f64
+        (ok_latencies[n / 2 - 1] as f64 + ok_latencies[n / 2] as f64) / 2.0
     };
 
     HealthWindow {
