@@ -471,3 +471,6 @@ MIT
 
 <!-- handsoff-issue-1113 -->
 - #1113: 67. Classify slow failed probes
+
+<!-- handsoff-issue-1114 -->
+- #1114: 68. Correct even-sample p50
