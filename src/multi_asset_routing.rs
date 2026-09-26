@@ -28,6 +28,63 @@
 //   - `base_asset == quote_asset` (circular corridor, `InvalidAssetPair`)
 //   - `amount == 0` (`InvalidAmount`)
 //   - `strategy` is not one of `ROUTING_STRATEGIES` (`ValidationError`)
+// tests/multi_asset_routing_tests.rs
+//
+// Integration tests for multi-asset quote routing (#656).
+//
+// Tests cover:
+//   - Single and multi-pair routing (happy path)
+//   - Each routing strategy (LowestFee, FastestSettlement, HighestReputation, WeightedScore)
+//   - Asset code normalisation (mixed case, whitespace)
+//   - Expired-quote filtering
+//   - Amount boundary enforcement (min/max)
+//   - Reputation filter
+//   - Unfilled pairs
+//   - Invalid asset combinations (same base/quote, empty code, too long, zero amount)
+//   - Mixed valid/invalid pairs — invalid entry propagates error immediately
+
+// tests/multi_asset_routing_tests.rs
+//
+// Integration tests for multi-asset quote routing (#656).
+//
+// Tests cover:
+//   - Single and multi-pair routing (happy path)
+//   - Each routing strategy (LowestFee, FastestSettlement, HighestReputation, WeightedScore)
+//   - Asset code normalisation (mixed case, whitespace)
+//   - Expired-quote filtering
+//   - Amount boundary enforcement (min/max)
+//   - Reputation filter
+//   - Unfilled pairs
+//   - Invalid asset combinations (same base/quote, empty code, too long, zero amount)
+//   - Mixed valid/invalid pairs — invalid entry propagates error immediately
+// tests/multi_asset_routing_tests.rs
+//
+// Integration tests for multi-asset quote routing (#656).
+//
+// Tests cover:
+//   - Single and multi-pair routing (happy path)
+//   - Each routing strategy (LowestFee, FastestSettlement, HighestReputation, WeightedScore)
+//   - Asset code normalisation (mixed case, whitespace)
+//   - Expired-quote filtering
+//   - Amount boundary enforcement (min/max)
+//   - Reputation filter
+//   - Unfilled pairs
+//   - Invalid asset combinations (same base/quote, empty code, too long, zero amount)
+//   - Mixed valid/invalid pairs — invalid entry propagates error immediately
+// tests/multi_asset_routing_tests.rs
+//
+// Integration tests for multi-asset quote routing (#656).
+//
+// Tests cover:
+//   - Single and multi-pair routing (happy path)
+//   - Each routing strategy (LowestFee, FastestSettlement, HighestReputation, WeightedScore)
+//   - Asset code normalisation (mixed case, whitespace)
+//   - Expired-quote filtering
+//   - Amount boundary enforcement (min/max)
+//   - Reputation filter
+//   - Unfilled pairs
+//   - Invalid asset combinations (same base/quote, empty code, too long, zero amount)
+//   - Mixed valid/invalid pairs — invalid entry propagates error immediately
 
 extern crate alloc;
 
@@ -457,3 +514,17 @@ mod tests {
         assert_eq!(err, Error::ValidationError);
     }
 }
+// tests/multi_asset_routing_tests.rs
+//
+// Integration tests for multi-asset quote routing (#656).
+//
+// Tests cover:
+//   - Single and multi-pair routing (happy path)
+//   - Each routing strategy (LowestFee, FastestSettlement, HighestReputation, WeightedScore)
+//   - Asset code normalisation (mixed case, whitespace)
+//   - Expired-quote filtering
+//   - Amount boundary enforcement (min/max)
+//   - Reputation filter
+//   - Unfilled pairs
+//   - Invalid asset combinations (same base/quote, empty code, too long, zero amount)
+//   - Mixed valid/invalid pairs — invalid entry propagates error immediately

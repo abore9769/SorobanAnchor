@@ -664,3 +664,35 @@ fn test_weighted_score_ordering_stable_with_poor_candidate_added() {
         "the poor candidate must not be selected"
     );
 }
+multi_asset_routing.rs — Multi-asset quote routing helpers (#656).
+//
+// This module extends the base routing layer so callers can evaluate and
+// select quotes across multiple asset pairs in a single pass.  It is compiled
+// as part of the host (non-WASM) build and is re-exported from `lib.rs`.
+//
+// # Design
+//
+// The core abstraction is `MultiAssetRoutingRequest`, which bundles one or
+// more `AssetPairRequest` entries.  Each entry carries an independent routing
+// strategy so callers can mix LowestFee for one corridor with
+// HighestReputation for another in the same call.
+//
+// `MultiAssetRoutingResult` groups the winning quotes per pair and a list of
+// any pairs that produced no candidates (`unfilled`).
+//
+// # Asset normalisation
+//
+// Asset codes are normalised to uppercase before comparison so that `usdc`,
+// `USDC`, and `Usdc` all resolve to the same corridor.  Only ASCII letters are
+// case-folded, so no non-ASCII spelling can alias a valid code.
+//
+// # Invalid combinations
+//
+// `validate_asset_pair_request` rejects a request when:
+//   - either asset code is empty, exceeds 12 characters, or contains anything
+//     other than ASCII letters and digits (`InvalidAssetCode`)
+//   - `base_asset == quote_asset` (circular corridor, `InvalidAssetPair`)
+//   - `amount == 0` (`InvalidAmount`)
+//   - `strategy` is not one of `ROUTING_STRATEGIES` (`ValidationError`)
+
+extern crate alloc;
