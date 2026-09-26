@@ -466,3 +466,8 @@ The release bundle includes:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1105 -->
+- #1105: 59. Bound maintenance-window scans
