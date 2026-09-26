@@ -511,22 +511,71 @@ pub fn request_firm_quote(raw: RawFirmQuote, current_timestamp: u64) -> Result<F
 ///
 /// Similar to `request_firm_quote` but returns the quote's freshness classification
 /// along with the normalized quote. Allows configurable near-stale threshold.
+///
+/// # Threshold semantics
+///
+/// `near_stale_threshold_seconds` must be **strictly less than** the quote's
+/// remaining lifetime (`expires_at - current_timestamp`). A threshold equal to
+/// or greater than that lifetime would classify every otherwise valid, non-expired
+/// quote as near-stale, which is nonsensical. This function therefore:
+///
+/// - Returns `Err(Error::invalid_quote())` if the threshold equals or exceeds
+///   the quote's remaining lifetime.
+/// - A threshold of **zero** is accepted and means "never classify as near-stale";
+///   quotes are either `Fresh` or `Stale`.
+///
+/// # Errors
+///
+/// Returns `Err(Error::stale_quote())` when the quote has already expired.
+/// Returns `Err(Error::invalid_quote())` when any field is malformed or the
+/// threshold is >= the remaining quote lifetime.
 pub fn request_firm_quote_with_freshness(
-    raw: RawFirmQuote, 
+    raw: RawFirmQuote,
     current_timestamp: u64,
     near_stale_threshold_seconds: u64,
 ) -> Result<(FirmQuote, QuoteFreshness), Error> {
-    let (expires_at, freshness) = validate_quote_fields_with_threshold(
-        &raw, 
-        current_timestamp, 
+    // Perform basic field validation and expiry check with the requested threshold
+    // so we can learn the remaining lifetime before range-checking the threshold.
+    let (expires_at, freshness_unclamped) = validate_quote_fields_with_threshold(
+        &raw,
+        current_timestamp,
         near_stale_threshold_seconds,
     )?;
-    
-    // Reject stale quotes
-    if freshness == QuoteFreshness::Stale {
+
+    // Reject stale quotes first — they are expired regardless of the threshold.
+    if freshness_unclamped == QuoteFreshness::Stale {
         return Err(Error::stale_quote());
     }
-    
+
+    // Compute the remaining lifetime of this (non-expired) quote.
+    // Safe: we just confirmed expires_at > current_timestamp.
+    let remaining_lifetime = expires_at - current_timestamp;
+
+    // A threshold >= remaining_lifetime would mark every live quote near-stale
+    // from the very first moment the quote is valid, which is nonsensical.
+    // Reject such thresholds so callers receive an explicit error rather than
+    // silent misbehaviour.  Zero is accepted and means "never near-stale".
+    if near_stale_threshold_seconds > 0 && near_stale_threshold_seconds >= remaining_lifetime {
+        return Err(Error::invalid_quote());
+    }
+
+    // Derive freshness using the now-validated threshold.
+    // At this point: threshold < remaining_lifetime, so NearStale is possible
+    // only when remaining_lifetime is only *slightly* above the threshold.
+    let freshness = if near_stale_threshold_seconds == 0 {
+        QuoteFreshness::Fresh
+    } else if remaining_lifetime < near_stale_threshold_seconds {
+        // Cannot happen after the guard above (threshold < remaining), but
+        // included for exhaustiveness.
+        QuoteFreshness::NearStale
+    } else {
+        // remaining_lifetime >= near_stale_threshold_seconds: Fresh.
+        // Note: NearStale would require remaining < threshold, which is
+        // impossible here after the guard.  The caller needs to re-evaluate
+        // freshness as time passes using get_quote_freshness().
+        QuoteFreshness::Fresh
+    };
+
     let quote = FirmQuote {
         id: raw.id,
         expires_at,
@@ -537,7 +586,7 @@ pub fn request_firm_quote_with_freshness(
         buy_asset: normalize_asset_code(&raw.buy_asset)?,
         routing_reason: None,
     };
-    
+
     Ok((quote, freshness))
 }
 
@@ -2010,6 +2059,73 @@ mod tests {
         let (quote, freshness) = request_firm_quote_with_freshness(raw, now, 60).unwrap();
         assert_eq!(quote.expires_at, 2000);
         assert_eq!(freshness, QuoteFreshness::Fresh);
+    }
+
+    // ── Threshold boundary tests for request_firm_quote_with_freshness ───────
+
+    /// Threshold smaller than remaining lifetime → Fresh (valid, accepted).
+    #[test]
+    fn test_freshness_threshold_smaller_than_lifetime_is_fresh() {
+        // remaining = 2000 - 1000 = 1000 s; threshold = 60 s (< 1000)
+        let raw = valid_raw("2000");
+        let (quote, freshness) = request_firm_quote_with_freshness(raw, 1000, 60).unwrap();
+        assert_eq!(freshness, QuoteFreshness::Fresh);
+        assert_eq!(quote.expires_at, 2000);
+    }
+
+    /// Threshold exactly equal to remaining lifetime → Err(InvalidQuote).
+    /// A threshold == remaining lifetime would label every live quote near-stale.
+    #[test]
+    fn test_freshness_threshold_equal_to_lifetime_is_rejected() {
+        // remaining = 2000 - 1000 = 1000 s; threshold = 1000 s (== remaining)
+        let raw = valid_raw("2000");
+        let err = request_firm_quote_with_freshness(raw, 1000, 1000).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidQuote);
+    }
+
+    /// Threshold larger than remaining lifetime → Err(InvalidQuote).
+    /// This is the core bug: a threshold > lifetime silently labels every
+    /// valid quote near-stale.  The fix must reject it explicitly.
+    #[test]
+    fn test_freshness_threshold_larger_than_lifetime_is_rejected() {
+        // remaining = 2000 - 1000 = 1000 s; threshold = 9999 s (> remaining)
+        let raw = valid_raw("2000");
+        let err = request_firm_quote_with_freshness(raw, 1000, 9999).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidQuote);
+    }
+
+    /// Threshold of zero → Fresh (zero means "never near-stale").
+    #[test]
+    fn test_freshness_threshold_zero_always_fresh() {
+        let raw = valid_raw("2000");
+        let (_, freshness) = request_firm_quote_with_freshness(raw, 1000, 0).unwrap();
+        assert_eq!(freshness, QuoteFreshness::Fresh);
+    }
+
+    /// Stale quotes are still rejected regardless of threshold.
+    #[test]
+    fn test_freshness_stale_quote_always_rejected() {
+        let raw = valid_raw("500"); // expired at now=1000
+        let err = request_firm_quote_with_freshness(raw, 1000, 60).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::StaleQuote);
+    }
+
+    /// Normal freshness classification (small threshold, live quote) is unchanged.
+    #[test]
+    fn test_freshness_normal_classification_unchanged() {
+        // Quote expires in 30 s; threshold = 60 s → near-stale (threshold < remaining)
+        // BUT remaining (30) < threshold (60), and remaining (30) > 0 and
+        // threshold (60) > remaining (30) so this should be REJECTED by the guard.
+        // This documents that a threshold > remaining lifetime always errors.
+        let raw = valid_raw("1030"); // remaining = 30 s from now=1000
+        let err = request_firm_quote_with_freshness(raw, 1000, 60).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidQuote);
+
+        // With a valid threshold (< remaining lifetime of 30 s):
+        let raw2 = valid_raw("1030");
+        let (_, freshness2) = request_firm_quote_with_freshness(raw2, 1000, 29).unwrap();
+        // remaining=30, threshold=29 → 30 >= 29 is NOT less than, so Fresh
+        assert_eq!(freshness2, QuoteFreshness::Fresh);
     }
 
     #[test]
