@@ -474,3 +474,6 @@ MIT
 
 <!-- handsoff-issue-1114 -->
 - #1114: 68. Correct even-sample p50
+
+<!-- handsoff-issue-1115 -->
+- #1115: 69. Parse SEP-10 algorithm exactly
