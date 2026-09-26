@@ -474,3 +474,6 @@ MIT
 
 <!-- handsoff-issue-1106 -->
 - #1106: 60. Reject zero streaming intervals
+
+<!-- handsoff-issue-1107 -->
+- #1107: 61. Prevent streaming cycle wrap
