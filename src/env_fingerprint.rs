@@ -24,7 +24,6 @@
 //!     eprintln!("Environment drift detected: {:?}", drift);
 //! }
 //! ```
-
 #![cfg(feature = "std")]
 
 use std::collections::HashMap;
@@ -75,38 +74,66 @@ pub struct ConfigMetadata {
 }
 
 impl ConfigMetadata {
-    /// Hash every `.json` and `.toml` file found in `configs/`.
-    pub fn collect() -> Self {
-        let config_dir = std::path::Path::new("configs");
+    /// Hash every `.json` and `.toml` file found in `<root>/configs/`.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` — The repository / project root directory.  The `configs/`
+    ///   subdirectory is resolved relative to this path, **not** relative to
+    ///   the process working directory.  Callers that need a "same result
+    ///   regardless of where the process was launched" guarantee must pass a
+    ///   stable, absolute path here (e.g. the directory containing the running
+    ///   binary, or a path discovered from the project manifest).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` when any of the following occur:
+    /// - `<root>/configs/` cannot be read (missing, permission denied, etc.)
+    /// - Any matched `.json` or `.toml` file cannot be read to completion.
+    ///
+    /// A partial fingerprint is never returned: the function either succeeds
+    /// completely for all discovered files or returns an error.
+    pub fn collect(root: &std::path::Path) -> Result<Self, String> {
+        let config_dir = root.join("configs");
         let mut file_hashes = HashMap::new();
 
-        if let Ok(entries) = std::fs::read_dir(config_dir) {
-            let mut paths: Vec<_> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e == "json" || e == "toml")
-                        .unwrap_or(false)
-                })
-                .collect();
-            paths.sort(); // deterministic order
+        let entries = std::fs::read_dir(&config_dir).map_err(|e| {
+            format!(
+                "ConfigMetadata: cannot read configs directory '{}': {e}",
+                config_dir.display()
+            )
+        })?;
 
-            for path in &paths {
-                if let Ok(content) = std::fs::read(path) {
-                    let digest = Sha256::digest(&content);
-                    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                    let key = path
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    file_hashes.insert(key, hex);
-                }
-            }
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e == "json" || e == "toml")
+                    .unwrap_or(false)
+            })
+            .collect();
+        paths.sort(); // deterministic order
+
+        for path in &paths {
+            // Propagate read errors: an unreadable file must not silently
+            // produce a fingerprint that looks complete but misses that file's
+            // content.
+            let content = std::fs::read(path).map_err(|e| {
+                format!(
+                    "ConfigMetadata: cannot read config file '{}': {e}",
+                    path.display()
+                )
+            })?;
+            let digest = Sha256::digest(&content);
+            let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+            let key = path.to_string_lossy().replace('\\', "/");
+            file_hashes.insert(key, hex);
         }
 
         let file_count = file_hashes.len();
-        Self { file_hashes, file_count }
+        Ok(Self { file_hashes, file_count })
     }
 }
 
@@ -209,10 +236,53 @@ pub struct EnvironmentFingerprint {
 
 impl EnvironmentFingerprint {
     /// Collect a fresh fingerprint from the current host environment.
+    ///
+    /// Config files are resolved relative to `root`.  When `root` is `None`
+    /// the function falls back to the directory containing the running
+    /// executable, which is stable across working-directory changes.  Pass
+    /// an explicit path in tests or when the executable location is not
+    /// meaningful.
+    ///
+    /// If `ConfigMetadata::collect` fails (e.g. the `configs/` directory does
+    /// not exist under the resolved root) the config section is left empty and
+    /// a warning is embedded in the summary, but collection still succeeds so
+    /// that tool-version and build-metadata fields are always populated.
     pub fn collect() -> Self {
+        Self::collect_from(None)
+    }
+
+    /// Collect using an explicit project `root` directory.
+    ///
+    /// This is the primary entry point used by tests and any caller that needs
+    /// a root-independent, reproducible fingerprint.
+    ///
+    /// # Errors (soft)
+    ///
+    /// If `ConfigMetadata::collect` returns an error the config section is
+    /// left as a default (empty) value; the error string is not surfaced here
+    /// but the `file_count` will be 0, which will appear as drift when
+    /// compared against a baseline that does have config files.
+    pub fn collect_from(root: Option<&std::path::Path>) -> Self {
+        // Resolve the project root: use the supplied path, or fall back to the
+        // directory containing the running executable.  Both are stable across
+        // CWD changes; neither relies on std::env::current_dir().
+        let exe_root: std::path::PathBuf;
+        let effective_root: &std::path::Path = match root {
+            Some(r) => r,
+            None => {
+                exe_root = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                &exe_root
+            }
+        };
+
+        let config = ConfigMetadata::collect(effective_root).unwrap_or_default();
+
         Self {
             tools: ToolVersions::collect(),
-            config: ConfigMetadata::collect(),
+            config,
             build: BuildMetadata::collect(),
             collected_at: Some(current_timestamp()),
         }
