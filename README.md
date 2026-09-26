@@ -471,3 +471,6 @@ MIT
 
 <!-- handsoff-issue-1109 -->
 - #1109: 63. Preserve separated streaming transitions
+
+<!-- handsoff-issue-1110 -->
+- #1110: 64. Clarify streaming retry counters
