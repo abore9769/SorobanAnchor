@@ -466,3 +466,8 @@ The release bundle includes:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1100 -->
+- #1100: 54. Validate rollback dependencies
