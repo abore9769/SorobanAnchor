@@ -40,6 +40,12 @@ let result = ServiceManager::disable_service(&env, &anchor, SERVICE_DEPOSITS);
 assert!(result); // true if service was disabled, false if already disabled
 ```
 
+Disabling a service first runs the existing dependent check
+(`assert_no_active_dependents`). If the service is a prerequisite for other
+services that are still enabled, the call fails and the service remains
+enabled, so active dependents are never orphaned. Independent services and
+already-disabled services are unaffected and keep their current behavior.
+
 ### Check Service Status
 
 ```rust
@@ -325,42 +331,4 @@ AdminAuditLog::log_change(
 2. Check that the anchor address is correct
 3. Verify storage is not full
 
-### Rollback Not Working
-
-**Problem**: Rollback to snapshot fails.
-
-**Solutions**:
-1. Verify snapshot exists: `ServiceManager::get_snapshot(&env, snapshot_id)`
-2. Check snapshot ID is correct
-3. Ensure snapshot was created for the correct anchor
-
-### Snapshot Not Found
-
-**Problem**: `get_snapshot()` returns `None`.
-
-**Solutions**:
-1. Verify snapshot ID is correct
-2. Check snapshot count: `ServiceManager::get_snapshot_count(&env)`
-3. Ensure snapshot was created before querying
-
-## Testing
-
-The service management system includes comprehensive tests:
-
-```bash
-# Run all service management tests
-cargo test service_management_tests
-
-# Run specific test
-cargo test service_management_tests::service_can_be_enabled
-
-# Run with output
-cargo test service_management_tests -- --nocapture
-```
-
-## References
-
-- [Service Management API](../src/service_management.rs)
-- [Service Management Tests](../tests/service_management_tests.rs)
-- [Admin Audit Log](./admin-audit-log.md)
-- [Governance and Security](./governance-and-security.md)
+### Rollback N
