@@ -11,6 +11,8 @@
 
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod cache_invalidation_hook_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
@@ -19,6 +21,10 @@ mod cache_invalidation_hook_tests {
     use anchorkit::contract::{
         AnchorKitContract, AnchorKitContractClient, AnchorMetadata, MetadataCacheState,
     };
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    use crate::sep10_test_util::register_attestor_with_sep10;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -62,6 +68,11 @@ mod cache_invalidation_hook_tests {
             average_settlement_time: 60,
             is_active: true,
         }
+    }
+
+    fn register_attestor(env: &Env, client: &AnchorKitContractClient, attestor: &Address) {
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(env, client, attestor, attestor, &sk);
     }
 
     // -----------------------------------------------------------------------
@@ -122,7 +133,7 @@ mod cache_invalidation_hook_tests {
     #[test]
     fn enable_service_invalidates_cache_when_state_changes() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
+        let (admin, client) = setup(&env);
         let anchor = Address::generate(&env);
 
         set_ledger(&env, 1000);
@@ -132,7 +143,7 @@ mod cache_invalidation_hook_tests {
         assert!(client.get_cache_diagnostics(&anchor).capabilities_cached);
 
         // Enable a service — should invalidate the capabilities cache
-        client.enable_service(&anchor, &1u32); // SERVICE_DEPOSITS = 1
+        client.enable_service(&admin, &anchor, &1u32); // SERVICE_DEPOSITS = 1
 
         assert!(
             !client.get_cache_diagnostics(&anchor).capabilities_cached,
@@ -143,12 +154,12 @@ mod cache_invalidation_hook_tests {
     #[test]
     fn enable_service_already_enabled_does_not_invalidate() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
+        let (admin, client) = setup(&env);
         let anchor = Address::generate(&env);
 
         set_ledger(&env, 1000);
         // Enable the service first so the next call is a no-op
-        client.enable_service(&anchor, &1u32);
+        client.enable_service(&admin, &anchor, &1u32);
 
         let toml_url = soroban_sdk::String::from_str(&env, "https://anchor.example.com/.well-known/stellar.toml");
         let caps     = soroban_sdk::String::from_str(&env, "SEP6");
@@ -156,7 +167,7 @@ mod cache_invalidation_hook_tests {
         assert!(client.get_cache_diagnostics(&anchor).capabilities_cached);
 
         // Second enable is a no-op — cache must remain intact
-        let changed = client.enable_service(&anchor, &1u32);
+        let changed = client.enable_service(&admin, &anchor, &1u32);
         assert!(!changed, "already enabled service should return false");
         assert!(
             client.get_cache_diagnostics(&anchor).capabilities_cached,
@@ -171,11 +182,11 @@ mod cache_invalidation_hook_tests {
     #[test]
     fn disable_service_invalidates_cache_when_state_changes() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
+        let (admin, client) = setup(&env);
         let anchor = Address::generate(&env);
 
         set_ledger(&env, 1000);
-        client.enable_service(&anchor, &1u32); // enable first
+        client.enable_service(&admin, &anchor, &1u32); // enable first
 
         let toml_url = soroban_sdk::String::from_str(&env, "https://anchor.example.com/.well-known/stellar.toml");
         let caps     = soroban_sdk::String::from_str(&env, "SEP6");
@@ -183,7 +194,7 @@ mod cache_invalidation_hook_tests {
         assert!(client.get_cache_diagnostics(&anchor).capabilities_cached);
 
         // Disabling should fire the hook
-        client.disable_service(&anchor, &1u32);
+        client.disable_service(&admin, &anchor, &1u32);
 
         assert!(
             !client.get_cache_diagnostics(&anchor).capabilities_cached,
@@ -194,7 +205,7 @@ mod cache_invalidation_hook_tests {
     #[test]
     fn disable_service_already_disabled_does_not_invalidate() {
         let env = make_env();
-        let (_admin, client) = setup(&env);
+        let (admin, client) = setup(&env);
         let anchor = Address::generate(&env);
 
         set_ledger(&env, 1000);
@@ -204,7 +215,7 @@ mod cache_invalidation_hook_tests {
         client.cache_capabilities(&anchor, &toml_url, &caps, &3600u64);
         assert!(client.get_cache_diagnostics(&anchor).capabilities_cached);
 
-        let changed = client.disable_service(&anchor, &1u32);
+        let changed = client.disable_service(&admin, &anchor, &1u32);
         // Service was never enabled, but disable inserts it into disabled list on
         // a fresh state — it always registers the first time, so just verify the
         // return value makes sense and the function did not panic.
@@ -293,10 +304,9 @@ mod cache_invalidation_hook_tests {
         let endorser2 = Address::generate(&env);
 
         // Register attestors so propose/endorse contract entry points accept them
-        let pk = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
-        client.register_attestor(&proposer,  &pk);
-        client.register_attestor(&endorser1, &pk);
-        client.register_attestor(&endorser2, &pk);
+        register_attestor(&env, &client, &proposer);
+        register_attestor(&env, &client, &endorser1);
+        register_attestor(&env, &client, &endorser2);
 
         let pid = client.propose_cache_invalidation(&proposer, &anchor);
         client.endorse_cache_invalidation(&endorser1, &pid);
@@ -314,6 +324,51 @@ mod cache_invalidation_hook_tests {
     // -----------------------------------------------------------------------
     // Cache count is decremented correctly after invalidation
     // -----------------------------------------------------------------------
+
+    /// Governance execution must clear both cache slots AND decrement the
+    /// instance-level cache count (a plain slot removal would leave the count
+    /// stale). Successful execution changes proposal state and cache state
+    /// atomically from the caller's perspective.
+    #[test]
+    fn governance_invalidation_decrements_cache_count() {
+        let env = make_env();
+        let (_admin, client) = setup(&env);
+
+        set_ledger(&env, 1000);
+        let anchor = Address::generate(&env);
+
+        // Seed both cache slots.
+        let meta = sample_metadata(&env, &anchor);
+        client.cache_metadata(&anchor, &meta, &3600u64);
+        let toml_url = soroban_sdk::String::from_str(&env, "https://anchor.example.com/.well-known/stellar.toml");
+        let caps     = soroban_sdk::String::from_str(&env, "SEP6,SEP24");
+        client.cache_capabilities(&anchor, &toml_url, &caps, &3600u64);
+        assert_eq!(client.get_cache_count(), 2);
+
+        client.set_cache_quorum_threshold(&3u32);
+
+        let proposer  = Address::generate(&env);
+        let endorser1 = Address::generate(&env);
+        let endorser2 = Address::generate(&env);
+        register_attestor(&env, &client, &proposer);
+        register_attestor(&env, &client, &endorser1);
+        register_attestor(&env, &client, &endorser2);
+
+        let pid = client.propose_cache_invalidation(&proposer, &anchor);
+        client.endorse_cache_invalidation(&endorser1, &pid);
+        client.endorse_cache_invalidation(&endorser2, &pid);
+
+        client.execute_cache_invalidation(&pid);
+
+        let diag = client.get_cache_diagnostics(&anchor);
+        assert!(!diag.metadata_cached,     "metadata must be cleared by governance execution");
+        assert!(!diag.capabilities_cached, "capabilities must be cleared by governance execution");
+        assert_eq!(
+            client.get_cache_count(),
+            0,
+            "cache count must be decremented after governance execution"
+        );
+    }
 
     #[test]
     fn cache_count_decremented_correctly_after_invalidation() {

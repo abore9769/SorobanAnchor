@@ -6626,6 +6626,7 @@ impl AnchorKitContract {
         caller.require_auth();
         Self::check_attestor(&env, &caller);
         crate::cache_governance::propose(&env, &caller, &anchor)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::CacheCapacityExceeded))
     }
 
     /// Endorse an existing cache invalidation proposal (registered attestors only).
@@ -6642,10 +6643,7 @@ impl AnchorKitContract {
     pub fn execute_cache_invalidation(env: Env, proposal_id: u64) {
         let anchor = crate::cache_governance::execute(&env, proposal_id)
             .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
-        let cap_key = (symbol_short!("CAPCACHE"), anchor.clone());
-        env.storage().temporary().remove(&cap_key);
-        let meta_key = (symbol_short!("METACACHE"), anchor);
-        env.storage().temporary().remove(&meta_key);
+        Self::invalidate_cache_internal(&env, &anchor);
     }
 
     /// Get a cache invalidation proposal by ID.
@@ -6662,7 +6660,8 @@ impl AnchorKitContract {
         Self::require_admin(&env);
         let mut cfg = crate::cache_governance::get_config(&env);
         cfg.quorum_threshold = n;
-        crate::cache_governance::set_config(&env, cfg);
+        crate::cache_governance::set_config(&env, cfg)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
     }
 
     /// Set proposal expiry in ledgers (admin only).
@@ -6670,7 +6669,8 @@ impl AnchorKitContract {
         Self::require_admin(&env);
         let mut cfg = crate::cache_governance::get_config(&env);
         cfg.proposal_expiry_ledgers = ledgers;
-        crate::cache_governance::set_config(&env, cfg);
+        crate::cache_governance::set_config(&env, cfg)
+            .unwrap_or_else(|_| panic_with_error!(&env, ErrorCode::ValidationError));
     }
 
 
