@@ -18,7 +18,7 @@ use anchorkit::multi_asset_routing::{
     normalize_asset_code, pair_key, select_best,
     AssetPairRequest, CandidateQuote, MultiAssetRoutingResult,
 };
-use anchorkit::errors::Error;
+use anchorkit::errors::ErrorCode as Error;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -157,21 +157,21 @@ fn make_candidates() -> Vec<CandidateQuote> {
 #[test]
 fn test_select_best_lowest_fee() {
     let candidates = make_candidates();
-    let best = select_best(&candidates, "LowestFee", 1.0, 0.0, 0.0).unwrap();
+    let best = select_best(&candidates, "LowestFee", 1.0, 0.0, 0.0).unwrap().unwrap();
     assert_eq!(best.anchor, "anchor-b"); // fee 20
 }
 
 #[test]
 fn test_select_best_fastest_settlement() {
     let candidates = make_candidates();
-    let best = select_best(&candidates, "FastestSettlement", 0.0, 1.0, 0.0).unwrap();
+    let best = select_best(&candidates, "FastestSettlement", 0.0, 1.0, 0.0).unwrap().unwrap();
     assert_eq!(best.anchor, "anchor-c"); // settlement_time 30
 }
 
 #[test]
 fn test_select_best_highest_reputation() {
     let candidates = make_candidates();
-    let best = select_best(&candidates, "HighestReputation", 0.0, 0.0, 1.0).unwrap();
+    let best = select_best(&candidates, "HighestReputation", 0.0, 0.0, 1.0).unwrap().unwrap();
     assert_eq!(best.anchor, "anchor-b"); // reputation 90
 }
 
@@ -179,21 +179,21 @@ fn test_select_best_highest_reputation() {
 fn test_select_best_weighted_score() {
     let candidates = make_candidates();
     // Equal weights — anchor-b has best fee + reputation, anchor-c best speed
-    let best = select_best(&candidates, "WeightedScore", 0.333, 0.333, 0.334);
+    let best = select_best(&candidates, "WeightedScore", 0.333, 0.333, 0.334).unwrap();
     assert!(best.is_some());
 }
 
 #[test]
-fn test_select_best_unknown_strategy_falls_back_to_lowest_fee() {
+fn test_select_best_unknown_strategy_is_rejected() {
     let candidates = make_candidates();
-    let best = select_best(&candidates, "UndefinedStrategy", 0.5, 0.25, 0.25).unwrap();
-    assert_eq!(best.anchor, "anchor-b"); // lowest fee is the fallback
+    let result = select_best(&candidates, "UndefinedStrategy", 0.5, 0.25, 0.25);
+    assert_eq!(result.err(), Some(Error::ValidationError)); // no silent LowestFee fallback
 }
 
 #[test]
 fn test_select_best_empty_candidates_returns_none() {
     let result = select_best(&[], "LowestFee", 1.0, 0.0, 0.0);
-    assert!(result.is_none());
+    assert!(result.unwrap().is_none());
 }
 
 // ── route_multi_asset — routing engine integration tests ──────────────────────
@@ -535,7 +535,7 @@ fn test_route_only_self_route_produces_unfilled() {
     let quotes = vec![
         make_quote(1, "anchor-self", "USDC", "USDC", 0, 1_000_000, 100, 1, 1, 0, NOW + 3600),
     ];
-    let requests = vec![req("USDC", "USDC_COPY", 100, "LowestFee")];
+    let requests = vec![req("USDC", "EURC", 100, "LowestFee")];
     let result = route_multi_asset(&requests, &quotes, NOW).unwrap();
 
     assert_eq!(result.filled.len(), 0);

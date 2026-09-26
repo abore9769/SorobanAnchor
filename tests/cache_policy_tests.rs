@@ -265,6 +265,20 @@ fn test_enforce_read_policy_expired_entry() {
     });
 }
 
+/// Zero TTL is rejected outright so it can never be classified as both expired
+/// and refresh-needed for the policy's entry type.
+#[test]
+#[should_panic]
+fn test_enforce_read_policy_rejects_zero_ttl() {
+    let env = make_env();
+    let cid = env.register_contract(None, AnchorKitContract);
+    set_ledger(&env, 1, 1000);
+
+    env.as_contract(&cid, || {
+        let _ = enforce_read_policy(&env, CacheEntryType::Metadata, 0, 0);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // enforce_invalidation_policy
 // ---------------------------------------------------------------------------

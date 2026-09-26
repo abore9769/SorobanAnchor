@@ -184,10 +184,10 @@ pub enum ErrorCode {
     /// retrieval and audit ordering. The write is rejected (fail closed).
     AuditLogCapacityExceeded  = 80,
 
-    // Registration input errors (81)
-    /// Registration was rejected because a required text field is blank
-    /// (e.g. the SEP-10 token supplied to `register_attestor` is empty).
+    // Registration errors (81)
+    /// A registration request was rejected because a required text field is blank.
     InvalidRegistration       = 81,
+
 }
 
 impl ErrorCode {
@@ -274,8 +274,7 @@ impl ErrorCode {
             ErrorCode::SloNotConfigured          => "No SLO has been configured for this anchor",
             ErrorCode::InvalidRetirementTransition => "Invalid retirement transition for current state",
             ErrorCode::FingerprintCollectionFailed => "Environment fingerprint collection failed",
-            ErrorCode::AuditLogCapacityExceeded  => "Audit-log record ID counter exhausted",
-            ErrorCode::InvalidRegistration       => "Registration rejected: a required text field is blank",
+            ErrorCode::AuditLogCapacityExceeded  => "Audit log record ID space exhausted; cannot allocate another unique record ID",
         }
     }
 }
@@ -775,7 +774,7 @@ mod tests {
         assert_eq!(ErrorCode::BatchSizeExceeded     as u32, 62);
         assert_eq!(ErrorCode::InvalidRetirementTransition as u32, 65);
         assert_eq!(ErrorCode::FingerprintCollectionFailed as u32, 66);
-        assert_eq!(ErrorCode::InvalidRegistration as u32, 81);
+        assert_eq!(ErrorCode::AuditLogCapacityExceeded as u32, 80);
     }
 
     #[test]

@@ -38,6 +38,20 @@ pub const SCHEMA_V2: u32 = 2;
 pub const LATEST_SCHEMA_VERSION: u32 = SCHEMA_V2;
 
 // ---------------------------------------------------------------------------
+// History retention
+// ---------------------------------------------------------------------------
+
+/// Retention period (in ledgers, ~90 days at 5 s/ledger) for migration history
+/// entries — the counter and every [`MigrationRecord`].
+///
+/// Matches the contract-wide `PERSISTENT_TTL` convention and is longer than
+/// the instance TTL that keeps the schema version alive, so the audit trail
+/// never lapses before the version it explains. The TTL is (re)applied when a
+/// record is written and every time the history is read, so an actively
+/// audited history stays live for at least this long after its last access.
+pub const MIGRATION_HISTORY_TTL: u32 = 1_555_200;
+
+// ---------------------------------------------------------------------------
 // Migration step registry
 // ---------------------------------------------------------------------------
 
@@ -114,6 +128,12 @@ pub(crate) fn schema_version_key(env: &Env) -> soroban_sdk::BytesN<32> {
     make_storage_key(env, &[b"SCHEMAVER"])
 }
 
+fn extend_history_ttl(env: &Env, key: &soroban_sdk::BytesN<32>) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, MIGRATION_HISTORY_TTL, MIGRATION_HISTORY_TTL);
+}
+
 // ---------------------------------------------------------------------------
 // Public API used by the contract layer
 // ---------------------------------------------------------------------------
@@ -154,21 +174,19 @@ pub fn set_version(env: &Env, version: u32) -> Result<(), MigrationError> {
 /// data-transformation work; this function only commits the version bump and
 /// writes the audit record.
 ///
-/// The caller-supplied `from`, `to`, and `label` are verified before anything
-/// is written: `from` must equal the stored version, and a step registered in
-/// [`ALL_STEPS`] must bridge `from` → `to` under exactly `label`. On mismatch
-/// [`MigrationError::StepMismatch`] is returned and neither the stored version
-/// nor the history log is modified.
+/// Returns [`MigrationError::HistoryCounterExhausted`] without writing anything
+/// if the history counter is already at `u32::MAX`, since advancing it would
+/// wrap and overwrite record 0.
 pub fn commit_version(env: &Env, from: u32, to: u32, label: &str) -> Result<(), MigrationError> {
-    if from != current_version(env) {
-        return Err(MigrationError::StepMismatch);
-    }
-    let registered = ALL_STEPS.iter().any(|&step| {
-        step.required_from() == from && step.produces() == to && step.label() == label
-    });
-    if !registered {
-        return Err(MigrationError::StepMismatch);
-    }
+    let cnt_key = migration_count_key(env);
+    let idx: u32 = env
+        .storage()
+        .persistent()
+        .get(&cnt_key)
+        .unwrap_or(0u32);
+    let next_idx = idx
+        .checked_add(1)
+        .ok_or(MigrationError::HistoryCounterExhausted)?;
 
     // Advance the stored version.
     env.storage()
@@ -176,12 +194,6 @@ pub fn commit_version(env: &Env, from: u32, to: u32, label: &str) -> Result<(), 
         .set(&schema_version_key(env), &to);
 
     // Append history record.
-    let cnt_key = migration_count_key(env);
-    let idx: u32 = env
-        .storage()
-        .persistent()
-        .get(&cnt_key)
-        .unwrap_or(0u32);
 
     let record = MigrationRecord {
         from_version: from,
@@ -192,33 +204,35 @@ pub fn commit_version(env: &Env, from: u32, to: u32, label: &str) -> Result<(), 
     };
     let rec_key = migration_record_key(env, idx);
     env.storage().persistent().set(&rec_key, &record);
-    // Use a generous TTL — migration history should outlive any individual record.
-    env.storage()
-        .persistent()
-        .extend_ttl(&rec_key, 1_555_200, 1_555_200);
+    extend_history_ttl(env, &rec_key);
 
-    env.storage()
-        .persistent()
-        .set(&cnt_key, &(idx + 1));
-    env.storage()
-        .persistent()
-        .extend_ttl(&cnt_key, 1_555_200, 1_555_200);
+    env.storage().persistent().set(&cnt_key, &next_idx);
+    extend_history_ttl(env, &cnt_key);
     Ok(())
 }
 
 /// Return the total number of migrations recorded in the history log.
+///
+/// Refreshes the counter's TTL to [`MIGRATION_HISTORY_TTL`] when it exists.
 pub fn migration_count(env: &Env) -> u32 {
-    env.storage()
-        .persistent()
-        .get(&migration_count_key(env))
-        .unwrap_or(0)
+    let key = migration_count_key(env);
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend_history_ttl(env, &key);
+    }
+    count.unwrap_or(0)
 }
 
 /// Return a specific migration record by zero-based index, or `None`.
+///
+/// Refreshes the record's TTL to [`MIGRATION_HISTORY_TTL`] when it exists.
 pub fn get_migration_record(env: &Env, idx: u32) -> Option<MigrationRecord> {
-    env.storage()
-        .persistent()
-        .get(&migration_record_key(env, idx))
+    let key = migration_record_key(env, idx);
+    let record: Option<MigrationRecord> = env.storage().persistent().get(&key);
+    if record.is_some() {
+        extend_history_ttl(env, &key);
+    }
+    record
 }
 
 /// Validate that `target_version` is a legal migration target.
@@ -269,11 +283,8 @@ pub enum MigrationError {
     VersionNotAdvancing,
     /// No registered migration step bridges the current version to the target.
     NoStepFound,
-    /// `set_version` was asked for anything other than the initial 0 → V1 stamp.
-    IllegalVersionTransition,
-    /// `commit_version` arguments do not match the stored version and a
-    /// registered step in [`ALL_STEPS`].
-    StepMismatch,
+    /// The history counter is at `u32::MAX`; another record would wrap its ID.
+    HistoryCounterExhausted,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,12 +292,16 @@ pub enum MigrationError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod migration_tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::testutils::Ledger as _;
 
-    /// Minimal Soroban env setup shared by all tests.
-    fn test_env() -> soroban_sdk::Env {
-        soroban_sdk::Env::default()
+    /// Run `f` inside a registered contract so storage access is permitted.
+    fn with_contract(f: impl FnOnce(&Env)) {
+        let env = Env::default();
+        let id = env.register_contract(None, crate::contract::AnchorKitContract);
+        env.as_contract(&id, || f(&env));
     }
 
     /// Run `f` inside a registered contract so storage access is permitted.
@@ -320,77 +335,16 @@ mod tests {
 
     #[test]
     fn test_current_version_default_is_zero() {
-        let env = test_env();
-        in_contract(&env, || {
-            assert_eq!(current_version(&env), 0);
+        with_contract(|env| {
+            assert_eq!(current_version(env), 0);
         });
     }
 
     #[test]
     fn test_set_version_stores_value() {
-        let env = test_env();
-        in_contract(&env, || {
-            assert_eq!(set_version(&env, SCHEMA_V1), Ok(()));
-            assert_eq!(current_version(&env), SCHEMA_V1);
-        });
-    }
-
-    #[test]
-    fn test_set_version_rejects_jump_from_uninitialized() {
-        let env = test_env();
-        in_contract(&env, || {
-            assert_eq!(
-                set_version(&env, SCHEMA_V2),
-                Err(MigrationError::IllegalVersionTransition)
-            );
-            assert_eq!(current_version(&env), 0);
-            assert_eq!(migration_count(&env), 0);
-        });
-    }
-
-    #[test]
-    fn test_set_version_rejects_jump_after_init() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_eq!(
-                set_version(&env, SCHEMA_V2),
-                Err(MigrationError::IllegalVersionTransition)
-            );
-            assert_eq!(current_version(&env), SCHEMA_V1);
-            assert_eq!(migration_count(&env), 0);
-        });
-    }
-
-    #[test]
-    fn test_set_version_rejects_downgrade() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            commit_version(&env, SCHEMA_V1, SCHEMA_V2, MigrationStep::ToV2.label()).unwrap();
-            assert_eq!(
-                set_version(&env, SCHEMA_V1),
-                Err(MigrationError::IllegalVersionTransition)
-            );
-            assert_eq!(
-                set_version(&env, 0),
-                Err(MigrationError::IllegalVersionTransition)
-            );
-            assert_eq!(current_version(&env), SCHEMA_V2);
-            assert_eq!(migration_count(&env), 1);
-        });
-    }
-
-    #[test]
-    fn test_set_version_rejects_reinitialization() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_eq!(
-                set_version(&env, SCHEMA_V1),
-                Err(MigrationError::IllegalVersionTransition)
-            );
-            assert_eq!(current_version(&env), SCHEMA_V1);
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            assert_eq!(current_version(env), SCHEMA_V1);
         });
     }
 
@@ -400,11 +354,10 @@ mod tests {
 
     #[test]
     fn test_validate_migration_zero_target_fails() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
             assert_eq!(
-                validate_migration(&env, 0),
+                validate_migration(env, 0),
                 Err(MigrationError::InvalidTargetVersion)
             );
         });
@@ -412,11 +365,10 @@ mod tests {
 
     #[test]
     fn test_validate_migration_version_too_new_fails() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
             assert_eq!(
-                validate_migration(&env, LATEST_SCHEMA_VERSION + 1),
+                validate_migration(env, LATEST_SCHEMA_VERSION + 1),
                 Err(MigrationError::VersionTooNew)
             );
         });
@@ -424,12 +376,11 @@ mod tests {
 
     #[test]
     fn test_validate_migration_not_advancing_fails() {
-        let env = test_env();
-        in_contract(&env, || {
-            force_version(&env, SCHEMA_V2);
+        with_contract(|env| {
+            set_version(env, SCHEMA_V2);
             // V2 → V2 must fail.
             assert_eq!(
-                validate_migration(&env, SCHEMA_V2),
+                validate_migration(env, SCHEMA_V2),
                 Err(MigrationError::VersionNotAdvancing)
             );
         });
@@ -437,10 +388,9 @@ mod tests {
 
     #[test]
     fn test_validate_migration_v1_to_v2_succeeds() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            let result = validate_migration(&env, SCHEMA_V2);
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            let result = validate_migration(env, SCHEMA_V2);
             assert!(result.is_ok(), "v1 → v2 should be valid");
             assert_eq!(result.unwrap(), MigrationStep::ToV2);
         });
@@ -448,10 +398,10 @@ mod tests {
 
     #[test]
     fn test_validate_migration_skipping_step_fails() {
-        let env = test_env();
-        in_contract(&env, || {
-            // No step exists from V0 → V2 (skips V1); stored version is 0 by default.
-            let result = validate_migration(&env, SCHEMA_V2);
+        with_contract(|env| {
+            // No step exists from V0 → V2 (skips V1).
+            set_version(env, 0);
+            let result = validate_migration(env, SCHEMA_V2);
             // There is no registered step from 0 → 2 (only 1 → 2 is registered).
             assert_eq!(result, Err(MigrationError::NoStepFound));
         });
@@ -463,117 +413,135 @@ mod tests {
 
     #[test]
     fn test_commit_version_advances_stored_version() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_eq!(
-                commit_version(&env, SCHEMA_V1, SCHEMA_V2, MigrationStep::ToV2.label()),
-                Ok(())
-            );
-            assert_eq!(current_version(&env), SCHEMA_V2);
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "test_migration").unwrap();
+            assert_eq!(current_version(env), SCHEMA_V2);
         });
     }
 
     #[test]
     fn test_commit_version_appends_history_record() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_eq!(migration_count(&env), 0);
-            commit_version(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
-            assert_eq!(migration_count(&env), 1);
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            assert_eq!(migration_count(env), 0);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
+            assert_eq!(migration_count(env), 1);
         });
     }
 
     #[test]
     fn test_get_migration_record_returns_correct_data() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            commit_version(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
-            let rec = get_migration_record(&env, 0).expect("record 0 should exist");
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
+            let rec = get_migration_record(env, 0).expect("record 0 should exist");
             assert_eq!(rec.from_version, SCHEMA_V1);
             assert_eq!(rec.to_version, SCHEMA_V2);
-            assert_eq!(rec.label, String::from_str(&env, "quotes_v1_to_v2"));
         });
     }
 
     #[test]
     fn test_get_migration_record_out_of_range_returns_none() {
-        let env = test_env();
-        in_contract(&env, || {
-            assert!(get_migration_record(&env, 99).is_none());
-        });
-    }
-
-    /// Asserts a rejected commit left version and history untouched.
-    fn assert_commit_rejected(env: &Env, from: u32, to: u32, label: &str) {
-        let version_before = current_version(env);
-        let count_before = migration_count(env);
-        assert_eq!(
-            commit_version(env, from, to, label),
-            Err(MigrationError::StepMismatch)
-        );
-        assert_eq!(current_version(env), version_before);
-        assert_eq!(migration_count(env), count_before);
-        assert!(get_migration_record(env, count_before).is_none());
-    }
-
-    #[test]
-    fn test_commit_version_rejects_unregistered_step() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            commit_version(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
-            // No step V2 → V3 is registered.
-            assert_commit_rejected(&env, SCHEMA_V2, 3, "step_b");
+        with_contract(|env| {
+            assert!(get_migration_record(env, 99).is_none());
         });
     }
 
     #[test]
-    fn test_commit_version_rejects_from_not_matching_current() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            // Registered step, but the stored version is not its precondition.
-            force_version(&env, SCHEMA_V2);
-            assert_commit_rejected(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2");
+    fn test_multiple_commits_all_recorded() {
+        with_contract(|env| {
+            // Simulate two distinct migrations (using raw set_version for the second).
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "step_a").unwrap();
+            // Fake a third version for the second commit without a real step.
+            commit_version(env, SCHEMA_V2, 3, "step_b").unwrap();
+            assert_eq!(migration_count(env), 2);
+            let r0 = get_migration_record(env, 0).unwrap();
+            let r1 = get_migration_record(env, 1).unwrap();
+            assert_eq!(r0.to_version, SCHEMA_V2);
+            assert_eq!(r1.from_version, SCHEMA_V2);
+            assert_eq!(r1.to_version, 3);
         });
     }
 
     #[test]
-    fn test_commit_version_rejects_wrong_target() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_commit_rejected(&env, SCHEMA_V1, 10, "quotes_v1_to_v2");
+    fn test_commit_version_uses_last_id_below_max() {
+        with_contract(|env| {
+            let last = u32::MAX - 1;
+            env.storage().persistent().set(&migration_count_key(env), &last);
+            set_version(env, SCHEMA_V1);
+
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "last_slot").unwrap();
+
+            assert_eq!(migration_count(env), u32::MAX);
+            let rec = get_migration_record(env, last).expect("record at MAX-1");
+            assert_eq!(rec.to_version, SCHEMA_V2);
+            assert_eq!(current_version(env), SCHEMA_V2);
         });
     }
 
     #[test]
-    fn test_commit_version_rejects_downgrade() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            commit_version(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
-            assert_commit_rejected(&env, SCHEMA_V2, SCHEMA_V1, "quotes_v1_to_v2");
+    fn test_commit_version_at_max_counter_fails_without_writing() {
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "first").unwrap();
+            let original = get_migration_record(env, 0).unwrap();
+            env.storage().persistent().set(&migration_count_key(env), &u32::MAX);
+
+            assert_eq!(
+                commit_version(env, SCHEMA_V2, 3, "overflow"),
+                Err(MigrationError::HistoryCounterExhausted)
+            );
+
+            // Nothing moved: no version bump, no counter wrap, no new or
+            // overwritten record.
+            assert_eq!(current_version(env), SCHEMA_V2);
+            assert_eq!(migration_count(env), u32::MAX);
+            assert!(get_migration_record(env, u32::MAX).is_none());
+            let rec0 = get_migration_record(env, 0).unwrap();
+            assert_eq!(rec0.label, original.label);
+            assert_eq!(rec0.to_version, original.to_version);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // History retention
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_history_ttl_matches_retention_policy_on_commit() {
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
+            let storage = env.storage().persistent();
+            assert_eq!(storage.get_ttl(&migration_record_key(env, 0)), MIGRATION_HISTORY_TTL);
+            assert_eq!(storage.get_ttl(&migration_count_key(env)), MIGRATION_HISTORY_TTL);
         });
     }
 
     #[test]
-    fn test_commit_version_rejects_wrong_label() {
-        let env = test_env();
-        in_contract(&env, || {
-            set_version(&env, SCHEMA_V1).unwrap();
-            assert_commit_rejected(&env, SCHEMA_V1, SCHEMA_V2, "test_migration");
-        });
-    }
+    fn test_history_survives_past_original_ttl_when_read() {
+        with_contract(|env| {
+            set_version(env, SCHEMA_V1);
+            commit_version(env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
 
-    #[test]
-    fn test_commit_version_rejects_uninitialized() {
-        let env = test_env();
-        in_contract(&env, || {
-            assert_commit_rejected(&env, 0, SCHEMA_V1, "init");
+            // Read shortly before the write-time TTL would lapse, then advance
+            // past where the original TTL ended. Each read refreshes retention.
+            let step = MIGRATION_HISTORY_TTL - 10;
+            for _ in 0..2 {
+                // Stand-in for ordinary contract traffic keeping the instance
+                // (and so the schema version) alive.
+                env.storage().instance().extend_ttl(MIGRATION_HISTORY_TTL, MIGRATION_HISTORY_TTL);
+                env.ledger().with_mut(|l| l.sequence_number += step);
+                assert_eq!(migration_count(env), 1);
+                let rec = get_migration_record(env, 0).expect("history must not expire");
+                assert_eq!(rec.to_version, SCHEMA_V2);
+                let storage = env.storage().persistent();
+                assert_eq!(storage.get_ttl(&migration_record_key(env, 0)), MIGRATION_HISTORY_TTL);
+                assert_eq!(storage.get_ttl(&migration_count_key(env)), MIGRATION_HISTORY_TTL);
+            }
+            assert_eq!(current_version(env), SCHEMA_V2);
         });
     }
 

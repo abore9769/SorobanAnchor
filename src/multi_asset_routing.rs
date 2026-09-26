@@ -17,16 +17,17 @@
 // # Asset normalisation
 //
 // Asset codes are normalised to uppercase before comparison so that `usdc`,
-// `USDC`, and `Usdc` all resolve to the same corridor.  Callers that pass
-// mismatched cases receive an `InvalidAssetCode` error so the mismatch is
-// surfaced clearly rather than silently producing no results.
+// `USDC`, and `Usdc` all resolve to the same corridor.  Only ASCII letters are
+// case-folded, so no non-ASCII spelling can alias a valid code.
 //
 // # Invalid combinations
 //
-// `validate_asset_pair_request` returns `InvalidAssetPair` when:
-//   - `base_asset == quote_asset` (circular corridor)
-//   - either asset code is empty or exceeds 12 characters
-//   - `amount == 0`
+// `validate_asset_pair_request` rejects a request when:
+//   - either asset code is empty, exceeds 12 characters, or contains anything
+//     other than ASCII letters and digits (`InvalidAssetCode`)
+//   - `base_asset == quote_asset` (circular corridor, `InvalidAssetPair`)
+//   - `amount == 0` (`InvalidAmount`)
+//   - `strategy` is not one of `ROUTING_STRATEGIES` (`ValidationError`)
 
 extern crate alloc;
 
@@ -90,16 +91,21 @@ pub struct MultiAssetRoutingResult {
 // Validation
 // ---------------------------------------------------------------------------
 
-/// Validate a single `AssetPairRequest`.  Returns `Err(Error::InvalidAssetPair)`
-/// when the request is malformed.
+/// Routing strategy labels accepted by [`select_best`] and
+/// [`validate_asset_pair_request`].
+pub const ROUTING_STRATEGIES: [&str; 4] =
+    ["LowestFee", "FastestSettlement", "HighestReputation", "WeightedScore"];
+
+/// Validate a single `AssetPairRequest`.  Returns an error when the request is
+/// malformed (see the module docs for the specific codes).
 pub fn validate_asset_pair_request(req: &AssetPairRequest) -> Result<(), Error> {
     let base = normalize_asset_code(&req.base_asset);
     let quote = normalize_asset_code(&req.quote_asset);
 
-    if base.is_empty() || base.len() > 12 {
+    if base.is_empty() || base.len() > 12 || !is_asset_code_charset(&base) {
         return Err(Error::InvalidAssetCode);
     }
-    if quote.is_empty() || quote.len() > 12 {
+    if quote.is_empty() || quote.len() > 12 || !is_asset_code_charset(&quote) {
         return Err(Error::InvalidAssetCode);
     }
     if base == quote {
@@ -108,12 +114,24 @@ pub fn validate_asset_pair_request(req: &AssetPairRequest) -> Result<(), Error> 
     if req.amount == 0 {
         return Err(Error::InvalidAmount);
     }
+    if !ROUTING_STRATEGIES.contains(&req.strategy.as_str()) {
+        return Err(Error::ValidationError);
+    }
     Ok(())
 }
 
+/// Asset codes are limited to ASCII letters and digits, matching
+/// [`crate::errors::normalize_asset_code`].
+fn is_asset_code_charset(code: &str) -> bool {
+    code.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Normalise an asset code to uppercase, trimming whitespace.
+///
+/// Only ASCII letters are uppercased; see [`validate_asset_pair_request`] for
+/// the accepted character set.
 pub fn normalize_asset_code(code: &str) -> String {
-    code.trim().to_uppercase()
+    code.trim().to_ascii_uppercase()
 }
 
 /// Build the corridor key string `"BASE/QUOTE"` from two asset codes.
@@ -152,19 +170,18 @@ pub struct CandidateQuote {
 // ---------------------------------------------------------------------------
 
 /// Select the best quote from `candidates` according to `strategy`.
-/// Returns `None` when the candidate list is empty.
+///
+/// Returns `Ok(None)` when the candidate list is empty, and
+/// `Err(Error::ValidationError)` when `strategy` is not one of
+/// [`ROUTING_STRATEGIES`], whether or not there are candidates.
 pub fn select_best<'a>(
     candidates: &'a [CandidateQuote],
     strategy: &str,
     fee_weight: f32,
     speed_weight: f32,
     reputation_weight: f32,
-) -> Option<&'a CandidateQuote> {
-    if candidates.is_empty() {
-        return None;
-    }
-
-    match strategy {
+) -> Result<Option<&'a CandidateQuote>, Error> {
+    let best = match strategy {
         "LowestFee" => candidates
             .iter()
             .min_by_key(|q| q.fee_percentage),
@@ -198,9 +215,9 @@ pub fn select_best<'a>(
             })
         }
 
-        // Unknown strategy — fall back to lowest fee
-        _ => candidates.iter().min_by_key(|q| q.fee_percentage),
-    }
+        _ => return Err(Error::ValidationError),
+    };
+    Ok(best)
 }
 
 fn weighted_score(
@@ -287,7 +304,7 @@ pub fn route_multi_asset(
         // Collect owned candidates for strategy selection
         let owned: Vec<CandidateQuote> = candidates.iter().map(|q| (*q).clone()).collect();
 
-        if let Some(best) = select_best(&owned, &req.strategy, 0.333, 0.333, 0.334) {
+        if let Some(best) = select_best(&owned, &req.strategy, 0.333, 0.333, 0.334)? {
             result.filled.push(AssetPairQuote {
                 pair_key: key,
                 anchor: best.anchor.clone(),
@@ -303,4 +320,131 @@ pub fn route_multi_asset(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn req(base: &str, quote: &str, strategy: &str) -> AssetPairRequest {
+        AssetPairRequest {
+            base_asset: base.to_string(),
+            quote_asset: quote.to_string(),
+            amount: 100,
+            strategy: strategy.to_string(),
+            min_reputation: 0,
+        }
+    }
+
+    fn candidate(id: u64, base: &str, quote: &str, fee: u32, rep: u32, time: u64) -> CandidateQuote {
+        CandidateQuote {
+            quote_id: id,
+            anchor: alloc::format!("anchor-{id}"),
+            base_asset: base.to_string(),
+            quote_asset: quote.to_string(),
+            rate: 1_000_000,
+            fee_percentage: fee,
+            minimum_amount: 1,
+            maximum_amount: 0,
+            valid_until: u64::MAX,
+            reputation_score: rep,
+            average_settlement_time: time,
+            routing_reason: None,
+        }
+    }
+
+    // ── Asset-code grammar ───────────────────────────────────────────────────
+
+    #[test]
+    fn valid_codes_normalize_as_before() {
+        assert_eq!(normalize_asset_code("usdc"), "USDC");
+        assert_eq!(normalize_asset_code("  Xlm "), "XLM");
+        assert_eq!(normalize_asset_code("abc123XYZ789"), "ABC123XYZ789");
+        assert!(validate_asset_pair_request(&req("usdc", "xlm", "LowestFee")).is_ok());
+        assert!(validate_asset_pair_request(&req("ABC123XYZ789", "XLM", "LowestFee")).is_ok());
+    }
+
+    #[test]
+    fn unicode_asset_codes_rejected() {
+        // Each of these uppercases (Unicode-aware) to an ASCII-looking code.
+        for code in ["uſdc", "ﬀ", "ıd", "ÜSDC", "ＵＳＤＣ", "USDC\u{200B}"] {
+            assert_eq!(
+                validate_asset_pair_request(&req(code, "XLM", "LowestFee")),
+                Err(Error::InvalidAssetCode),
+                "base {code:?}"
+            );
+            assert_eq!(
+                validate_asset_pair_request(&req("XLM", code, "LowestFee")),
+                Err(Error::InvalidAssetCode),
+                "quote {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_asset_codes_rejected() {
+        for code in ["USD-C", "USDC_COPY", "US.DC", "USD C", "USDC!", "USD/C", "*"] {
+            assert_eq!(
+                validate_asset_pair_request(&req(code, "XLM", "LowestFee")),
+                Err(Error::InvalidAssetCode),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_asset_code_fails_before_routing() {
+        let quotes = vec![candidate(1, "USDC", "XLM", 10, 80, 60)];
+        let err = route_multi_asset(&[req("uſdc", "XLM", "LowestFee")], &quotes, 0).unwrap_err();
+        assert_eq!(err, Error::InvalidAssetCode);
+    }
+
+    #[test]
+    fn non_ascii_candidate_cannot_alias_valid_code() {
+        // "uſdc" would uppercase to "USDC" under Unicode case mapping.
+        let quotes = vec![candidate(1, "uſdc", "XLM", 10, 80, 60)];
+        let result = route_multi_asset(&[req("USDC", "XLM", "LowestFee")], &quotes, 0).unwrap();
+        assert!(result.filled.is_empty());
+        assert_eq!(result.unfilled, vec!["USDC/XLM".to_string()]);
+    }
+
+    // ── Strategy labels ──────────────────────────────────────────────────────
+
+    #[test]
+    fn every_accepted_strategy_maps_to_its_rule() {
+        let c = vec![
+            candidate(1, "XLM", "USDC", 50, 80, 60),
+            candidate(2, "XLM", "USDC", 20, 90, 120),
+            candidate(3, "XLM", "USDC", 35, 70, 30),
+        ];
+        let pick = |s| select_best(&c, s, 1.0, 0.0, 0.0).unwrap().unwrap().quote_id;
+        assert_eq!(pick("LowestFee"), 2);
+        assert_eq!(pick("FastestSettlement"), 3);
+        assert_eq!(pick("HighestReputation"), 2);
+        assert_eq!(pick("WeightedScore"), 2); // fee-only weights
+        for s in ROUTING_STRATEGIES {
+            assert!(validate_asset_pair_request(&req("XLM", "USDC", s)).is_ok(), "{s}");
+        }
+    }
+
+    #[test]
+    fn unknown_strategy_rejected_by_select_best() {
+        let c = vec![candidate(1, "XLM", "USDC", 10, 80, 60)];
+        for s in ["UndefinedStrategy", "lowestfee", "LowestFee ", ""] {
+            assert_eq!(select_best(&c, s, 1.0, 0.0, 0.0).err(), Some(Error::ValidationError), "{s:?}");
+        }
+        assert_eq!(select_best(&[], "Typo", 1.0, 0.0, 0.0).err(), Some(Error::ValidationError));
+    }
+
+    #[test]
+    fn unknown_strategy_fails_before_candidate_selection() {
+        assert_eq!(
+            validate_asset_pair_request(&req("XLM", "USDC", "LowestFees")),
+            Err(Error::ValidationError)
+        );
+        // Fails even when no candidate would match the corridor.
+        let err = route_multi_asset(&[req("XLM", "USDC", "LowestFees")], &[], 0).unwrap_err();
+        assert_eq!(err, Error::ValidationError);
+    }
 }
