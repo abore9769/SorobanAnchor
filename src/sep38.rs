@@ -207,9 +207,9 @@ impl PartialFirmQuote {
 pub fn parse_partial_quote(raw: RawPartialFirmQuote) -> PartialFirmQuote {
     let mut missing: AllocVec<&'static str> = AllocVec::new();
 
-    // id
+    // id — reject whitespace-only identifiers
     let id = match raw.id {
-        Some(ref s) if !s.is_empty() => Some(s.clone()),
+        Some(ref s) if !s.trim().is_empty() => Some(s.clone()),
         _ => {
             missing.push("id");
             None
@@ -292,6 +292,31 @@ pub fn parse_partial_quote(raw: RawPartialFirmQuote) -> PartialFirmQuote {
         }
     };
 
+    // Reject quotes where sell and buy assets are identical (case-insensitive).
+    // A conversion to the same asset is meaningless, matching the check in the
+    // full-quote path (`validate_quote_fields_with_threshold`).
+    if let (Some(ref sell), Some(ref buy)) = (&sell_asset, &buy_asset) {
+        if sell.eq_ignore_ascii_case(buy) {
+            missing.push("sell_asset");
+            missing.push("buy_asset");
+            return PartialFirmQuote {
+                id: None,
+                expires_at: None,
+                price: None,
+                sell_amount: None,
+                buy_amount: None,
+                sell_asset: None,
+                buy_asset: None,
+                missing_fields: {
+                    let mut m = missing;
+                    // deduplicate while preserving order
+                    m.dedup();
+                    m
+                },
+            };
+        }
+    }
+
     PartialFirmQuote {
         id,
         expires_at,
@@ -336,24 +361,26 @@ fn is_valid_positive_decimal(s: &str) -> bool {
 
 /// Validates a timestamp string and returns the parsed value.
 /// Returns `Err(Error::invalid_quote())` if the timestamp is malformed,
-/// zero, or unreasonably far in the future (more than 10 years).
-fn parse_and_validate_timestamp(timestamp_str: &str) -> Result<u64, Error> {
+/// zero, or unreasonably far in the future (more than 10 years from `now`).
+fn parse_and_validate_timestamp(timestamp_str: &str, now: u64) -> Result<u64, Error> {
     if timestamp_str.is_empty() {
         return Err(Error::invalid_quote());
     }
-    
+
     let timestamp: u64 = timestamp_str.parse().map_err(|_| Error::invalid_quote())?;
-    
+
     // Reject zero timestamps
     if timestamp == 0 {
         return Err(Error::invalid_quote());
     }
-    
-    // Reject timestamps that are unreasonably far in the future
-    // (more than 10 years from now in seconds: 10 * 365 * 24 * 60 * 60 = 315,360,000)
+
+    // Reject timestamps unreasonably far in the future
+    // (more than 10 years: 10 × 365 × 24 × 60 × 60 = 315,360,000 seconds).
     const MAX_REASONABLE_FUTURE: u64 = 315_360_000;
-    // We'll check this later against current timestamp in validate_quote_fields
-    
+    if timestamp > now.saturating_add(MAX_REASONABLE_FUTURE) {
+        return Err(Error::invalid_quote());
+    }
+
     Ok(timestamp)
 }
 
@@ -385,15 +412,9 @@ fn validate_quote_fields_with_threshold(
         return Err(Error::invalid_quote());
     }
     
-    // Validate and parse timestamp
-    let expires_at = parse_and_validate_timestamp(&raw.expires_at)?;
-    
-    // Check for unreasonably far future timestamps (more than 10 years)
-    const MAX_REASONABLE_FUTURE: u64 = 315_360_000; // 10 years in seconds
-    if expires_at > current_timestamp.saturating_add(MAX_REASONABLE_FUTURE) {
-        return Err(Error::invalid_quote());
-    }
-    
+    // Validate and parse timestamp (includes future-bound check)
+    let expires_at = parse_and_validate_timestamp(&raw.expires_at, current_timestamp)?;
+
     // Determine freshness
     let freshness = if expires_at <= current_timestamp {
         QuoteFreshness::Stale
@@ -1862,24 +1883,38 @@ mod tests {
 
     #[test]
     fn test_parse_and_validate_timestamp_valid() {
-        assert_eq!(parse_and_validate_timestamp("1000").unwrap(), 1000);
-        assert_eq!(parse_and_validate_timestamp("1").unwrap(), 1);
+        let now = 0;
+        assert_eq!(parse_and_validate_timestamp("1000", now).unwrap(), 1000);
+        assert_eq!(parse_and_validate_timestamp("1", now).unwrap(), 1);
     }
 
     #[test]
     fn test_parse_and_validate_timestamp_empty() {
-        assert!(parse_and_validate_timestamp("").is_err());
+        assert!(parse_and_validate_timestamp("", 0).is_err());
     }
 
     #[test]
     fn test_parse_and_validate_timestamp_zero() {
-        assert!(parse_and_validate_timestamp("0").is_err());
+        assert!(parse_and_validate_timestamp("0", 0).is_err());
     }
 
     #[test]
     fn test_parse_and_validate_timestamp_invalid() {
-        assert!(parse_and_validate_timestamp("not-a-number").is_err());
-        assert!(parse_and_validate_timestamp("-100").is_err());
+        assert!(parse_and_validate_timestamp("not-a-number", 0).is_err());
+        assert!(parse_and_validate_timestamp("-100", 0).is_err());
+    }
+
+    #[test]
+    fn test_parse_and_validate_timestamp_far_future_rejected() {
+        // now = 1_000_000; 10 years = 315_360_000; anything beyond now + window is rejected.
+        let now: u64 = 1_000_000;
+        let just_inside = now + 315_360_000;
+        let just_outside = now + 315_360_001;
+        assert!(parse_and_validate_timestamp(&just_inside.to_string(), now).is_ok());
+        assert!(
+            parse_and_validate_timestamp(&just_outside.to_string(), now).is_err(),
+            "timestamp beyond 10-year window must be rejected"
+        );
     }
 
     #[test]
@@ -2114,5 +2149,137 @@ mod tests {
         
         // At time 2000, quote expires at 2060 (60 seconds remaining) - should be excluded as near-stale
         assert!(cache.get_with_reconciliation("key1", 2000, Some(1.01), &config).is_none());
+    }
+}
+
+// ── partial_quote_tests ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod partial_quote_tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    fn raw_full() -> RawPartialFirmQuote {
+        RawPartialFirmQuote {
+            id: Some("q-partial".into()),
+            expires_at: Some("2000".into()),
+            price: Some("0.15".into()),
+            sell_amount: Some("1000".into()),
+            buy_amount: Some("150".into()),
+            sell_asset: Some("XLM".into()),
+            buy_asset: Some("USDC".into()),
+        }
+    }
+
+    // ── Fix 3: whitespace-only ID is rejected ────────────────────────────────
+
+    #[test]
+    fn test_whitespace_id_is_missing() {
+        let mut raw = raw_full();
+        raw.id = Some("   ".into());
+        let partial = parse_partial_quote(raw);
+        assert!(partial.id.is_none(), "whitespace-only id must be treated as missing");
+        assert!(
+            partial.missing_fields.contains(&"id"),
+            "id must appear in missing_fields"
+        );
+    }
+
+    #[test]
+    fn test_tab_only_id_is_missing() {
+        let mut raw = raw_full();
+        raw.id = Some("\t\n".into());
+        let partial = parse_partial_quote(raw);
+        assert!(partial.id.is_none());
+        assert!(partial.missing_fields.contains(&"id"));
+    }
+
+    #[test]
+    fn test_nonblank_id_is_preserved() {
+        let partial = parse_partial_quote(raw_full());
+        assert_eq!(partial.id, Some("q-partial".into()));
+        assert!(!partial.missing_fields.contains(&"id"));
+    }
+
+    // ── Fix 1: identical asset pair is rejected ──────────────────────────────
+
+    #[test]
+    fn test_identical_assets_rejected() {
+        let mut raw = raw_full();
+        raw.sell_asset = Some("XLM".into());
+        raw.buy_asset = Some("XLM".into());
+        let partial = parse_partial_quote(raw);
+        // Both asset fields must be cleared and recorded as missing.
+        assert!(partial.sell_asset.is_none(), "sell_asset must be None for identical pair");
+        assert!(partial.buy_asset.is_none(), "buy_asset must be None for identical pair");
+        assert!(
+            partial.missing_fields.contains(&"sell_asset"),
+            "sell_asset must appear in missing_fields"
+        );
+        assert!(
+            partial.missing_fields.contains(&"buy_asset"),
+            "buy_asset must appear in missing_fields"
+        );
+    }
+
+    #[test]
+    fn test_identical_assets_case_insensitive_rejected() {
+        let mut raw = raw_full();
+        raw.sell_asset = Some("xlm".into());
+        raw.buy_asset = Some("XLM".into());
+        let partial = parse_partial_quote(raw);
+        assert!(partial.sell_asset.is_none());
+        assert!(partial.buy_asset.is_none());
+        assert!(partial.missing_fields.contains(&"sell_asset"));
+        assert!(partial.missing_fields.contains(&"buy_asset"));
+    }
+
+    #[test]
+    fn test_distinct_assets_accepted() {
+        let partial = parse_partial_quote(raw_full());
+        assert_eq!(partial.sell_asset, Some("XLM".into()));
+        assert_eq!(partial.buy_asset, Some("USDC".into()));
+        assert!(!partial.missing_fields.contains(&"sell_asset"));
+        assert!(!partial.missing_fields.contains(&"buy_asset"));
+    }
+
+    #[test]
+    fn test_normalization_still_applied_for_distinct_assets() {
+        let mut raw = raw_full();
+        raw.sell_asset = Some("xlm".into());
+        raw.buy_asset = Some("usdc".into());
+        let partial = parse_partial_quote(raw);
+        assert_eq!(partial.sell_asset, Some("XLM".into()), "sell_asset should be uppercased");
+        assert_eq!(partial.buy_asset, Some("USDC".into()), "buy_asset should be uppercased");
+    }
+
+    // ── Unrelated partial fields remain unchanged ────────────────────────────
+
+    #[test]
+    fn test_missing_price_still_recorded() {
+        let mut raw = raw_full();
+        raw.price = None;
+        let partial = parse_partial_quote(raw);
+        assert!(partial.price.is_none());
+        assert!(partial.missing_fields.contains(&"price"));
+        // Other fields unaffected
+        assert_eq!(partial.sell_asset, Some("XLM".into()));
+        assert_eq!(partial.buy_asset, Some("USDC".into()));
+    }
+
+    #[test]
+    fn test_missing_expires_at_still_recorded() {
+        let mut raw = raw_full();
+        raw.expires_at = None;
+        let partial = parse_partial_quote(raw);
+        assert!(partial.expires_at.is_none());
+        assert!(partial.missing_fields.contains(&"expires_at"));
+    }
+
+    #[test]
+    fn test_complete_valid_partial_quote() {
+        let partial = parse_partial_quote(raw_full());
+        assert!(partial.is_complete(), "fully populated raw quote should be complete");
+        assert!(partial.missing_fields.is_empty());
     }
 }

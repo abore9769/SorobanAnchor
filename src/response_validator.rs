@@ -729,7 +729,8 @@ fn crc16_xmodem(input: &[u8]) -> u16 {
 /// Accepts:
 /// - `"native"` (XLM)
 /// - `"CODE:ISSUER"` where CODE is 1–12 alphanumeric chars and ISSUER is a
-///   56-character Stellar address starting with `G`.
+///   valid 56-character Stellar account address (starts with `G`, passes
+///   base32 decoding and CRC16-XMODEM checksum via [`validate_stellar_account_id`]).
 pub fn validate_stellar_asset(asset: &str) -> Result<(), Error> {
     if asset == "native" {
         return Ok(());
@@ -743,10 +744,11 @@ pub fn validate_stellar_asset(asset: &str) -> Result<(), Error> {
     if code.is_empty() || code.len() > 12 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(Error::validation_error("asset code must be 1-12 alphanumeric characters"));
     }
-    if issuer.len() != 56 || !issuer.starts_with('G') || !issuer.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(Error::validation_error("asset issuer must be a 56-character Stellar address starting with G"));
-    }
-    Ok(())
+    // Delegate issuer validation to the shared account-ID validator so that
+    // length, prefix, character set, and CRC16-XMODEM checksum are all
+    // checked consistently in one place.
+    validate_stellar_account_id(issuer)
+        .map_err(|_| Error::validation_error("asset issuer must be a valid Stellar account address"))
 }
 
 pub fn normalize_stellar_account_id(account_id: &str) -> Result<alloc::string::String, Error> {
@@ -1495,6 +1497,16 @@ mod tests {
         assert!(validate_stellar_asset(
             "USDC:ABBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
         ).is_err());
+    }
+
+    #[test]
+    fn test_stellar_asset_issuer_bad_checksum_rejected() {
+        // Valid address with the last character mutated (checksum corruption).
+        // GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 is valid;
+        // replacing the trailing '5' with '6' produces a different checksum.
+        assert!(validate_stellar_asset(
+            "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA6"
+        ).is_err(), "asset with checksum-corrupted issuer must be rejected");
     }
 
     // ── Stellar account validation ───────────────────────────────────────────
