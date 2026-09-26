@@ -2441,7 +2441,8 @@ impl AnchorKitContract {
                 // running no migration steps.
                 panic_with_error!(&env, ErrorCode::IllegalTransition);
             }
-            Err(migration::MigrationError::NoStepFound) => {
+            Err(migration::MigrationError::NoStepFound)
+            | Err(migration::MigrationError::HistoryCounterExhausted) => {
                 panic_with_error!(&env, ErrorCode::ValidationError);
             }
         };
@@ -2476,7 +2477,9 @@ impl AnchorKitContract {
 
         // All data writes succeeded — commit version bump via migration framework.
         // This writes SCHEMAVER and appends a MigrationRecord to persistent history.
-        migration::commit_version(&env, current, new_schema_version, step.label());
+        if migration::commit_version(&env, current, new_schema_version, step.label()).is_err() {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
