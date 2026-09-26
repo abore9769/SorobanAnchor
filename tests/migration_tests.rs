@@ -21,6 +21,7 @@ mod migration_tests {
         AnchorKitContract, AnchorKitContractClient, QuoteV1, SCHEMA_V1, SCHEMA_V2,
     };
     use anchorkit::deterministic_hash::make_storage_key;
+    use anchorkit::migration::{self, MigrationError, MigrationStep};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -308,6 +309,98 @@ mod migration_tests {
         // “fail before mutation” guarantee explicit in the failure message.
         assert_eq!(client.get_schema_version(), schema_before);
         assert_eq!(client.get_migration_count(), count_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct framework calls: set_version / commit_version (#1079, #1080)
+    // -----------------------------------------------------------------------
+
+    /// Run `f` inside a registered contract so storage access is permitted.
+    fn in_contract(env: &Env, f: impl FnOnce()) {
+        let (client, _admin) = deploy(env);
+        env.as_contract(&client.address, f);
+    }
+
+    #[test]
+    fn set_version_allows_initial_stamp() {
+        let env = make_env();
+        in_contract(&env, || {
+            assert_eq!(migration::set_version(&env, SCHEMA_V1), Ok(()));
+            assert_eq!(migration::current_version(&env), SCHEMA_V1);
+        });
+    }
+
+    #[test]
+    fn set_version_rejects_jump_without_changing_state() {
+        let env = make_env();
+        in_contract(&env, || {
+            migration::set_version(&env, SCHEMA_V1).unwrap();
+            assert_eq!(
+                migration::set_version(&env, SCHEMA_V2),
+                Err(MigrationError::IllegalVersionTransition)
+            );
+            assert_eq!(migration::current_version(&env), SCHEMA_V1);
+            assert_eq!(migration::migration_count(&env), 0);
+        });
+    }
+
+    #[test]
+    fn set_version_rejects_downgrade_without_changing_state() {
+        let env = make_env();
+        in_contract(&env, || {
+            migration::set_version(&env, SCHEMA_V1).unwrap();
+            migration::commit_version(&env, SCHEMA_V1, SCHEMA_V2, "quotes_v1_to_v2").unwrap();
+            assert_eq!(
+                migration::set_version(&env, SCHEMA_V1),
+                Err(MigrationError::IllegalVersionTransition)
+            );
+            assert_eq!(migration::current_version(&env), SCHEMA_V2);
+            assert_eq!(migration::migration_count(&env), 1);
+        });
+    }
+
+    #[test]
+    fn commit_version_records_verified_step() {
+        let env = make_env();
+        in_contract(&env, || {
+            migration::set_version(&env, SCHEMA_V1).unwrap();
+            let step = MigrationStep::ToV2;
+            assert_eq!(
+                migration::commit_version(&env, SCHEMA_V1, SCHEMA_V2, step.label()),
+                Ok(())
+            );
+            assert_eq!(migration::current_version(&env), SCHEMA_V2);
+            let rec = migration::get_migration_record(&env, 0).expect("record 0");
+            assert_eq!(rec.from_version, step.required_from());
+            assert_eq!(rec.to_version, step.produces());
+            assert_eq!(rec.label, soroban_sdk::String::from_str(&env, step.label()));
+        });
+    }
+
+    #[test]
+    fn invalid_direct_commit_leaves_version_and_history_unchanged() {
+        let env = make_env();
+        in_contract(&env, || {
+            migration::set_version(&env, SCHEMA_V1).unwrap();
+            // (from, to, label) combinations that do not match the stored
+            // version plus a registered step.
+            let invalid: &[(u32, u32, &str)] = &[
+                (SCHEMA_V1, 10, "quotes_v1_to_v2"),    // jump past registered step
+                (SCHEMA_V2, 3, "quotes_v1_to_v2"),     // from != current
+                (SCHEMA_V1, SCHEMA_V2, "forged_label"), // wrong label
+                (SCHEMA_V2, SCHEMA_V1, "quotes_v1_to_v2"), // downgrade
+            ];
+            for &(from, to, label) in invalid {
+                assert_eq!(
+                    migration::commit_version(&env, from, to, label),
+                    Err(MigrationError::StepMismatch),
+                    "commit {from} -> {to} ({label}) must be rejected"
+                );
+                assert_eq!(migration::current_version(&env), SCHEMA_V1);
+                assert_eq!(migration::migration_count(&env), 0);
+                assert!(migration::get_migration_record(&env, 0).is_none());
+            }
+        });
     }
 
     // -----------------------------------------------------------------------

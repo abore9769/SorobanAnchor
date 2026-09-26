@@ -147,11 +147,23 @@ pub fn current_version(env: &Env) -> u32 {
         .unwrap_or(0)
 }
 
-/// Write the schema version. Called once by `initialize()` to stamp V1.
-pub fn set_version(env: &Env, version: u32) {
+/// Stamp the initial schema version. Called once by `initialize()`.
+///
+/// This is **not** a general-purpose setter: the only legal transition is
+/// uninitialized (`0`) → [`SCHEMA_V1`]. Every later version change must go
+/// through [`validate_migration`] + [`commit_version`] so that the registered
+/// migration steps actually run and are recorded in history.
+///
+/// Returns [`MigrationError::IllegalVersionTransition`] without touching
+/// storage for any other request (jumps, downgrades, re-initialization).
+pub fn set_version(env: &Env, version: u32) -> Result<(), MigrationError> {
+    if current_version(env) != 0 || version != SCHEMA_V1 {
+        return Err(MigrationError::IllegalVersionTransition);
+    }
     env.storage()
         .instance()
         .set(&schema_version_key(env), &version);
+    Ok(())
 }
 
 /// Advance the stored schema version and append a [`MigrationRecord`] to the
@@ -290,6 +302,20 @@ mod migration_tests {
         let env = Env::default();
         let id = env.register_contract(None, crate::contract::AnchorKitContract);
         env.as_contract(&id, || f(&env));
+    }
+
+    /// Run `f` inside a registered contract so storage access is permitted.
+    fn in_contract(env: &Env, f: impl FnOnce()) {
+        let id = env.register_contract(None, crate::contract::AnchorKitContract);
+        env.as_contract(&id, f);
+    }
+
+    /// Write the stored version directly, bypassing `set_version` validation,
+    /// so tests can set up arbitrary starting states.
+    fn force_version(env: &Env, version: u32) {
+        env.storage()
+            .instance()
+            .set(&schema_version_key(env), &version);
     }
 
     // -----------------------------------------------------------------------

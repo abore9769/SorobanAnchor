@@ -2026,7 +2026,9 @@ impl AnchorKitContract {
         // Use migration framework to stamp the initial schema version so that
         // get_schema_version() and migration::current_version() are always
         // consistent with each other.
-        migration::set_version(&env, SCHEMA_V1);
+        if migration::set_version(&env, SCHEMA_V1).is_err() {
+            panic_with_error!(&env, ErrorCode::IllegalTransition);
+        }
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
         env.events().publish(
             (symbol_short!("contract"), symbol_short!("init")),

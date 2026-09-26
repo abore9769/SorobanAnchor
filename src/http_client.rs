@@ -404,14 +404,16 @@ impl RequestCredentials {
 
     /// Validate the credential material.
     ///
-    /// Rejects empty tokens/usernames/header names, `:` in Basic usernames
-    /// (ambiguous per RFC 7617), non-token characters in header names, and
-    /// CR/LF anywhere (header injection).
+    /// Rejects blank (empty or whitespace-only) bearer tokens, empty
+    /// usernames/header names, `:` in Basic usernames (ambiguous per RFC 7617),
+    /// non-token characters in header names, protected header names
+    /// (see [`PROTECTED_HEADER_NAMES`]) on the arbitrary-header path, and CR/LF
+    /// anywhere (header injection). Accepted values are sent unmodified.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             RequestCredentials::Bearer(token) => {
-                if token.is_empty() {
-                    return Err("credentials: bearer token cannot be empty".into());
+                if token.trim().is_empty() {
+                    return Err("credentials: bearer token cannot be blank".into());
                 }
                 reject_ctl("bearer token", token)?;
             }
@@ -435,6 +437,11 @@ impl RequestCredentials {
                 if !name.chars().all(is_token_char) {
                     return Err(alloc::format!(
                         "credentials: header name '{}' contains invalid characters", name
+                    ));
+                }
+                if PROTECTED_HEADER_NAMES.iter().any(|p| name.eq_ignore_ascii_case(p)) {
+                    return Err(alloc::format!(
+                        "credentials: header name '{}' is protected; use Bearer or Basic credentials instead", name
                     ));
                 }
                 reject_ctl("header value", value)?;
@@ -2684,6 +2691,70 @@ mod tests {
             .validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn request_credentials_validation_rejects_blank_bearer_token() {
+        for blank in [" ", "   ", "\t", " \t "] {
+            assert!(
+                RequestCredentials::Bearer(blank.to_string()).validate().is_err(),
+                "blank token {:?} must be rejected",
+                blank
+            );
+        }
+        let bad = OutboundRequestOptions::default().with_bearer_token("   ");
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn request_credentials_validation_preserves_nonblank_bearer_token() {
+        for token in ["jwt", " jwt ", "abc def"] {
+            let creds = RequestCredentials::Bearer(token.to_string());
+            assert_eq!(creds.validate(), Ok(()), "token {:?} must be accepted", token);
+            // Accepted token bytes are sent verbatim, not trimmed.
+            assert_eq!(creds.to_header().1, alloc::format!("Bearer {}", token));
+        }
+    }
+
+    #[test]
+    fn request_credentials_validation_rejects_protected_header_names() {
+        for name in [
+            "Authorization",
+            "authorization",
+            "AUTHORIZATION",
+            "Proxy-Authorization",
+            "proxy-authorization",
+            "Host",
+            "host",
+            "HoSt",
+        ] {
+            let creds = RequestCredentials::Header {
+                name: name.to_string(),
+                value: "Bearer attacker".to_string(),
+            };
+            assert!(creds.validate().is_err(), "protected header {:?} must be rejected", name);
+        }
+        let conflicting = OutboundRequestOptions::default()
+            .with_header_credential("authorization", "Bearer override");
+        assert!(conflicting.validate().is_err());
+        let host = OutboundRequestOptions::default()
+            .with_header_credential("Host", "evil.example.com");
+        assert!(host.validate().is_err());
+    }
+
+    #[test]
+    fn request_credentials_validation_keeps_custom_header_casing_and_value() {
+        for name in ["X-Api-Key", "x-api-key", "X-Authorization-Hint", "Hostname"] {
+            let creds = RequestCredentials::Header {
+                name: name.to_string(),
+                value: "Key Value-123".to_string(),
+            };
+            assert_eq!(creds.validate(), Ok(()), "custom header {:?} must be accepted", name);
+            assert_eq!(
+                creds.to_header(),
+                (name.to_string(), "Key Value-123".to_string())
+            );
+        }
     }
 
     #[test]
