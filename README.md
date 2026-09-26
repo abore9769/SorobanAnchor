@@ -466,3 +466,8 @@ The release bundle includes:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1109 -->
+- #1109: 63. Preserve separated streaming transitions
