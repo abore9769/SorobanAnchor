@@ -466,3 +466,8 @@ The release bundle includes:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1113 -->
+- #1113: 67. Classify slow failed probes
