@@ -192,7 +192,7 @@ pub struct LogRecord {
 }
 
 /// Append `s` to `out` as a JSON string literal (with quotes and escapes).
-fn write_json_string(out: &mut String, s: &str) {
+pub(crate) fn write_json_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {
