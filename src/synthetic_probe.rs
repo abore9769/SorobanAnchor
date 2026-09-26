@@ -309,11 +309,11 @@ impl SyntheticProbeRunner {
     pub fn run_all<F, T>(
         &self,
         mut probe_fn: F,
-        timestamp_fn: T,
+        mut timestamp_fn: T,
     ) -> Vec<ProbeReport>
     where
         F: FnMut(&ProbeConfig) -> Result<ProbeResult, String>,
-        T: Fn() -> u64,
+        T: FnMut() -> u64,
     {
         self.probes
             .iter()
@@ -337,11 +337,11 @@ impl SyntheticProbeRunner {
         &self,
         kind_filter: &ProbeKind,
         mut probe_fn: F,
-        timestamp_fn: T,
+        mut timestamp_fn: T,
     ) -> Vec<ProbeReport>
     where
         F: FnMut(&ProbeConfig) -> Result<ProbeResult, String>,
-        T: Fn() -> u64,
+        T: FnMut() -> u64,
     {
         self.probes
             .iter()

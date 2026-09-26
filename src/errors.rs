@@ -184,6 +184,10 @@ pub enum ErrorCode {
     /// retrieval and audit ordering. The write is rejected (fail closed).
     AuditLogCapacityExceeded  = 80,
 
+    // Registration errors (81)
+    /// A registration request was rejected because a required text field is blank.
+    InvalidRegistration       = 81,
+
 }
 
 impl ErrorCode {
