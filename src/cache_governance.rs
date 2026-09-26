@@ -22,7 +22,7 @@
 //! Policies are stored under a separate key from the governance config so they
 //! can be updated independently by admins.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, BytesN, Env, Vec};
 use crate::deterministic_hash::make_storage_key;
 use crate::errors::{AnchorKitError, ErrorCode};
 
@@ -349,8 +349,34 @@ pub fn get_config(env: &Env) -> CacheGovernanceConfig {
 
 /// Persist updated governance configuration (admin-only enforcement is in the
 /// contract layer).
-pub fn set_config(env: &Env, config: CacheGovernanceConfig) {
+///
+/// Rejects configurations with a zero `quorum_threshold` (would let a single
+/// endorser reach quorum) or a zero `proposal_expiry_ledgers` (would make
+/// every proposal immediately unusable) *before* any persistent state changes.
+/// Returns `Err(ValidationError)` naming the offending field in those cases.
+pub fn set_config(env: &Env, config: CacheGovernanceConfig) -> Result<(), AnchorKitError> {
+    if config.quorum_threshold == 0 {
+        return Err(AnchorKitError::validation_error(
+            "quorum_threshold must be greater than zero",
+        ));
+    }
+    if config.proposal_expiry_ledgers == 0 {
+        return Err(AnchorKitError::validation_error(
+            "proposal_expiry_ledgers must be greater than zero",
+        ));
+    }
     env.storage().persistent().set(&config_key(env), &config);
+    // Keep the configuration key alive for the configured proposal window so a
+    // quorum/expiry change cannot silently expire away before the proposals
+    // governed by it do.
+    let live_until = env
+        .ledger()
+        .sequence()
+        .saturating_add(config.proposal_expiry_ledgers);
+    env.storage()
+        .persistent()
+        .extend_ttl(&config_key(env), live_until, live_until);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -421,12 +447,23 @@ pub fn enforce_write_policy(
 /// - `(true, true)`   — entry has fully expired; it must not be served.
 ///
 /// The tuple is `(needs_refresh, is_expired)`.
+///
+/// # Panics
+///
+/// Panics with [`ErrorCode::ValidationError`] when `ttl_seconds == 0`. A zero
+/// TTL is meaningless for policy evaluation — it classifies the entry as both
+/// expired and refresh-needed, so every read would refresh and the stored
+/// policy would be invalid. Rejecting it keeps the fresh/stale/expired
+/// classification unambiguous.
 pub fn enforce_read_policy(
     env: &Env,
     entry_type: CacheEntryType,
     age_seconds: u64,
     ttl_seconds: u64,
 ) -> (bool, bool) {
+    if ttl_seconds == 0 {
+        panic_with_error!(env, ErrorCode::ValidationError);
+    }
     let policy = get_policy(env, entry_type);
     let expired = policy.is_expired(age_seconds, ttl_seconds);
     let refresh = policy.needs_refresh(age_seconds, ttl_seconds);
@@ -460,13 +497,23 @@ pub fn enforce_invalidation_policy(
 ///
 /// Returns the new `proposal_id`. The `proposer` must be a registered
 /// attestor; that check is enforced by the contract layer.
-pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> u64 {
+///
+/// Returns `Err(CacheCapacityExceeded)` when the proposal ID counter is at
+/// `u64::MAX` and the next ID would wrap and collide with an existing
+/// proposal. In that case nothing is written.
+pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> Result<u64, AnchorKitError> {
     let cfg = get_config(env);
     let proposal_id: u64 = env
         .storage()
         .persistent()
         .get::<_, u64>(&proposal_count_key(env))
         .unwrap_or(0);
+
+    // Guard the increment before writing anything: a wrap to 0 would collide
+    // with the first proposal ever created.
+    let next_id = proposal_id
+        .checked_add(1)
+        .ok_or_else(AnchorKitError::cache_capacity_exceeded)?;
 
     // Build the initial endorsements list with the proposer as first endorser.
     let mut endorsements = Vec::new(env);
@@ -482,14 +529,20 @@ pub fn propose(env: &Env, proposer: &Address, anchor: &Address) -> u64 {
         executed: false,
     };
 
+    let key = proposal_key(env, proposal_id);
+    env.storage().persistent().set(&key, &proposal);
+    // Bound each proposal's storage lifetime to its configured expiry so stale
+    // proposals cannot accumulate until unrelated storage cleanup runs.
+    let live_until = env
+        .ledger()
+        .sequence()
+        .saturating_add(cfg.proposal_expiry_ledgers);
+    env.storage().persistent().extend_ttl(&key, live_until, live_until);
     env.storage()
         .persistent()
-        .set(&proposal_key(env, proposal_id), &proposal);
-    env.storage()
-        .persistent()
-        .set(&proposal_count_key(env), &(proposal_id + 1));
+        .set(&proposal_count_key(env), &next_id);
 
-    proposal_id
+    Ok(proposal_id)
 }
 
 /// Add an endorsement to an existing proposal.
@@ -517,6 +570,15 @@ pub fn endorse(env: &Env, endorser: &Address, proposal_id: u64) -> Result<(), An
         if proposal.endorsements.get(i).unwrap() == *endorser {
             return Ok(());
         }
+    }
+
+    // Bound endorsements at the configured quorum threshold so a proposal
+    // cannot be inflated with redundant endorsements after quorum is met.
+    let cfg = get_config(env);
+    if proposal.endorsements.len() >= cfg.quorum_threshold {
+        return Err(AnchorKitError::validation_error(
+            "maximum endorsement count reached",
+        ));
     }
 
     proposal.endorsements.push_back(endorser.clone());
@@ -677,14 +739,14 @@ mod logged {
         result
     }
 
-    /// [`propose`] plus a `cache.proposal_created` (info) entry.
+    /// [`propose`] plus a `cache.proposal_created` (info) entry on success.
     pub fn propose_logged(
         env: &Env,
         proposer: &Address,
         anchor: &Address,
         logger: &StructuredLogger,
-    ) -> u64 {
-        let proposal_id = propose(env, proposer, anchor);
+    ) -> Result<u64, AnchorKitError> {
+        let proposal_id = propose(env, proposer, anchor)?;
         logger.info(
             events::CACHE_PROPOSAL_CREATED,
             env.ledger().timestamp(),
@@ -695,7 +757,7 @@ mod logged {
                 ("ledger", env.ledger().sequence().into()),
             ],
         );
-        proposal_id
+        Ok(proposal_id)
     }
 
     /// [`endorse`] plus a `cache.proposal_endorsed` (info) entry with the

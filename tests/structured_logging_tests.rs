@@ -431,7 +431,7 @@ mod cache_governance_logging {
         let anchor = Address::generate(&env);
 
         env.as_contract(&cid, || {
-            let pid = cache_governance::propose_logged(&env, &proposer, &anchor, &logger);
+            let pid = cache_governance::propose_logged(&env, &proposer, &anchor, &logger).unwrap();
             cache_governance::endorse_logged(&env, &e2, pid, &logger).unwrap();
             cache_governance::endorse_logged(&env, &e3, pid, &logger).unwrap();
             let executed_anchor = cache_governance::execute_logged(&env, pid, &logger).unwrap();
