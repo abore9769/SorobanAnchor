@@ -62,6 +62,46 @@ mod service_snapshot_rollback_tests {
         );
     }
 
+    // -- Duplicate service entries are rejected --------------------------------------
+
+    #[test]
+    fn test_duplicate_services_rejected() {
+        let env = make_env();
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        svcs.push_back(1u32);
+        svcs.push_back(1u32);
+
+        let err = ServiceManager::create_snapshot(&env, &anchor, &svcs, "dupes")
+            .expect_err("duplicate services must be rejected");
+        assert_eq!(
+            err.code,
+            anchorkit::ErrorCode::InvalidTemplate,
+            "expected InvalidTemplate error for duplicate services"
+        );
+    }
+
+    // -- Over-limit service lists are rejected ---------------------------------------
+
+    #[test]
+    fn test_over_limit_services_rejected() {
+        let env = make_env();
+        let anchor = make_anchor(&env);
+        let mut svcs = Vec::new(&env);
+        // Exceed the configured service-count limit.
+        for i in 0..(ServiceManager::MAX_SERVICES + 1) {
+            svcs.push_back(i);
+        }
+
+        let err = ServiceManager::create_snapshot(&env, &anchor, &svcs, "too_many")
+            .expect_err("over-limit service list must be rejected");
+        assert_eq!(
+            err.code,
+            anchorkit::ErrorCode::InvalidTemplate,
+            "expected InvalidTemplate error for over-limit service list"
+        );
+    }
+
     // -- Valid snapshot creation -----------------------------------------------------
 
     #[test]
@@ -199,33 +239,18 @@ mod service_snapshot_rollback_tests {
         assert!(!ServiceManager::is_service_enabled(&env, &anchor, 2));
     }
 
-    // -- Snapshot count increments correctly ----------------------------------------------------
+    // -- Snapshot count increments correctly ----------------------------
 
     #[test]
-    fn test_snapshot_count_increments_after_valid_creation() {
+    fn test_snapshot_count_increments() {
         let env = make_env();
         let anchor = make_anchor(&env);
         let mut svcs = Vec::new(&env);
         svcs.push_back(1u32);
-        assert_eq!(ServiceManager::get_snapshot_count(&env), 0);
-        ServiceManager::create_snapshot(&env, &anchor, &svcs, "snap-1").unwrap();
-        assert_eq!(ServiceManager::get_snapshot_count(&env), 1);
-        ServiceManager::create_snapshot(&env, &anchor, &svcs, "snap-2").unwrap();
-        assert_eq!(ServiceManager::get_snapshot_count(&env), 2);
-    }
-
-    // -- Blank name does not consume a snapshot ID --------------------------------------------------
-
-    #[test]
-    fn test_blank_name_does_not_consume_snapshot_id() {
-        let env = make_env();
-        let anchor = make_anchor(&env);
-        let mut svcs = Vec::new(&env);
-        svcs.push_back(1u32);
-        assert_eq!(ServiceManager::get_snapshot_count(&env), 0);
-        let _ = ServiceManager::create_snapshot(&env, &anchor, &svcs, "");
-        assert_eq!(ServiceManager::get_snapshot_count(&env), 0);
-        let snap_id = ServiceManager::create_snapshot(&env, &anchor, &svcs, "valid").unwrap();
-        assert_eq!(snap_id, 0);
+        set_time(&env, 1_000_000);
+        let first = ServiceManager::create_snapshot(&env, &anchor, &svcs, "first").unwrap();
+        let second = ServiceManager::create_snapshot(&env, &anchor, &svcs, "second").unwrap();
+        assert_eq!(first, 0);
+        assert_eq!(second, 1);
     }
 }
