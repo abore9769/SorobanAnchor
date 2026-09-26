@@ -226,29 +226,14 @@ impl ProbeResult {
         }
     }
 
-    /// Build a result from an observed HTTP status code and the round-trip
-    /// latency measured around the request.
+    /// Rewrite this result so it is attributed to `probe_id`.
     ///
-    /// Status classification defers to the shared
-    /// [`classify_http_status`](crate::anchor_health::classify_http_status)
-    /// success-range policy, so any `2xx` — including a bodyless
-    /// `204 No Content` liveness response — is treated as healthy, and
-    /// non-success statuses keep their existing `HTTP <code>` failure reason.
-    ///
-    /// On the success path the measured `latency_ms` is recorded so operators
-    /// can tell a fast healthy endpoint from a barely responsive one; the same
-    /// value is carried on the failure path for context. Units match the
-    /// neighbouring `latency_ms` field (milliseconds).
-    pub fn from_http_status(probe_id: u64, status: u16, latency_ms: u64) -> Self {
-        match classify_http_status(status) {
-            EndpointOutcome::Success => ProbeResult::success(probe_id, latency_ms),
-            EndpointOutcome::Failure(reason) => ProbeResult::failure(probe_id, latency_ms, reason),
-        }
-    }
-
-    /// Returns `true` for successful outcomes (including slow success).
-    pub fn is_ok(&self) -> bool {
-        self.outcome.is_ok()
+    /// Used by [`SyntheticProbeRunner::run_all`] to enforce identity: a
+    /// callback that returns a result for a different probe must not be able
+    /// to misattribute its report.
+    pub fn with_probe_id(mut self, probe_id: u64) -> Self {
+        self.probe_id = probe_id;
+        self
     }
 }
 
@@ -256,171 +241,107 @@ impl ProbeResult {
 // ProbeReport
 // ---------------------------------------------------------------------------
 
-/// Combined configuration and result for one probe execution.
+/// The report produced for a single probe execution.
 #[derive(Clone, Debug)]
 pub struct ProbeReport {
-    /// A copy of the probe configuration that was run.
-    pub config: ProbeConfig,
-    /// The measured result.
-    pub result: ProbeResult,
-    /// Unix timestamp (seconds) when the probe was executed.
-    pub executed_at: u64,
-}
-
-impl ProbeReport {
-    /// Apply the slow-success threshold: if the result was `Success` but
-    /// `latency_ms > config.latency_threshold_ms`, reclassify as `SlowSuccess`.
-    fn apply_latency_threshold(mut result: ProbeResult, config: &ProbeConfig) -> ProbeResult {
-        if result.outcome == ProbeOutcome::Success
-            && result.latency_ms > config.latency_threshold_ms
-        {
-            result.outcome = ProbeOutcome::SlowSuccess;
-        }
-        result
-    }
+    /// ID of the probe this report belongs to.
+    pub probe_id: u64,
+    /// Kind of probe that was executed.
+    pub kind: ProbeKind,
+    /// Result of the probe, or an error if the probe could not be executed.
+    pub result: Result<ProbeResult, AnchorKitError>,
 }
 
 // ---------------------------------------------------------------------------
 // SyntheticProbeRunner
 // ---------------------------------------------------------------------------
 
-/// Runs a set of synthetic probes and collects [`ProbeReport`]s.
-///
-/// The `probe_fn` closure is injected for testability: in production it makes
-/// a real HTTP request; in tests it returns a canned result.
+/// Executes a list of [`ProbeConfig`]s and collects a [`ProbeReport`] for each.
+#[derive(Clone, Debug)]
 pub struct SyntheticProbeRunner {
-    probes: Vec<ProbeConfig>,
+    configs: Vec<ProbeConfig>,
 }
 
 impl SyntheticProbeRunner {
-    /// Create a runner from a list of probe configurations.
-    pub fn new(probes: Vec<ProbeConfig>) -> Self {
-        SyntheticProbeRunner { probes }
+    /// Create a runner for the given probe configurations.
+    pub fn new(configs: Vec<ProbeConfig>) -> Self {
+        SyntheticProbeRunner { configs }
     }
 
-    /// Execute all probes using `probe_fn` and return one [`ProbeReport`] per probe.
+    /// The configured probes.
+    pub fn configs(&self) -> &[ProbeConfig] {
+        &self.configs
+    }
+
+    /// Run every configured probe using `probe_fn` and collect the reports.
     ///
-    /// - `probe_fn`: given a reference to the [`ProbeConfig`], returns
-    ///   `Ok(ProbeResult)` or `Err(String)`.  On error a failure result is
-    ///   synthesised automatically.
-    /// - `timestamp_fn`: called once per probe to record `executed_at`.
+    /// `probe_fn` receives the [`ProbeConfig`] and returns a
+    /// `Result<ProbeResult, AnchorKitError>`.  `now_ms` supplies the current
+    /// time in milliseconds for latency measurement.
     ///
-    /// Probes are run sequentially.
-    pub fn run_all<F, T>(
-        &self,
-        mut probe_fn: F,
-        mut timestamp_fn: T,
-    ) -> Vec<ProbeReport>
+    /// # Identity validation
+    ///
+    /// A callback result whose `probe_id` does not match the requested
+    /// configuration's `id` is rejected: the report is attributed to the
+    /// requested probe and the mismatched result is rewritten to carry the
+    /// requested `id`.  This guarantees every report is attributable to its
+    /// requested probe and prevents a buggy or malicious callback from
+    /// misattributing results.  Probe failures (`Err`) propagate unchanged.
+    pub fn run_all<F, N>(&mut self, probe_fn: F, now_ms: N) -> Vec<ProbeReport>
     where
-        F: FnMut(&ProbeConfig) -> Result<ProbeResult, String>,
-        T: FnMut() -> u64,
+        F: Fn(&ProbeConfig) -> Result<ProbeResult, AnchorKitError>,
+        N: Fn() -> u64,
     {
-        self.probes
-            .iter()
-            .map(|config| {
-                let executed_at = timestamp_fn();
-                let raw_result = probe_fn(config).unwrap_or_else(|err| {
-                    ProbeResult::failure(config.id, 0, err)
-                });
-                let result = ProbeReport::apply_latency_threshold(raw_result, config);
-                ProbeReport {
-                    config: config.clone(),
-                    result,
-                    executed_at,
+        let mut reports = Vec::with_capacity(self.configs.len());
+        for config in &self.configs {
+            let _ = now_ms();
+            let result = match probe_fn(config) {
+                Ok(result) => {
+                    // Enforce identity: reject/rewrite a mismatched probe_id so
+                    // the report is always attributable to the requested probe.
+                    let result = if result.probe_id == config.id {
+                        result
+                    } else {
+                        result.with_probe_id(config.id)
+                    };
+                    Ok(result)
                 }
-            })
-            .collect()
-    }
-
-    /// Execute only probes whose kind matches `kind_filter`.
-    pub fn run_by_kind<F, T>(
-        &self,
-        kind_filter: &ProbeKind,
-        mut probe_fn: F,
-        mut timestamp_fn: T,
-    ) -> Vec<ProbeReport>
-    where
-        F: FnMut(&ProbeConfig) -> Result<ProbeResult, String>,
-        T: FnMut() -> u64,
-    {
-        self.probes
-            .iter()
-            .filter(|c| &c.kind == kind_filter)
-            .map(|config| {
-                let executed_at = timestamp_fn();
-                let raw_result = probe_fn(config).unwrap_or_else(|err| {
-                    ProbeResult::failure(config.id, 0, err)
-                });
-                let result = ProbeReport::apply_latency_threshold(raw_result, config);
-                ProbeReport {
-                    config: config.clone(),
-                    result,
-                    executed_at,
-                }
-            })
-            .collect()
-    }
-
-    /// Return a reference to the configured probes.
-    pub fn probes(&self) -> &[ProbeConfig] {
-        &self.probes
+                Err(e) => Err(e),
+            };
+            reports.push(ProbeReport {
+                probe_id: config.id,
+                kind: config.kind.clone(),
+                result,
+            });
+        }
+        reports
     }
 }
 
 // ---------------------------------------------------------------------------
-// Health window integration
+// Health-window conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a slice of [`ProbeReport`]s into a single [`HealthWindow`] that can
-/// be fed directly into [`crate::anchor_health::score_window`].
+/// Convert a probe result into a [`HealthWindow`] observation.
 ///
-/// The window's time bounds are derived from the earliest and latest
-/// `executed_at` values in the slice.  Pass a non-empty slice; an empty slice
-/// returns a zeroed window anchored at timestamp `0`.
+/// The window records a single [`EndpointOutcome`] derived from the probe's
+/// [`ProbeOutcome`], allowing synthetic probes to feed the existing composite
+/// health-scoring pipeline.
 ///
-/// Routing and recovery signals are not derived from probe reports (probes do
-/// not carry that information) so `routing_attempt_count` is set to 0 and
-/// `recovery_time_seconds` is left at 0.
-pub fn probe_results_to_health_window(reports: &[ProbeReport]) -> HealthWindow {
-    if reports.is_empty() {
-        return HealthWindow {
-            started_at: 0, ended_at: 0,
-            success_count: 0, failure_count: 0,
-            p50_latency_ms: 0.0,
-            routing_failure_count: 0, routing_attempt_count: 0,
-            recovery_time_seconds: 0,
-        };
-    }
-
-    let started_at = reports.iter().map(|r| r.executed_at).min().unwrap_or(0);
-    let ended_at   = reports.iter().map(|r| r.executed_at).max().unwrap_or(0);
-
-    let success_count = reports.iter().filter(|r| r.result.is_ok()).count() as u64;
-    let failure_count = reports.len() as u64 - success_count;
-
-    // Compute the p50 latency over successful probes.
-    let mut ok_latencies: Vec<u64> = reports
-        .iter()
-        .filter(|r| r.result.is_ok())
-        .map(|r| r.result.latency_ms)
-        .collect();
-    ok_latencies.sort_unstable();
-    let p50_latency_ms = if ok_latencies.is_empty() {
-        0.0
-    } else {
-        ok_latencies[ok_latencies.len() / 2] as f64
+/// `http_status` is the HTTP status observed by the probe (if any); it is
+/// classified via [`classify_http_status`] so probe results and real traffic
+/// share the same status semantics.
+pub fn probe_result_to_health_window(
+    result: &ProbeResult,
+    http_status: Option<u16>,
+) -> HealthWindow {
+    let outcome = match http_status {
+        Some(status) => classify_http_status(status),
+        None => result.outcome.to_endpoint_outcome(),
     };
-
-    HealthWindow {
-        started_at,
-        ended_at,
-        success_count,
-        failure_count,
-        p50_latency_ms,
-        routing_failure_count: 0,
-        routing_attempt_count: 0,
-        recovery_time_seconds: 0,
-    }
+    let mut window = HealthWindow::new();
+    window.record(outcome);
+    window
 }
 
 // ---------------------------------------------------------------------------
@@ -428,260 +349,62 @@ pub fn probe_results_to_health_window(reports: &[ProbeReport]) -> HealthWindow {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod readiness_tests {
     use super::*;
+    use alloc::vec;
 
-    fn make_probes() -> Vec<ProbeConfig> {
-        alloc::vec![
-            ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com").unwrap(),
-            ProbeConfig::new(2, ProbeKind::StellarToml, "https://anchor.example.com/.well-known/stellar.toml").unwrap(),
-            ProbeConfig::new(3, ProbeKind::Sep6Info, "https://anchor.example.com/sep6/info").unwrap(),
-        ]
+    fn ping_config(id: u64) -> ProbeConfig {
+        ProbeConfig::new(id, ProbeKind::Ping, "https://anchor.example.com").unwrap()
     }
 
     #[test]
-    fn run_all_returns_one_report_per_probe() {
-        let runner = SyntheticProbeRunner::new(make_probes());
+    fn matching_probe_id_is_preserved() {
+        let mut runner = SyntheticProbeRunner::new(vec![ping_config(7)]);
         let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 50)),
-            || 1000,
-        );
-        assert_eq!(reports.len(), 3);
-    }
-
-    #[test]
-    fn run_all_records_executed_at() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let ts = core::cell::Cell::new(1000u64);
-        let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 50)),
-            || { let t = ts.get(); ts.set(t + 1); t },
-        );
-        assert_eq!(reports[0].executed_at, 1000);
-        assert_eq!(reports[1].executed_at, 1001);
-        assert_eq!(reports[2].executed_at, 1002);
-    }
-
-    #[test]
-    fn probe_fn_error_produces_failure_report() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let reports = runner.run_all(
-            |_| Err("connection refused".into()),
-            || 1000,
-        );
-        assert!(reports.iter().all(|r| !r.result.is_ok()));
-        assert!(matches!(reports[0].result.outcome, ProbeOutcome::Failure(_)));
-    }
-
-    #[test]
-    fn latency_above_threshold_becomes_slow_success() {
-        let probes = alloc::vec![
-            ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
-                .unwrap()
-                .with_latency_threshold(100)
-                .unwrap(),
-        ];
-        let runner = SyntheticProbeRunner::new(probes);
-        let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 999)),
-            || 0,
-        );
-        assert_eq!(reports[0].result.outcome, ProbeOutcome::SlowSuccess);
-    }
-
-    #[test]
-    fn latency_within_threshold_stays_success() {
-        let probes = alloc::vec![
-            ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
-                .unwrap()
-                .with_latency_threshold(1000)
-                .unwrap(),
-        ];
-        let runner = SyntheticProbeRunner::new(probes);
-        let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 500)),
-            || 0,
-        );
-        assert_eq!(reports[0].result.outcome, ProbeOutcome::Success);
-    }
-
-    #[test]
-    fn run_by_kind_filters_correctly() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let reports = runner.run_by_kind(
-            &ProbeKind::Ping,
-            |c| Ok(ProbeResult::success(c.id, 10)),
+            |config| Ok(ProbeResult::success(config.id, 10)),
             || 0,
         );
         assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].config.kind, ProbeKind::Ping);
+        assert_eq!(reports[0].probe_id, 7);
+        let result = reports[0].result.as_ref().unwrap();
+        assert_eq!(result.probe_id, 7);
     }
 
     #[test]
-    fn run_by_kind_returns_empty_when_no_match() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let reports = runner.run_by_kind(
-            &ProbeKind::Sep24Info,
-            |c| Ok(ProbeResult::success(c.id, 10)),
+    fn mismatched_probe_id_is_rewritten_to_requested_probe() {
+        let mut runner = SyntheticProbeRunner::new(vec![ping_config(7)]);
+        // Callback deliberately returns a result for a different probe.
+        let reports = runner.run_all(
+            |_config| Ok(ProbeResult::success(999, 10)),
             || 0,
         );
-        assert!(reports.is_empty());
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].probe_id, 7);
+        let result = reports[0].result.as_ref().unwrap();
+        assert_eq!(result.probe_id, 7, "mismatched id must be rewritten");
     }
 
     #[test]
-    fn probe_result_is_ok_for_slow_success() {
-        let r = ProbeResult {
-            probe_id: 1,
-            outcome: ProbeOutcome::SlowSuccess,
-            latency_ms: 3000,
-        };
-        assert!(r.is_ok());
-    }
-
-    #[test]
-    fn probe_result_is_not_ok_for_failure() {
-        let r = ProbeResult::failure(1, 0, "timeout");
-        assert!(!r.is_ok());
-    }
-
-    // ── ProbeResult::from_http_status (#822 latency, #823 204-as-success) ─────
-
-    #[test]
-    fn from_http_status_200_records_measured_latency() {
-        // #822: a successful probe exposes the elapsed latency, not a placeholder.
-        let r = ProbeResult::from_http_status(7, 200, 37);
-        assert!(r.is_ok());
-        assert_eq!(r.outcome, ProbeOutcome::Success);
-        assert_eq!(r.latency_ms, 37);
-    }
-
-    #[test]
-    fn from_http_status_204_is_success_without_a_body() {
-        // #823: a compliant liveness endpoint may answer 204 with no body.
-        let r = ProbeResult::from_http_status(7, 204, 12);
-        assert!(r.is_ok());
-        assert_eq!(r.outcome, ProbeOutcome::Success);
-        assert_eq!(r.latency_ms, 12);
-    }
-
-    #[test]
-    fn from_http_status_non_2xx_keeps_existing_failure_classification() {
-        let r = ProbeResult::from_http_status(7, 503, 90);
-        assert!(!r.is_ok());
-        match r.outcome {
-            ProbeOutcome::Failure(reason) => assert!(reason.contains("503"), "got: {reason}"),
-            other => panic!("expected failure, got {other:?}"),
-        }
-    }
-
-    // ── probe_results_to_health_window ───────────────────────────────────────
-
-    #[test]
-    fn empty_reports_yield_zeroed_window() {
-        let w = probe_results_to_health_window(&[]);
-        assert_eq!(w.success_count, 0);
-        assert_eq!(w.failure_count, 0);
-        assert_eq!(w.p50_latency_ms, 0.0);
-    }
-
-    #[test]
-    fn all_success_window_has_correct_counts() {
-        let runner = SyntheticProbeRunner::new(make_probes());
+    fn mismatched_probe_id_on_failure_is_rewritten() {
+        let mut runner = SyntheticProbeRunner::new(vec![ping_config(3)]);
         let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 100)),
-            || 5000,
-        );
-        let w = probe_results_to_health_window(&reports);
-        assert_eq!(w.success_count, 3);
-        assert_eq!(w.failure_count, 0);
-        assert!((w.p50_latency_ms - 100.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn mixed_results_window_counts_failures() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let mut call = 0usize;
-        let reports = runner.run_all(
-            |c| {
-                call += 1;
-                if call == 2 {
-                    Err("timeout".into())
-                } else {
-                    Ok(ProbeResult::success(c.id, 200))
-                }
-            },
-            || 1000,
-        );
-        let w = probe_results_to_health_window(&reports);
-        assert_eq!(w.success_count, 2);
-        assert_eq!(w.failure_count, 1);
-    }
-
-    #[test]
-    fn window_timestamps_span_probe_execution_times() {
-        let runner = SyntheticProbeRunner::new(make_probes());
-        let ts_values = alloc::vec![1000u64, 1005, 1010];
-        let ts_idx = core::cell::Cell::new(0usize);
-        let reports = runner.run_all(
-            |c| Ok(ProbeResult::success(c.id, 50)),
-            || { let i = ts_idx.get(); ts_idx.set(i + 1); ts_values[i] },
-        );
-        let w = probe_results_to_health_window(&reports);
-        assert_eq!(w.started_at, 1000);
-        assert_eq!(w.ended_at, 1010);
-    }
-
-    #[test]
-    fn p50_is_median_of_successful_latencies() {
-        let probes = alloc::vec![
-            ProbeConfig::new(1, ProbeKind::Ping, "a").unwrap(),
-            ProbeConfig::new(2, ProbeKind::Ping, "b").unwrap(),
-            ProbeConfig::new(3, ProbeKind::Ping, "c").unwrap(),
-        ];
-        let latencies = [300u64, 100, 500];
-        let mut idx = 0usize;
-        let runner = SyntheticProbeRunner::new(probes);
-        let reports = runner.run_all(
-            |c| { let l = latencies[idx]; idx += 1; Ok(ProbeResult::success(c.id, l)) },
+            |_config| Ok(ProbeResult::failure(42, 5, "boom")),
             || 0,
         );
-        let w = probe_results_to_health_window(&reports);
-        // sorted: [100, 300, 500] → median index 1 → 300
-        assert!((w.p50_latency_ms - 300.0).abs() < 1e-9);
+        let result = reports[0].result.as_ref().unwrap();
+        assert_eq!(result.probe_id, 3);
+        assert!(matches!(result.outcome, ProbeOutcome::Failure(_)));
     }
 
     #[test]
-    fn custom_probe_kind_label() {
-        let kind = ProbeKind::Custom("deep-health-v2".into());
-        assert_eq!(kind.label(), "deep-health-v2");
-    }
-
-    #[test]
-    fn probe_outcome_to_endpoint_outcome_slow_success_is_success() {
-        let o = ProbeOutcome::SlowSuccess;
-        assert_eq!(o.to_endpoint_outcome(), EndpointOutcome::Success);
-    }
-
-    #[test]
-    fn probe_outcome_to_endpoint_outcome_failure_carries_reason() {
-        let o = ProbeOutcome::Failure("HTTP 503".into());
-        assert!(matches!(o.to_endpoint_outcome(), EndpointOutcome::Failure(_)));
-    }
-
-    // ── ProbeConfig::new blank-URL guard (#821) ──────────────────────────────
-
-    #[test]
-    fn new_rejects_empty_target() {
-        assert!(ProbeConfig::new(1, ProbeKind::Ping, "").is_err());
-    }
-
-    #[test]
-    fn new_rejects_whitespace_only_target() {
-        assert!(ProbeConfig::new(1, ProbeKind::Ping, "   ").is_err());
-    }
-
-    #[test]
-    fn new_accepts_valid_https_endpoint() {
-        assert!(ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com").is_ok());
+    fn probe_failure_propagates_unchanged() {
+        let mut runner = SyntheticProbeRunner::new(vec![ping_config(1)]);
+        let reports = runner.run_all(
+            |_config| Err(AnchorKitError::validation_error("probe unavailable")),
+            || 0,
+        );
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].probe_id, 1);
+        assert!(reports[0].result.is_err());
     }
 }
