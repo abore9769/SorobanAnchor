@@ -466,3 +466,8 @@ The release bundle includes:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1098 -->
+- #1098: 52. Enforce service dependencies on enable
