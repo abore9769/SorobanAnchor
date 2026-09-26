@@ -477,3 +477,6 @@ MIT
 
 <!-- handsoff-issue-1115 -->
 - #1115: 69. Parse SEP-10 algorithm exactly
+
+<!-- handsoff-issue-1116 -->
+- #1116: 70. Apply clock skew to SEP-10 nbf
