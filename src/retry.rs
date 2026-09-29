@@ -97,6 +97,48 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    /// Validate retry configuration parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_attempts` - Must be at least 1
+    /// * `backoff_multiplier` - Must be at least 1
+    /// * `max_delay_ms` - Must be at least 1
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all parameters are valid, or an error describing the violation.
+    fn validate(
+        max_attempts: u32,
+        backoff_multiplier: u32,
+        max_delay_ms: u64,
+    ) -> Result<(), crate::errors::AnchorKitError> {
+        use crate::errors::{AnchorKitError, ErrorCode};
+
+        if max_attempts == 0 {
+            return Err(AnchorKitError::new(
+                ErrorCode::ValidationError,
+                "RetryConfig max_attempts must be at least 1",
+            ));
+        }
+
+        if backoff_multiplier == 0 {
+            return Err(AnchorKitError::new(
+                ErrorCode::ValidationError,
+                "RetryConfig backoff_multiplier must be at least 1",
+            ));
+        }
+
+        if max_delay_ms == 0 {
+            return Err(AnchorKitError::new(
+                ErrorCode::ValidationError,
+                "RetryConfig max_delay_ms must be at least 1",
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Create a [`RetryConfig`] with explicit values for all fields.
     ///
     /// # Arguments
@@ -105,19 +147,21 @@ impl RetryConfig {
     ///   Must be at least `1`.
     /// * `base_delay_ms` - Delay in milliseconds before the first retry.
     /// * `max_delay_ms` - Upper bound on the computed delay (caps exponential growth).
+    ///   Must be at least `1`.
     /// * `backoff_multiplier` - Factor by which the delay is multiplied each attempt.
+    ///   Must be at least `1`.
     ///
     /// # Returns
     ///
     /// A new [`RetryConfig`] with default [`BackoffStrategy::Exponential`] and
-    /// [`JitterPolicy::Full`].
+    /// [`JitterPolicy::Full`], or an error if validation fails.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use anchorkit::RetryConfig;
     ///
-    /// let config = RetryConfig::new(5, 200, 10_000, 3);
+    /// let config = RetryConfig::new(5, 200, 10_000, 3).unwrap();
     /// assert_eq!(config.max_attempts, 5);
     /// assert_eq!(config.base_delay_ms, 200);
     /// ```
@@ -126,18 +170,33 @@ impl RetryConfig {
         base_delay_ms: u64,
         max_delay_ms: u64,
         backoff_multiplier: u32,
-    ) -> Self {
-        RetryConfig {
+    ) -> Result<Self, crate::errors::AnchorKitError> {
+        Self::validate(max_attempts, backoff_multiplier, max_delay_ms)?;
+
+        Ok(RetryConfig {
             max_attempts,
             base_delay_ms,
             max_delay_ms,
             backoff_multiplier,
             strategy: BackoffStrategy::default(),
             jitter_policy: JitterPolicy::default(),
-        }
+        })
     }
 
     /// Full configuration constructor including strategy and jitter policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_attempts` - Must be at least `1`
+    /// * `base_delay_ms` - Delay in milliseconds before the first retry
+    /// * `max_delay_ms` - Must be at least `1`
+    /// * `backoff_multiplier` - Must be at least `1`
+    /// * `strategy` - Backoff strategy to use
+    /// * `jitter_policy` - Jitter policy to apply
+    ///
+    /// # Returns
+    ///
+    /// A new [`RetryConfig`] or an error if validation fails.
     pub fn with_strategy(
         max_attempts: u32,
         base_delay_ms: u64,
@@ -145,15 +204,17 @@ impl RetryConfig {
         backoff_multiplier: u32,
         strategy: BackoffStrategy,
         jitter_policy: JitterPolicy,
-    ) -> Self {
-        RetryConfig {
+    ) -> Result<Self, crate::errors::AnchorKitError> {
+        Self::validate(max_attempts, backoff_multiplier, max_delay_ms)?;
+
+        Ok(RetryConfig {
             max_attempts,
             base_delay_ms,
             max_delay_ms,
             backoff_multiplier,
             strategy,
             jitter_policy,
-        }
+        })
     }
 
     /// 5 attempts, 50 ms base, 2 s max — for time-sensitive operations.
@@ -593,7 +654,7 @@ mod retry_tests {
 
     #[test]
     fn test_exhausted_retries() {
-        let config = RetryConfig::new(3, 10, 1000, 2);
+        let config = RetryConfig::new(3, 10, 1000, 2).unwrap();
         let mut calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
         let result = retry_with_backoff(
@@ -612,7 +673,7 @@ mod retry_tests {
 
     #[test]
     fn test_non_retryable_error_stops_immediately() {
-        let config = RetryConfig::new(5, 10, 1000, 2);
+        let config = RetryConfig::new(5, 10, 1000, 2).unwrap();
         let mut calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
         let result = retry_with_backoff(
@@ -631,7 +692,7 @@ mod retry_tests {
 
     #[test]
     fn test_delay_increases_exponentially() {
-        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let config = RetryConfig::new(4, 100, 10_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![0]);
         assert!(config.delay_for_attempt(0, &mut js) >= 100);
         assert!(config.delay_for_attempt(1, &mut js) >= 200);
@@ -640,14 +701,14 @@ mod retry_tests {
 
     #[test]
     fn test_delay_capped_at_max() {
-        let config = RetryConfig::new(10, 1000, 3_000, 2);
+        let config = RetryConfig::new(10, 1000, 3_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![0]);
         assert!(config.delay_for_attempt(5, &mut js) <= config.max_delay_ms);
     }
 
     #[test]
     fn test_sleep_called_between_retries() {
-        let config = RetryConfig::new(3, 50, 5000, 2);
+        let config = RetryConfig::new(3, 50, 5000, 2).unwrap();
         let mut sleep_calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
         let _ = retry_with_backoff(
@@ -721,7 +782,7 @@ mod retry_tests {
     /// Two retries with different seeds produce different delays.
     #[test]
     fn test_different_seeds_produce_different_delays() {
-        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let config = RetryConfig::new(4, 100, 10_000, 2).unwrap();
         let mut js_a = MockJitterSource::new(vec![0]);
         let mut js_b = MockJitterSource::new(vec![49]); // max jitter for base=100
         let delay_a = config.delay_for_attempt(0, &mut js_a);
@@ -732,7 +793,7 @@ mod retry_tests {
     /// Delay is always within configured bounds [base..=max_delay_ms].
     #[test]
     fn test_delay_within_bounds() {
-        let config = RetryConfig::new(6, 100, 3_000, 2);
+        let config = RetryConfig::new(6, 100, 3_000, 2).unwrap();
         for seed in [0u64, 1, 25, 49, 50, 99, 1000] {
             for attempt in 0..6u32 {
                 let mut js = MockJitterSource::new(vec![seed]);
@@ -749,7 +810,7 @@ mod retry_tests {
     /// MockJitterSource produces deterministic results in the specified order.
     #[test]
     fn test_mock_source_deterministic() {
-        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let config = RetryConfig::new(4, 100, 10_000, 2).unwrap();
         let seeds = vec![10u64, 20, 30];
         let mut js = MockJitterSource::new(seeds.clone());
 
@@ -776,7 +837,7 @@ mod retry_tests {
     /// retry_with_backoff passes jitter_source through to delay_for_attempt.
     #[test]
     fn test_mock_clock_delay_sequence() {
-        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let config = RetryConfig::new(4, 100, 10_000, 2).unwrap();
         // seeds: 3, 20, 37 → jitter: 3%51=3, 20%51=20, 37%51=37
         let mut js = MockJitterSource::new(vec![3, 20, 37]);
         let mut recorded: Vec<u64> = Vec::new();
@@ -846,7 +907,7 @@ mod retry_tests {
     /// delay_for_attempt with base_delay_ms = 0 produces 0 delay (no jitter).
     #[test]
     fn test_delay_for_attempt_zero_base() {
-        let config = RetryConfig::new(3, 0, 1_000, 2);
+        let config = RetryConfig::new(3, 0, 1_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![999]);
         assert_eq!(config.delay_for_attempt(0, &mut js), 0);
         assert_eq!(config.delay_for_attempt(1, &mut js), 0);
@@ -857,7 +918,7 @@ mod retry_tests {
     /// default substituted in its place.
     #[test]
     fn test_explicit_zero_base_delay_reaches_sleep_fn() {
-        let config = RetryConfig::new(3, 0, 1_000, 2);
+        let config = RetryConfig::new(3, 0, 1_000, 2).unwrap();
         assert_eq!(config.base_delay_ms, 0, "explicit zero must be stored as-is");
 
         let mut recorded: Vec<u64> = Vec::new();
@@ -879,14 +940,14 @@ mod retry_tests {
         assert_eq!(default_config.base_delay_ms, 100);
 
         // A positive explicit value must also be unaffected.
-        let positive_config = RetryConfig::new(3, 250, 1_000, 2);
+        let positive_config = RetryConfig::new(3, 250, 1_000, 2).unwrap();
         assert_eq!(positive_config.base_delay_ms, 250);
     }
 
     /// Total delay (including jitter) never exceeds max_delay_ms.
     #[test]
     fn test_jitter_does_not_push_past_max_delay() {
-        let config = RetryConfig::new(5, 1000, 3_000, 2);
+        let config = RetryConfig::new(5, 1000, 3_000, 2).unwrap();
         // Use a large seed to maximise jitter contribution
         for seed in [u64::MAX, 9999, 1000, 500] {
             for attempt in 0..5u32 {
@@ -905,7 +966,7 @@ mod retry_tests {
     #[test]
     fn test_delay_per_attempt_level() {
         // Use seed 0 (zero jitter) so we test the pure exponential component.
-        let config = RetryConfig::new(6, 100, 10_000, 2);
+        let config = RetryConfig::new(6, 100, 10_000, 2).unwrap();
         let expected = [100u64, 200, 400, 800, 1600, 3200];
         for (attempt, &exp) in expected.iter().enumerate() {
             let mut js = MockJitterSource::new(vec![0]);
@@ -1096,7 +1157,7 @@ mod retry_tests {
     /// Every attempt of a retried operation sees the same trace ID.
     #[test]
     fn test_trace_id_survives_every_retry() {
-        let config = RetryConfig::new(4, 1, 10, 1);
+        let config = RetryConfig::new(4, 1, 10, 1).unwrap();
         let parent = TraceContext::root_from_seed("retry-trace-survival");
         let mut js = MockJitterSource::new(vec![0]);
         let mut seen: Vec<String> = Vec::new();
@@ -1128,7 +1189,7 @@ mod retry_tests {
     /// Each attempt gets a distinct span parented to the retry-loop span.
     #[test]
     fn test_each_attempt_gets_a_distinct_child_span() {
-        let config = RetryConfig::new(3, 1, 10, 1);
+        let config = RetryConfig::new(3, 1, 10, 1).unwrap();
         let parent = TraceContext::root_from_seed("retry-span-per-attempt");
         let mut js = MockJitterSource::new(vec![0]);
         let mut spans: Vec<String> = Vec::new();
@@ -1160,7 +1221,7 @@ mod retry_tests {
     /// produce the same span, so a replayed retry is recognisable in logs.
     #[test]
     fn test_attempt_spans_are_reproducible() {
-        let config = RetryConfig::new(3, 1, 10, 1);
+        let config = RetryConfig::new(3, 1, 10, 1).unwrap();
         let parent = TraceContext::root_from_seed("retry-reproducible");
 
         let run = |parent: &TraceContext| {
@@ -1187,7 +1248,7 @@ mod retry_tests {
     /// that failed — the operator can find the exact span that stopped the loop.
     #[test]
     fn test_trace_available_on_non_retryable_failure() {
-        let config = RetryConfig::new(5, 1, 10, 1);
+        let config = RetryConfig::new(5, 1, 10, 1).unwrap();
         let parent = TraceContext::root_from_seed("retry-permanent");
         let mut js = MockJitterSource::new(vec![0]);
         let mut spans: Vec<String> = Vec::new();
@@ -1252,7 +1313,7 @@ mod retry_tests {
     /// operator can tell which try completed the request.
     #[test]
     fn test_successful_attempt_span_is_identifiable() {
-        let config = RetryConfig::new(5, 1, 10, 1);
+        let config = RetryConfig::new(5, 1, 10, 1).unwrap();
         let parent = TraceContext::root_from_seed("retry-success-span");
         let mut js = MockJitterSource::new(vec![0]);
 
@@ -1278,7 +1339,7 @@ mod retry_tests {
     /// trace ID — the case that matters for webhook delivery inside a request.
     #[test]
     fn test_trace_survives_nested_retry_loops() {
-        let config = RetryConfig::new(2, 1, 10, 1);
+        let config = RetryConfig::new(2, 1, 10, 1).unwrap();
         let request = TraceContext::root_from_seed("outer-request");
         let delivery = request.child("webhook-delivery");
         let mut js = MockJitterSource::new(vec![0]);
@@ -1309,7 +1370,7 @@ mod retry_tests {
     /// delay stays clamped to `max_delay_ms`.
     #[test]
     fn test_extreme_attempt_and_multiplier_do_not_overflow() {
-        let config = RetryConfig::new(3, u64::MAX / 2, u64::MAX, u32::MAX);
+        let config = RetryConfig::new(3, u64::MAX / 2, u64::MAX, u32::MAX).unwrap();
         let mut js = MockJitterSource::new(vec![0]);
         let delay = config.delay_for_attempt(u32::MAX, &mut js);
         assert!(delay <= config.max_delay_ms);
@@ -1319,7 +1380,7 @@ mod retry_tests {
     /// saturate at `max_delay_ms` rather than wrapping or panicking.
     #[test]
     fn test_extreme_base_delay_saturates_at_max() {
-        let config = RetryConfig::new(3, u64::MAX, 5_000, 2);
+        let config = RetryConfig::new(3, u64::MAX, 5_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![0]);
         let delay = config.delay_for_attempt(5, &mut js);
         assert_eq!(delay, config.max_delay_ms);
@@ -1346,7 +1407,7 @@ mod retry_tests {
     /// exponential delays after the overflow fix.
     #[test]
     fn test_normal_attempts_unaffected_by_overflow_fix() {
-        let config = RetryConfig::new(4, 100, 10_000, 2);
+        let config = RetryConfig::new(4, 100, 10_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![0]);
         assert_eq!(config.delay_for_attempt(0, &mut js), 100);
         assert_eq!(config.delay_for_attempt(1, &mut js), 200);
@@ -1362,7 +1423,7 @@ mod retry_tests {
     /// may fire after the final attempt.
     #[test]
     fn test_final_attempt_returns_immediately_without_extra_call_or_sleep() {
-        let config = RetryConfig::new(4, 10, 1_000, 2);
+        let config = RetryConfig::new(4, 10, 1_000, 2).unwrap();
         let mut calls = 0u32;
         let mut delay_calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
@@ -1392,7 +1453,7 @@ mod retry_tests {
     /// call, no delay.
     #[test]
     fn test_first_attempt_success_unaffected_by_boundary_fix() {
-        let config = RetryConfig::new(4, 10, 1_000, 2);
+        let config = RetryConfig::new(4, 10, 1_000, 2).unwrap();
         let mut calls = 0u32;
         let mut delay_calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
@@ -1415,7 +1476,7 @@ mod retry_tests {
     /// call, no delay, error returned right away.
     #[test]
     fn test_immediate_nonretryable_error_unaffected_by_boundary_fix() {
-        let config = RetryConfig::new(4, 10, 1_000, 2);
+        let config = RetryConfig::new(4, 10, 1_000, 2).unwrap();
         let mut calls = 0u32;
         let mut delay_calls = 0u32;
         let mut js = MockJitterSource::new(vec![0]);
@@ -1446,7 +1507,7 @@ mod retry_tests {
         // jitter_bound = base_delay_ms / 2 + 1 = 2_451.
         // seed = 2_450 => jitter = 2_450 % 2_451 = 2_450.
         // Unclamped: 4_900 + 2_450 = 7_350, well past max_delay_ms = 5_000.
-        let config = RetryConfig::new(2, 4_900, 5_000, 1);
+        let config = RetryConfig::new(2, 4_900, 5_000, 1).unwrap();
         let mut js = MockJitterSource::new(vec![2_450]);
         let delay = config.delay_for_attempt(0, &mut js);
         assert_eq!(delay, config.max_delay_ms);
@@ -1475,9 +1536,9 @@ mod retry_tests {
     #[test]
     fn test_largest_mock_jitter_never_exceeds_max_delay() {
         let configs = [
-            RetryConfig::new(5, 1_000, 3_000, 2),
-            RetryConfig::with_strategy(5, 1_000, 3_000, 2, BackoffStrategy::Linear, JitterPolicy::Full),
-            RetryConfig::with_strategy(5, 1_000, 3_000, 2, BackoffStrategy::Constant, JitterPolicy::Equal),
+            RetryConfig::new(5, 1_000, 3_000, 2).unwrap(),
+            RetryConfig::with_strategy(5, 1_000, 3_000, 2, BackoffStrategy::Linear, JitterPolicy::Full).unwrap(),
+            RetryConfig::with_strategy(5, 1_000, 3_000, 2, BackoffStrategy::Constant, JitterPolicy::Equal).unwrap(),
         ];
         for config in configs {
             for attempt in 0..5u32 {
@@ -1496,8 +1557,97 @@ mod retry_tests {
     /// by the clamp fix.
     #[test]
     fn test_ordinary_jittered_delay_unaffected_by_clamp_fix() {
-        let config = RetryConfig::new(3, 100, 10_000, 2);
+        let config = RetryConfig::new(3, 100, 10_000, 2).unwrap();
         let mut js = MockJitterSource::new(vec![10]);
         assert_eq!(config.delay_for_attempt(0, &mut js), 110);
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryConfig validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_retry_config_new_rejects_zero_attempts() {
+        let result = RetryConfig::new(0, 100, 5_000, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_new_rejects_zero_multiplier() {
+        let result = RetryConfig::new(3, 100, 5_000, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_new_rejects_zero_max_delay() {
+        let result = RetryConfig::new(3, 100, 0, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_new_accepts_valid_params() {
+        let result = RetryConfig::new(3, 100, 5_000, 2);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.base_delay_ms, 100);
+        assert_eq!(config.max_delay_ms, 5_000);
+        assert_eq!(config.backoff_multiplier, 2);
+    }
+
+    #[test]
+    fn test_retry_config_with_strategy_rejects_zero_attempts() {
+        let result = RetryConfig::with_strategy(
+            0,
+            100,
+            5_000,
+            2,
+            BackoffStrategy::Exponential,
+            JitterPolicy::Full,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_with_strategy_rejects_zero_multiplier() {
+        let result = RetryConfig::with_strategy(
+            3,
+            100,
+            5_000,
+            0,
+            BackoffStrategy::Exponential,
+            JitterPolicy::Full,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_with_strategy_rejects_zero_max_delay() {
+        let result = RetryConfig::with_strategy(
+            3,
+            100,
+            0,
+            2,
+            BackoffStrategy::Exponential,
+            JitterPolicy::Full,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_config_with_strategy_accepts_valid_params() {
+        let result = RetryConfig::with_strategy(
+            5,
+            200,
+            10_000,
+            3,
+            BackoffStrategy::Linear,
+            JitterPolicy::None,
+        );
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.strategy, BackoffStrategy::Linear);
+        assert_eq!(config.jitter_policy, JitterPolicy::None);
     }
 }

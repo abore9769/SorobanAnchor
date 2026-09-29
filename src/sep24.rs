@@ -226,12 +226,12 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AnchorKitError> {
         ));
     }
 
-    // Check for invalid characters
+    // Check for invalid characters (ASCII alphanumeric only)
     for c in id.chars() {
-        if !c.is_alphanumeric() && c != '-' && c != '_' {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
             return Err(AnchorKitError::new(
                 ErrorCode::ValidationError,
-                "Transaction ID contains invalid characters (only alphanumeric, hyphen, underscore allowed)",
+                "Transaction ID contains invalid characters (only ASCII alphanumeric, hyphen, underscore allowed)",
             ));
         }
     }
@@ -265,11 +265,11 @@ pub fn validate_transaction_id(id: &str) -> Result<(), AnchorKitError> {
         prev_char = Some(c);
     }
 
-    // Additional check: ensure there's at least one alphanumeric character
-    if !id.chars().any(|c| c.is_alphanumeric()) {
+    // Additional check: ensure there's at least one ASCII alphanumeric character
+    if !id.chars().any(|c| c.is_ascii_alphanumeric()) {
         return Err(AnchorKitError::new(
             ErrorCode::ValidationError,
-            "Transaction ID must contain at least one alphanumeric character",
+            "Transaction ID must contain at least one ASCII alphanumeric character",
         ));
     }
 
@@ -670,6 +670,13 @@ mod tests {
     #[test]
     fn test_validate_transaction_id_mixed_special_and_alpha_ok() {
         assert!(validate_transaction_id("tx_abc-123_XYZ").is_ok());
+    }
+
+    #[test]
+    fn test_validate_transaction_id_rejects_non_ascii() {
+        assert!(validate_transaction_id("tx-café").is_err());
+        assert!(validate_transaction_id("tx-日本").is_err());
+        assert!(validate_transaction_id("tx-Ñ123").is_err());
     }
 
     // -----------------------------------------------------------------------
