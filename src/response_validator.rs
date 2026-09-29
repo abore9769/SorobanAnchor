@@ -144,28 +144,44 @@ pub enum Sep6StatusClass {
 
 /// Classify a SEP-6 transaction `status` string.
 ///
+/// The input is normalized via [`TransactionStatus::from_str`](crate::TransactionStatus::from_str)
+/// to ensure consistent trimming and case-folding across all status-parsing paths.
+///
 /// Recognised values map to [`Completed`](Sep6StatusClass::Completed),
 /// [`Failed`](Sep6StatusClass::Failed) or [`Pending`](Sep6StatusClass::Pending);
-/// every other value falls through the default arm to
-/// [`Unknown`](Sep6StatusClass::Unknown).
+/// every other value falls through to [`Unknown`](Sep6StatusClass::Unknown).
 pub fn sep6_status_class(status: &str) -> Sep6StatusClass {
-    match status {
-        "completed" => Sep6StatusClass::Completed,
-        "refunded" | "expired" | "error" => Sep6StatusClass::Failed,
-        "pending_external"
-        | "pending_anchor"
-        | "pending_trust"
-        | "pending_user"
-        | "pending_user_transfer_start"
-        | "pending_user_transfer_complete"
-        | "incomplete"
-        | "pending"
-        | "no_market"
-        | "too_small"
-        | "too_large"
-        | "pending_stellar"
-        | "waiting_customer_action" => Sep6StatusClass::Pending,
-        _ => Sep6StatusClass::Unknown,
+    use crate::TransactionStatus;
+    
+    let parsed = TransactionStatus::from_str(status);
+    
+    // TransactionStatus::Error is used both for the literal "error" status
+    // and for unrecognized statuses. Check if the normalized input was "error".
+    if matches!(parsed, TransactionStatus::Error) {
+        let normalized = status.trim().to_ascii_lowercase();
+        if normalized == "error" {
+            return Sep6StatusClass::Failed;
+        } else {
+            return Sep6StatusClass::Unknown;
+        }
+    }
+    
+    match parsed {
+        TransactionStatus::Completed => Sep6StatusClass::Completed,
+        TransactionStatus::Refunded 
+        | TransactionStatus::Expired 
+        | TransactionStatus::NoMarket
+        | TransactionStatus::TooSmall
+        | TransactionStatus::TooLarge => Sep6StatusClass::Failed,
+        TransactionStatus::Pending
+        | TransactionStatus::Incomplete
+        | TransactionStatus::PendingExternal
+        | TransactionStatus::PendingAnchor
+        | TransactionStatus::PendingTrust
+        | TransactionStatus::PendingUser
+        | TransactionStatus::PendingStellar
+        | TransactionStatus::WaitingCustomerAction => Sep6StatusClass::Pending,
+        TransactionStatus::Error => unreachable!("handled above"),
     }
 }
 
@@ -1819,10 +1835,32 @@ mod tests {
     fn test_sep6_status_class_unknown_is_not_completed() {
         // A status a newer anchor might introduce must classify as Unknown,
         // never Completed, and must not pass validation.
-        for unknown in ["pending_regulatory_review", "settled", "", "COMPLETED"] {
+        for unknown in ["pending_regulatory_review", "settled", ""] {
             assert_eq!(sep6_status_class(unknown), Sep6StatusClass::Unknown, "{unknown}");
             assert!(!is_valid_sep6_status(unknown), "{unknown}");
         }
+    }
+
+    #[test]
+    fn test_sep6_status_class_normalizes_case_and_whitespace() {
+        // Issue #1138: sep6_status_class must normalize input like TransactionStatus::from_str
+        assert_eq!(sep6_status_class("COMPLETED"), Sep6StatusClass::Completed);
+        assert_eq!(sep6_status_class("Completed"), Sep6StatusClass::Completed);
+        assert_eq!(sep6_status_class("  completed  "), Sep6StatusClass::Completed);
+        assert_eq!(sep6_status_class("  COMPLETED  "), Sep6StatusClass::Completed);
+        
+        assert_eq!(sep6_status_class("PENDING_EXTERNAL"), Sep6StatusClass::Pending);
+        assert_eq!(sep6_status_class("  pending_anchor  "), Sep6StatusClass::Pending);
+        assert_eq!(sep6_status_class("PeNdInG_uSeR"), Sep6StatusClass::Pending);
+        
+        assert_eq!(sep6_status_class("REFUNDED"), Sep6StatusClass::Failed);
+        assert_eq!(sep6_status_class("  expired  "), Sep6StatusClass::Failed);
+        assert_eq!(sep6_status_class("ErRoR"), Sep6StatusClass::Failed);
+        
+        // Normalized versions must also pass validation
+        assert!(is_valid_sep6_status("COMPLETED"));
+        assert!(is_valid_sep6_status("  pending_user  "));
+        assert!(is_valid_sep6_status("Refunded"));
     }
 
     #[test]
