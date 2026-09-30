@@ -290,6 +290,134 @@ mod anchor_health_metrics_tests {
         assert_eq!(mb.failure_count, 2);
         assert_eq!(mb.uptime_bps, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Maximum-counter overflow protection (issue: wrapped denominator)
+    // -----------------------------------------------------------------------
+
+    /// A window whose counters were restored from an external source can hold
+    /// values near `u64::MAX`. Plain `success + failure` wraps `u64::MAX + 1`
+    /// to `0`, which `success_rate()` then reads as an empty window and which
+    /// collapses the denominator everywhere downstream.
+    #[test]
+    fn total_calls_maximum_counters_saturate_without_wrap() {
+        let w = anchorkit::anchor_health::HealthWindow {
+            started_at: 0,
+            ended_at: 300,
+            success_count: u64::MAX,
+            failure_count: 1,
+            p50_latency_ms: 0.0,
+            routing_failure_count: 0,
+            routing_attempt_count: 0,
+            recovery_time_seconds: 0,
+        };
+
+        assert_eq!(w.total_calls(), u64::MAX, "u64::MAX + 1 must saturate, not wrap to 0");
+        assert!((w.success_rate() - 1.0).abs() < 1e-12, "an all-success window must stay at 100%");
+    }
+
+    /// Both counters at maximum: the denominator must stay a single defined
+    /// value rather than wrapping to `u64::MAX - 1` (or panicking under
+    /// overflow checks).
+    #[test]
+    fn total_calls_both_counters_at_max_do_not_wrap() {
+        let w = anchorkit::anchor_health::HealthWindow {
+            started_at: 0,
+            ended_at: 300,
+            success_count: u64::MAX,
+            failure_count: u64::MAX,
+            p50_latency_ms: 0.0,
+            routing_failure_count: 0,
+            routing_attempt_count: 0,
+            recovery_time_seconds: 0,
+        };
+
+        assert_eq!(w.total_calls(), u64::MAX);
+        let rate = w.success_rate();
+        assert!(rate.is_finite());
+        assert!((0.0..=1.0).contains(&rate), "success_rate must stay in range, got {rate}");
+    }
+
+    /// Maximum counters restored through the checked constructor (i64 input)
+    /// must still produce a usable denominator and rate.
+    #[test]
+    fn restored_maximum_counts_from_checked_constructor_are_usable() {
+        let w = anchorkit::anchor_health::HealthWindow::new_checked(
+            0, 300, i64::MAX, i64::MAX, 0.0, 0, 0, 0,
+        )
+        .unwrap();
+
+        assert_eq!(w.success_count, i64::MAX as u64);
+        assert_eq!(w.failure_count, i64::MAX as u64);
+        assert_eq!(w.total_calls(), (i64::MAX as u64).saturating_add(i64::MAX as u64));
+        let rate = w.success_rate();
+        assert!(rate.is_finite());
+        assert!((0.0..=1.0).contains(&rate));
+    }
+
+    /// `uptime_percent` shares the same wrap bug: `u64::MAX + 1` overflows to
+    /// `0`, which the helper short-circuits to `0.0` and reports a completely
+    /// failed anchor for what was an entirely successful run.
+    #[test]
+    fn uptime_percent_maximum_counters_do_not_wrap() {
+        use anchorkit::anchor_health::uptime_percent;
+
+        assert_eq!(uptime_percent(u64::MAX, 1), 100.0, "one success beyond u64::MAX must not report 0%");
+        assert_eq!(uptime_percent(u64::MAX, 0), 100.0);
+        assert_eq!(uptime_percent(0, u64::MAX), 0.0);
+        assert!(uptime_percent(1, u64::MAX) > 0.0, "a single success must not be rounded away to exactly 0");
+
+        let at_max = uptime_percent(u64::MAX, u64::MAX);
+        assert!(at_max.is_finite());
+        assert!((0.0..=100.0).contains(&at_max), "uptime must stay in range, got {at_max}");
+    }
+
+    /// Regression guard: ordinary inputs must return exactly what they did
+    /// before the saturating fix.
+    #[test]
+    fn uptime_percent_ordinary_values_unchanged() {
+        use anchorkit::anchor_health::uptime_percent;
+
+        assert_eq!(uptime_percent(0, 0), 0.0);
+        assert_eq!(uptime_percent(1, 0), 100.0);
+        assert_eq!(uptime_percent(0, 1), 0.0);
+        assert!((uptime_percent(9, 1) - 90.0).abs() < 1e-9);
+        assert!((uptime_percent(1, 1) - 50.0).abs() < 1e-9);
+        assert!((uptime_percent(3, 2) - 60.0).abs() < 1e-9);
+        assert!((uptime_percent(999, 1) - 99.9).abs() < 1e-9);
+        assert!((uptime_percent(12_345, 678) - (12_345f64 / 13_023f64) * 100.0).abs() < 1e-9);
+    }
+
+    /// Ordinary windows must keep their exact totals and rates.
+    #[test]
+    fn total_calls_ordinary_windows_unchanged() {
+        let w = anchorkit::anchor_health::HealthWindow {
+            started_at: 0,
+            ended_at: 300,
+            success_count: 9,
+            failure_count: 1,
+            p50_latency_ms: 100.0,
+            routing_failure_count: 0,
+            routing_attempt_count: 10,
+            recovery_time_seconds: 0,
+        };
+
+        assert_eq!(w.total_calls(), 10);
+        assert!((w.success_rate() - 0.9).abs() < 1e-12);
+
+        let empty = anchorkit::anchor_health::HealthWindow {
+            started_at: 0,
+            ended_at: 300,
+            success_count: 0,
+            failure_count: 0,
+            p50_latency_ms: 0.0,
+            routing_failure_count: 0,
+            routing_attempt_count: 0,
+            recovery_time_seconds: 0,
+        };
+        assert_eq!(empty.total_calls(), 0);
+        assert_eq!(empty.success_rate(), 0.0);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -156,6 +156,12 @@ pub fn classify_http_status(status: u16) -> EndpointOutcome {
 
 /// Compute an uptime percentage (0.0–100.0) from raw success/failure counts.
 ///
+/// The denominator is built with [`u64::saturating_add`] so counters restored
+/// from an external source at or near [`u64::MAX`] saturate to a defined
+/// total instead of wrapping around to a small (or zero) denominator, which
+/// would silently flip the reported uptime. Ordinary inputs are unaffected
+/// because the sum never saturates below `u64::MAX`.
+///
 /// # Examples
 ///
 /// ```rust
@@ -165,7 +171,7 @@ pub fn classify_http_status(status: u16) -> EndpointOutcome {
 /// assert_eq!(uptime_percent(0, 0), 0.0_f64);
 /// ```
 pub fn uptime_percent(success: u64, failure: u64) -> f64 {
-    let total = success + failure;
+    let total = success.saturating_add(failure);
     if total == 0 {
         return 0.0;
     }
@@ -262,8 +268,13 @@ pub struct HealthWindow {
 
 impl HealthWindow {
     /// Total calls (success + failure) in this window.
+    ///
+    /// This is the denominator for [`HealthWindow::success_rate`], so it must
+    /// never wrap: saturating addition mirrors the saturating subtraction used
+    /// by [`HealthWindow::decrement_failure`] / [`HealthWindow::decrement_success`]
+    /// and keeps externally restored maximum counters at a defined value.
     pub fn total_calls(&self) -> u64 {
-        self.success_count + self.failure_count
+        self.success_count.saturating_add(self.failure_count)
     }
 
     /// Success rate in [0.0, 1.0]. Returns 0.0 for empty windows.

@@ -189,4 +189,97 @@ mod replay_metrics_tests {
         let per_id = client.get_replay_count_for_id(&hash);
         assert_eq!(per_id, 2, "per-id count must match replay attempts for that id");
     }
+
+    // -----------------------------------------------------------------------
+    // Overflow protection — counters pinned at u64::MAX must saturate
+    // -----------------------------------------------------------------------
+
+    /// Aggregate metrics live in instance storage and can be restored from an
+    /// external snapshot at `u64::MAX`. Plain `+= 1` would wrap them to `0`,
+    /// silently erasing the recorded history; the module policy is saturation
+    /// (as already used by the per-ID attempt counter).
+    #[test]
+    fn test_replay_metrics_saturate_at_u64_max() {
+        use anchorkit::replay_detection::{record_accepted_event, record_replay_detection, record_skipped_event, ReplayMetrics};
+        use soroban_sdk::symbol_short;
+
+        let env = make_env();
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let at_max = ReplayMetrics {
+            total_replay_attempts: u64::MAX,
+            unique_replayed_ids: u64::MAX,
+            last_replay_at: 0,
+            last_updated_ledger: 0,
+            accepted_events: u64::MAX,
+            skipped_events: u64::MAX,
+        };
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&symbol_short!("REPLAYM"), &at_max);
+        });
+
+        // Record a replay attempt against the saturated metrics.
+        let request_id = payload(&env, 0x9C);
+        let actor = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            record_replay_detection(&env, &request_id, &actor);
+        });
+
+        let m = client.get_replay_metrics();
+        assert_eq!(m.total_replay_attempts, u64::MAX, "total_replay_attempts must saturate, not wrap to 0");
+        assert_eq!(m.unique_replayed_ids, u64::MAX, "unique_replayed_ids must saturate, not wrap to 0");
+
+        // Accepted / skipped share the same metrics record.
+        env.as_contract(&contract_id, || {
+            record_accepted_event(&env);
+            record_skipped_event(&env);
+        });
+
+        let m = client.get_replay_metrics();
+        assert_eq!(m.accepted_events, u64::MAX, "accepted_events must saturate, not wrap to 0");
+        assert_eq!(m.skipped_events, u64::MAX, "skipped_events must saturate, not wrap to 0");
+    }
+
+    /// Saturation must not disturb ordinary increments or replay decisions.
+    #[test]
+    fn test_replay_metrics_normal_increments_unchanged() {
+        use anchorkit::replay_detection::{get_replay_metrics, record_replay_detection, ReplayMetrics};
+        use soroban_sdk::symbol_short;
+
+        let env = make_env();
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // One below maximum: a single increment must land exactly on MAX.
+        let near_max = ReplayMetrics {
+            total_replay_attempts: u64::MAX - 1,
+            unique_replayed_ids: 0,
+            last_replay_at: 0,
+            last_updated_ledger: 0,
+            accepted_events: 7,
+            skipped_events: 11,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&symbol_short!("REPLAYM"), &near_max);
+        });
+
+        let request_id = payload(&env, 0x2B);
+        let actor = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            record_replay_detection(&env, &request_id, &actor);
+        });
+
+        let m = env.as_contract(&contract_id, || get_replay_metrics(&env));
+        assert_eq!(m.total_replay_attempts, u64::MAX, "MAX - 1 + 1 must be exactly MAX");
+        assert_eq!(m.unique_replayed_ids, 1, "first attempt on this id still counts as unique");
+        assert_eq!(m.accepted_events, 7, "accepted_events must be untouched by a replay record");
+        assert_eq!(m.skipped_events, 11, "skipped_events must be untouched by a replay record");
+        assert_eq!(client.get_replay_count_for_id(&request_id), 1, "replay decision must still be recorded");
+    }
 }
