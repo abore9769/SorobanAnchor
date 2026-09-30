@@ -234,11 +234,28 @@ impl MemoryNonceTracker {
     }
     
     /// Create a new nonce tracker with capacity limit.
-    pub fn with_capacity(max_capacity: usize) -> Self {
-        MemoryNonceTracker {
+    ///
+    /// # Arguments
+    ///
+    /// * `max_capacity` - Maximum number of nonces to track. Must be at least 1.
+    ///
+    /// # Returns
+    ///
+    /// A new tracker or an error if capacity is zero.
+    pub fn with_capacity(max_capacity: usize) -> Result<Self, crate::errors::AnchorKitError> {
+        use crate::errors::{AnchorKitError, ErrorCode};
+
+        if max_capacity == 0 {
+            return Err(AnchorKitError::new(
+                ErrorCode::ValidationError,
+                "MemoryNonceTracker capacity must be at least 1",
+            ));
+        }
+
+        Ok(MemoryNonceTracker {
             nonces: alloc::collections::BTreeMap::new(),
             max_capacity,
-        }
+        })
     }
 }
 
@@ -1537,5 +1554,39 @@ mod tests {
         let entries = get_dead_letter_webhooks(&dlq, "test-key");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].trace_id, entries[1].trace_id);
+    }
+
+    // ── MemoryNonceTracker::with_capacity validation ──────────────────────────
+
+    #[test]
+    fn test_memory_nonce_tracker_rejects_zero_capacity() {
+        let result = MemoryNonceTracker::with_capacity(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memory_nonce_tracker_accepts_nonzero_capacity() {
+        let result = MemoryNonceTracker::with_capacity(1);
+        assert!(result.is_ok());
+        
+        let result = MemoryNonceTracker::with_capacity(100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_memory_nonce_tracker_capacity_one_retains_one_nonce() {
+        let mut tracker = MemoryNonceTracker::with_capacity(1).unwrap();
+        
+        // First nonce should be accepted
+        assert!(tracker.check_and_record("nonce1", 1000));
+        
+        // Second nonce should evict first and be accepted
+        assert!(tracker.check_and_record("nonce2", 2000));
+        
+        // First nonce should be accepted again (was evicted)
+        assert!(tracker.check_and_record("nonce1", 3000));
+        
+        // Second nonce should be rejected (was evicted)
+        assert!(tracker.check_and_record("nonce2", 4000));
     }
 }

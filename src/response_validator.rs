@@ -269,8 +269,19 @@ pub fn validate_response_body(body: &str, requirement: BodyRequirement) -> Resul
             BodyRequirement::Optional => Ok(()),
         };
     }
+    
+    // Check if body starts with JSON delimiters
     match trimmed.as_bytes()[0] {
-        b'{' | b'[' => Ok(()),
+        b'{' | b'[' => {
+            // Parse the JSON to ensure it's well-formed
+            if let Err(parse_err) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                return Err(Error::validation_error(&alloc::format!(
+                    "response body is malformed JSON: {}",
+                    parse_err,
+                )));
+            }
+            Ok(())
+        }
         _ => Err(Error::validation_error(&alloc::format!(
             "response body is not JSON: {}",
             body_for_error(body),
@@ -1898,6 +1909,32 @@ mod tests {
         assert!(validate_response_body(r#"{"transaction_id":"x"}"#, BodyRequirement::Required).is_ok());
         assert!(validate_response_body("  [1,2,3]  ", BodyRequirement::Required).is_ok());
         assert!(validate_response_body(r#"{"a":1}"#, BodyRequirement::Optional).is_ok());
+    }
+
+    #[test]
+    fn test_malformed_json_object_rejected() {
+        let result = validate_response_body("{broken", BodyRequirement::Required);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn test_malformed_json_array_rejected() {
+        let result = validate_response_body("[1,2,", BodyRequirement::Required);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_with_trailing_comma() {
+        let result = validate_response_body(r#"{"a":1,}"#, BodyRequirement::Required);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wellformed_json_accepted() {
+        assert!(validate_response_body(r#"{"nested":{"a":1}}"#, BodyRequirement::Required).is_ok());
+        assert!(validate_response_body(r#"[{"a":1},{"b":2}]"#, BodyRequirement::Required).is_ok());
     }
 
     // ── Issue #830: error context from an untrusted body is bounded ──────────
