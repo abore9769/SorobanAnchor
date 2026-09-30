@@ -72,8 +72,20 @@ impl DeduplicationKey {
     }
 
     /// Compact string representation used as an internal map key.
+    ///
+    /// Uses length-delimited encoding (`<len>:<value>`) for each component so
+    /// that distinct (operation, request_id) pairs with embedded colons always
+    /// produce distinct keys.  For example:
+    ///   operation="a:b", request_id="c"  →  "3:a:b|1:c"
+    ///   operation="a",   request_id="b:c" →  "1:a|3:b:c"
     fn as_map_key(&self) -> String {
-        alloc::format!("{}:{}", self.operation, self.request_id)
+        alloc::format!(
+            "{}:{}|{}:{}",
+            self.operation.len(),
+            self.operation,
+            self.request_id.len(),
+            self.request_id,
+        )
     }
 }
 
@@ -513,5 +525,33 @@ mod tests {
             Some(DeduplicationResult::Success("second-result".to_string())),
             "cached result must reflect the re-recorded entry, not the expired one"
         );
+    }
+
+    /// Keys whose operation or request_id contain colons must not collide.
+    ///
+    /// With naive `op:id` concatenation the two pairs below produce the same
+    /// string `"a:b:c"`:
+    ///   ("a",   "b:c")
+    ///   ("a:b", "c")
+    ///
+    /// Length-delimited encoding must keep them distinct.
+    #[test]
+    fn colon_in_components_does_not_cause_key_collision() {
+        let k1 = DeduplicationKey::new("a",   "b:c");
+        let k2 = DeduplicationKey::new("a:b", "c");
+
+        // The map keys must differ.
+        assert_ne!(
+            k1.as_map_key(),
+            k2.as_map_key(),
+            "keys with colon-containing components must not collide"
+        );
+
+        // Recording one must not affect the other in the store.
+        let mut store = DeduplicationStore::new(300);
+        store.record_success(&k1, "result-1", 0);
+
+        assert!(store.is_duplicate(&k1, 1),  "k1 must be a duplicate after recording");
+        assert!(!store.is_duplicate(&k2, 1), "k2 must remain distinct from k1");
     }
 }
