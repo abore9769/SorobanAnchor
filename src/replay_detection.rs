@@ -173,9 +173,9 @@ pub fn record_replay_detection(
     attempt_count = attempt_count.saturating_add(1);
 
     // Update global metrics
-    metrics.total_replay_attempts += 1;
+    metrics.total_replay_attempts = metrics.total_replay_attempts.saturating_add(1);
     if attempt_count == 1 {
-        metrics.unique_replayed_ids += 1;
+        metrics.unique_replayed_ids = metrics.unique_replayed_ids.saturating_add(1);
     }
     metrics.last_replay_at = now;
     metrics.last_updated_ledger = ledger_seq;
@@ -261,7 +261,7 @@ pub fn record_accepted_event(env: &Env) {
         .instance()
         .get::<_, ReplayMetrics>(&metrics_key)
         .unwrap_or_default();
-    metrics.accepted_events += 1;
+    metrics.accepted_events = metrics.accepted_events.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence();
     env.storage().instance().set(&metrics_key, &metrics);
 }
@@ -279,7 +279,7 @@ pub fn record_skipped_event(env: &Env) {
         .instance()
         .get::<_, ReplayMetrics>(&metrics_key)
         .unwrap_or_default();
-    metrics.skipped_events += 1;
+    metrics.skipped_events = metrics.skipped_events.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence();
     env.storage().instance().set(&metrics_key, &metrics);
 }
