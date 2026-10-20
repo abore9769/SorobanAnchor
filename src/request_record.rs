@@ -211,10 +211,24 @@ pub struct ExportBatch {
 /// let mut store = RequestRecordStore::new(policy);
 ///
 /// for i in 0..10_u64 {
-///     store.push(RequestRecord::new(i, 1_000 + i, "attest", "GXXX", "accepted", None::<&str>), 0);
+///     let outcome = if i % 2 == 0 { "accepted" } else { "rejected" };
+///     store.push(
+///         RequestRecord::new(i, 1_000 + i, "attest", "G_SYNTHETIC_ACTOR", outcome, None::<&str>),
+///         0,
+///     );
 /// }
-/// // Only 5 most-recent records are kept.
+/// // Only 5 most-recent records (ids 5..=9) are kept.
 /// assert_eq!(store.len(), 5);
+///
+/// // Retrieve a bounded page (limit = 3) and filter for accepted records.
+/// let page = store.export_batch(0, 3);
+/// let accepted: Vec<&RequestRecord> = page
+///     .records
+///     .iter()
+///     .filter(|r| r.outcome == "accepted")
+///     .collect();
+/// assert_eq!(accepted.len(), 1);
+/// assert_eq!(accepted[0].id, 6);
 /// ```
 #[derive(Debug, Default)]
 pub struct RequestRecordStore {
@@ -318,7 +332,10 @@ impl RequestRecordStore {
     ///
     /// let mut store = RequestRecordStore::new(RequestRetentionPolicy::default());
     /// for i in 0..25_u64 {
-    ///     store.push(RequestRecord::new(i, 1_000 + i, "attest", "GXXX", "accepted", None::<&str>));
+    ///     store.push(
+    ///         RequestRecord::new(i, 1_000 + i, "attest", "G_SYNTHETIC_ACTOR", "accepted", None::<&str>),
+    ///         0,
+    ///     );
     /// }
     ///
     /// let batch = store.export_batch(0, 10);
@@ -376,9 +393,9 @@ impl RequestRecordStore {
     /// use anchorkit::request_record::{RequestRecord, RequestRecordStore, RequestRetentionPolicy};
     ///
     /// let mut store = RequestRecordStore::new(RequestRetentionPolicy::default());
-    /// store.push(RequestRecord::new(1, 1_000, "attest", "GXXX", "accepted", None::<&str>));
-    /// store.push(RequestRecord::new(2, 2_000, "attest", "GXXX", "accepted", None::<&str>));
-    /// store.push(RequestRecord::new(3, 3_000, "attest", "GXXX", "accepted", None::<&str>));
+    /// store.push(RequestRecord::new(1, 1_000, "attest", "G_SYNTHETIC_ACTOR", "accepted", None::<&str>), 0);
+    /// store.push(RequestRecord::new(2, 2_000, "attest", "G_SYNTHETIC_ACTOR", "accepted", None::<&str>), 0);
+    /// store.push(RequestRecord::new(3, 3_000, "attest", "G_SYNTHETIC_ACTOR", "accepted", None::<&str>), 0);
     ///
     /// let archived = store.archive_before(2_500);
     /// assert_eq!(archived, 2);

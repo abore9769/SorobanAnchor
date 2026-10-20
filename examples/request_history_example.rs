@@ -1,15 +1,23 @@
-/// Example demonstrating Request Tracing and Session Management features
+/// Example demonstrating Request History Retrieval, Tracing, and Session Management
+///
+/// Run or validate with:
+/// ```bash
+/// cargo run --example request_history_example
+/// cargo test --lib request_record
+/// ```
 ///
 /// This example shows how to:
-/// 1. Track operations using request IDs
-/// 2. Use sessions to group related operations
-/// 3. View tracing spans for operations
-/// 4. Monitor operation flow and audit trail
+/// 1. Insert, bound, and retrieve host-side request history records (`RequestRecordStore`)
+/// 2. Filter retrieved history records by operation/outcome and paginate with `export_batch`
+/// 3. Track on-chain operations using request IDs and sessions
+/// 4. View tracing spans for operations
 
 use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String, Vec};
 
-// Import the contract types
+// Import the contract types and request history store
 use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
+use anchorkit::request_record::{RequestRecord, RequestRecordStore, RequestRetentionPolicy};
+
 
 fn main() {
     println!("=== AnchorKit Request Tracing & Session Management Example ===\n");
@@ -167,12 +175,79 @@ fn main() {
     let final_session = client.get_session(&session_id);
     println!("   Total operations tracked in session: {}", final_session.operation_count);
 
+    println!("\n10. Recording and querying bounded request history (RequestRecordStore)...");
+    // Retain at most 3 records, max age 3600s, enforcing retention on every push.
+    let policy = RequestRetentionPolicy::new(3, 3_600, true);
+    let mut history_store = RequestRecordStore::new(policy);
+
+    let now_secs = 1_700_000_100_u64;
+    history_store.push(
+        RequestRecord::new(
+            1,
+            1_700_000_010,
+            "attest",
+            "G_SYNTHETIC_ATTESTOR_1",
+            "accepted",
+            Some("initial attestation"),
+        ),
+        now_secs,
+    );
+    history_store.push(
+        RequestRecord::new(
+            2,
+            1_700_000_020,
+            "quote",
+            "G_SYNTHETIC_ATTESTOR_1",
+            "accepted",
+            Some("USD/USDC quote"),
+        ),
+        now_secs,
+    );
+    history_store.push(
+        RequestRecord::new(
+            3,
+            1_700_000_030,
+            "attest",
+            "G_SYNTHETIC_ATTESTOR_2",
+            "rejected",
+            Some("expired signature"),
+        ),
+        now_secs,
+    );
+
+    // Retrieve a single record by ID
+    if let Some(rec) = history_store.get_by_id(1) {
+        println!(
+            "   ✓ Lookup by ID 1: op={}, actor={}, outcome={}",
+            rec.operation, rec.actor, rec.outcome
+        );
+    }
+
+    // Retrieve a bounded page (limit = 2) and filter for accepted "attest" records
+    let page = history_store.export_batch(0, 2);
+    println!(
+        "   ✓ Paginated batch retrieved: {} records (has_more={})",
+        page.records.len(),
+        page.has_more
+    );
+
+    let accepted_attestations: std::vec::Vec<&RequestRecord> = page
+        .records
+        .iter()
+        .filter(|r| r.operation == "attest" && r.outcome == "accepted")
+        .collect();
+    println!(
+        "   ✓ Filtered accepted 'attest' records in batch: {}",
+        accepted_attestations.len()
+    );
+
     println!("\n=== Example Complete ===");
     println!("\nKey Features Demonstrated:");
     println!("✓ Request ID generation for operation tracking");
     println!("✓ Session-based grouping of related operations");
     println!("✓ Tracing span retrieval for operation monitoring");
-    println!("✓ Operation flow tracking and audit trail");
+    println!("✓ Bounded request history insertion, batch limit, and filtered retrieval");
     println!("✓ Timestamp and duration tracking");
     println!("✓ Support for multiple operation types (attestations, quotes)");
 }
+
