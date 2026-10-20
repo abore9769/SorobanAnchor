@@ -48,43 +48,32 @@ client.upgrade(&new_wasm_hash);  // ✓ Succeeds
 
 ### Schema Versioning
 
-Each contract version has a schema version number:
+Each persistent record type (`Attestation`, `Quote`, `KycRecord`) carries a `schema_version: u32` field, and the contract tracks the active storage layout version in instance storage (`src/migration.rs`):
 
-- **Version 0**: Initial deployment
-- **Version 1+**: After migrations
+- **Version `0`**: Uninitialized storage before `initialize()` is called
+- **`SCHEMA_V1` (`1`)**: Initial versioned layout stamped by `initialize()`
+- **`SCHEMA_V2` (`2`, `LATEST_SCHEMA_VERSION`)**: Adds `routing_reason` to `Quote` records via `MigrationStep::ToV2` (`"quotes_v1_to_v2"`)
 
-### Migration Flow
+### Read-Only Version Detection vs. State Migration
 
-```rust
-// 1. Admin calls migrate with new version
-client.migrate(&new_version);
+- **Read-only version detection (`get_schema_version()` / `migration::current_version()`)**: Inspects the current stored schema version (`0`, `1`, or `2`) without modifying contract state or appending to migration history. Use `get_migration_count()` and `get_migration_record(idx)` for read-only audit inspection.
+- **State migration (`migrate(new_schema_version, batch_size)`)**: Validates the transition via `migration::validate_migration()`, rewrites legacy records in batches, and calls `migration::commit_version()` to advance the stored version and append a `MigrationRecord` once all batch writes complete.
 
-// 2. Contract validates:
-//    - Caller is admin
-//    - New version > current version
-//    - New version != 0
+### Schema-Version Outcomes
 
-// 3. Schema version is updated
-// 4. Data transformations are applied (if any)
-```
+The table below summarizes the tested outcomes in `src/migration.rs` (`migration_tests`) and matches [`docs/upgrade-playbook.md`](./upgrade-playbook.md):
 
-### Version Constraints
-
-- Versions must be strictly increasing
-- Cannot migrate to same version
-- Cannot downgrade to lower version
-- Cannot migrate to version 0
-
-### Valid Migration Paths
-
-```
-0 → 1 ✓
-0 → 5 ✓ (skip versions)
-1 → 2 ✓
-5 → 5 ✗ (same version)
-5 → 3 ✗ (downgrade)
-1 → 0 ✗ (cannot go to 0)
-```
+| Operation | Stored Version | Target Version | Resolver Outcome | Expected Operator / Contract Action |
+| :--- | :--- | :--- | :--- | :--- |
+| `get_schema_version()` (read-only) | `0`, `1`, or `2` | — (read-only) | Returns stored `u32` (`0` if uninitialized) | Inspect active version before deciding whether `initialize()` or `migrate()` is needed; no state is modified |
+| `initialize()` (`set_version`) | `0` (uninitialized) | `1` (`SCHEMA_V1`) | `Ok(())` | Stamps initial `SCHEMA_V1` layout without writing a migration history entry |
+| `set_version` on initialized contract | `>= 1` | Any `version` | `Err(MigrationError::IllegalVersionTransition)` | Rejects direct version overwrite; all post-init upgrades must run through `migrate()` |
+| `migrate(2, batch_size)` (supported upgrade) | `1` (`SCHEMA_V1`) | `2` (`SCHEMA_V2`) | `Ok(MigrationStep::ToV2)` | Rewrites `QuoteV1` records with `routing_reason = None`, advances version to `2`, and records `"quotes_v1_to_v2"` |
+| `migrate` to current version (no-op attempt) | `2` (`SCHEMA_V2`) | `2` (`SCHEMA_V2`) | `Err(MigrationError::VersionNotAdvancing)` | Do not call `migrate()` when `get_schema_version()` already equals the target version |
+| `migrate` to lower version (downgrade) | `2` (`SCHEMA_V2`) | `1` (`SCHEMA_V1`) | `Err(MigrationError::VersionNotAdvancing)` | Schema downgrades are rejected; roll back WASM and restore from pre-upgrade backup if recovery is required |
+| `migrate` to reserved version `0` | Any (`0`, `1`, `2`) | `0` | `Err(MigrationError::InvalidTargetVersion)` | Version `0` is reserved for uninitialized storage; pass a valid target version (`>= 1`) |
+| `migrate` to unknown future version | `1` or `2` | `> 2` (`> LATEST_SCHEMA_VERSION`) | `Err(MigrationError::VersionTooNew)` | Deploy the newer contract WASM that defines the target version before invoking `migrate()` |
+| `migrate` skipping uninitialized / unregistered step | `0` (uninitialized) | `2` (`SCHEMA_V2`) | `Err(MigrationError::NoStepFound)` | Initialize the contract (`0 → 1`) and apply registered steps sequentially (`1 → 2`) |
 
 ## Data Preservation
 
