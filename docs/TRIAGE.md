@@ -92,8 +92,8 @@ Maintainers run a short (≤ 30 min) triage meeting or async thread to:
 
 ## Contributor guide
 
-- **Reporting a bug:** Use the bug report template and include reproduction steps, expected vs. actual behavior, and environment details.
-- **Requesting a feature:** Describe the use case and why existing behavior does not satisfy it.
+- **Reporting a bug:** Use the [issue template](../.github/ISSUE_TEMPLATE.md) and include actionable context, reproduction steps, expected behavior, and observable acceptance criteria. Never include credentials, secrets, or sensitive personal data.
+- **Requesting a feature:** Use the [issue template](../.github/ISSUE_TEMPLATE.md) to describe the context, proposed work, expected behavior, and observable acceptance criteria.
 - **Picking up an issue:** Comment "I'd like to work on this" so it can be assigned to you. Start from issues labeled `good first issue` or `help wanted`.
 
 For the full contribution workflow, see [CONTRIBUTING.md](CONTRIBUTING.md).
