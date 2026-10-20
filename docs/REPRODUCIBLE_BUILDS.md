@@ -132,6 +132,31 @@ The script:
 
 Exit code `0` means all checks pass; exit code `1` means at least one failed.
 
+#### Verifying checksums with standard shell utilities
+
+Consumers who download `dist/anchorkit-<VERSION>.tar.gz` and
+`dist/anchorkit-<VERSION>.sha256` without cloning the repository can verify
+the archive and per-artifact manifest directly:
+
+```bash
+# Compare the downloaded tarball against the published .sha256 file (Linux)
+sha256sum -c dist/anchorkit-0.1.0.sha256
+# dist/anchorkit-0.1.0.tar.gz: OK
+
+# Compare on macOS
+shasum -a 256 -c dist/anchorkit-0.1.0.sha256
+
+# Unpack and verify every bundled artifact against CHECKSUMS.sha256
+tar -xzf dist/anchorkit-0.1.0.tar.gz -C dist
+(cd dist/anchorkit-0.1.0 && sha256sum -c CHECKSUMS.sha256)
+```
+
+> **Note:** Checksum verification confirms **artifact integrity** against
+> accidental corruption or incomplete downloads, whereas cryptographic
+> signatures (`.sig` / `.minisig`) establish **publisher authenticity**. See
+> [Release Artifact Signing and Verification](release-signing.md) for signature
+> verification commands.
+
 ---
 
 ## Cross-build comparison

@@ -130,6 +130,42 @@ ANCHORKIT_MINISIGN_PUBKEY=anchorkit-release.pub \
 Exit code `0` means all checks passed.  Non-zero means at least one check
 failed; the output identifies the failing step.
 
+### Standalone checksum verification (integrity only)
+
+If you only need to confirm that `dist/anchorkit-<VERSION>.tar.gz` or the
+extracted bundle contents were not corrupted during download, you can verify
+the published SHA-256 checksums directly with `sha256sum` (Linux) or
+`shasum -a 256` (macOS):
+
+```bash
+# 1. Verify the release tarball against dist/anchorkit-0.1.0.sha256
+sha256sum -c dist/anchorkit-0.1.0.sha256
+# Expected output on match (exit code 0):
+# dist/anchorkit-0.1.0.tar.gz: OK
+
+# macOS equivalent:
+shasum -a 256 -c dist/anchorkit-0.1.0.sha256
+
+# 2. Verify individual extracted files against the bundle manifest
+tar -xzf dist/anchorkit-0.1.0.tar.gz -C dist
+(cd dist/anchorkit-0.1.0 && sha256sum -c CHECKSUMS.sha256)
+# Expected output on match (exit code 0):
+# anchorkit: OK
+# anchorkit.wasm: OK
+# schemas/config_schema.json: OK
+```
+
+If any file has been truncated or modified, `sha256sum -c` prints `FAILED` for
+that entry and exits with a non-zero status.
+
+> **Checksum integrity vs. signature authenticity:** A matching `.sha256` or
+> `CHECKSUMS.sha256` digest proves **file integrity** (the artifact matches the
+> recorded hash and was not corrupted in transit), but it does **not** prove
+> **publisher authenticity** because anyone who can replace the tarball can
+> also replace an unsigned `.sha256` file. Always pair checksum verification
+> with GPG or minisign signature verification above to confirm publisher
+> identity.
+
 ---
 
 ## 5  CI integration
