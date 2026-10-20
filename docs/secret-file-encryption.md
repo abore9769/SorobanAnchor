@@ -83,12 +83,17 @@ Never hard-code the GPG passphrase.  Use one of:
 - **HashiCorp Vault**: `vault kv get -field=passphrase secret/anchor/gpg`
 - **GitHub Actions**: `${{ secrets.GPG_PASSPHRASE }}`
 
-Pass it to GPG non-interactively:
+Pass it to GPG non-interactively without echoing the secret to stdout or logs:
 
 ```bash
-echo "$GPG_PASSPHRASE" | gpg --batch --passphrase-fd 0 \
+printenv GPG_PASSPHRASE | gpg --batch --quiet --passphrase-fd 0 \
   --decrypt --output /dev/shm/keypair.json keypair.json.gpg
+echo "status: keypair decrypted to /dev/shm/keypair.json [secret=<redacted>]"
 ```
+
+See [`examples/credential_management.sh`](../examples/credential_management.sh)
+for a complete end-to-end credential workflow that stores and verifies
+credentials while emitting only `[value=<redacted>]` status messages.
 
 ---
 
