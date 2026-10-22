@@ -183,6 +183,21 @@ git push -u origin feat/short-description
 Follow [conventional commits](https://www.conventionalcommits.org/):
 `feat`, `fix`, `docs`, `refactor`, `test`, `chore`.
 
+### First contribution task
+
+A safe first contribution is a focused mock-only parser check that does not
+require network credentials, live services, or deployment access. Start with the
+existing SEP-6 fixture in [`tests/sep_fixtures_tests.rs`](../tests/sep_fixtures_tests.rs):
+
+```bash
+cargo test --features mock-only test_sep6_deposit_minimal_fields
+```
+
+This validates the current mock fixture path in [`src/mock.rs`](../src/mock.rs)
+and confirms the parser accepts a minimal synthetic deposit response. If the
+command passes, you have a working local proof and can move on to a small
+follow-up change or documentation fix before opening a PR.
+
 ### Running tests
 
 ```bash
