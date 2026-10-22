@@ -27,9 +27,16 @@ GitHub Actions artifacts for trend analysis.
 
 ## Performance Baselines
 
+> **Important — informational reference only:** The numbers in this table are
+> **not enforced as hard gates** in CI or in any automated check.  They are
+> reference points measured on a known machine configuration so that developers
+> have a stable frame of reference when reading Criterion output.  A result
+> outside the range below does **not** fail a build or block a merge.  See
+> [CI Integration](#ci-integration) for the exact CI behavior.
+
 Baselines are measured on a single core (x86-64 @ ~3 GHz, Ubuntu 22.04) without
-parallelism. A regression is flagged when the measured time exceeds the baseline
-by more than **10 %**.
+parallelism. These numbers serve as a guide for manual investigation; CI hardware
+variance can cause fluctuations of 10–20 % without any real regression.
 
 | Benchmark | Expected throughput / latency |
 |-----------|-------------------------------|
@@ -110,12 +117,23 @@ When adding a new feature or changing a critical path:
 
 The `benchmarks` job in `.github/workflows/ci.yml`:
 
-- Runs on every push to `main` (not on PRs, to avoid inflating PR build times).
-- Saves Criterion HTML reports and raw data as a GitHub Actions artifact with
-  90-day retention under the name `benchmark-results-<sha>`.
-- Does **not** fail the build on regression — this is intentional because
-  CI hardware variance can trigger false positives. Developers should compare
-  artifacts manually when investigating a suspected regression.
+- Runs **only on push to `main`** — it does not run on pull requests, so it
+  never blocks or delays PR review.
+- Executes `cargo bench --bench load_benchmarks -- --save-baseline ci` which
+  **saves** the current run as a named baseline; it does **not** compare
+  against a previous baseline and therefore cannot produce a pass/fail result.
+- Uploads the Criterion HTML reports and raw JSON data as a GitHub Actions
+  artifact named `benchmark-results-<sha>` with 90-day retention.
+- **Does not fail the build on regression.** This is a deliberate design
+  choice: CI hardware variance (CPU throttling, container scheduling, shared
+  runners) routinely produces 10–20 % swings that do not reflect real code
+  changes.  Treating these as failures would create flaky CI without
+  providing useful signal.
 
-To enforce hard regression gates in the future, parse `target/criterion/*/estimates.json`
-in a post-benchmark step and compare against stored baseline JSON files.
+> **Summary:** Benchmark results in CI are **purely informational**.  A slow
+> benchmark result does not block a merge, does not fail a job, and is not a
+> correctness signal.  The numbers are for trend analysis only.
+
+To enforce hard regression gates in the future, parse
+`target/criterion/*/estimates.json` in a post-benchmark step and compare
+against stored baseline JSON files from a reference run.
