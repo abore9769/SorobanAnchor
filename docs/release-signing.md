@@ -98,6 +98,23 @@ Release / distribution channel.
 Download the tarball and its accompanying `.sha256` and signature files, then
 run:
 
+### Verify checksum integrity only
+
+From the repository root, with the downloaded files under `dist/`, verify the
+packaged tarball checksum:
+
+```bash
+VERSION="0.2.0" # Replace with the downloaded release version.
+sha256sum --check "dist/anchorkit-${VERSION}.sha256"
+# Expected: dist/anchorkit-0.2.0.tar.gz: OK
+```
+
+This detects whether the tarball matches the published checksum, but a
+checksum does not establish who published it. Verify the detached signature
+separately to authenticate the publisher.
+
+### Verify the signed release
+
 ```bash
 # GPG (default):
 make release-verify TARBALL=dist/anchorkit-0.1.0.tar.gz
