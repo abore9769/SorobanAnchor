@@ -50,8 +50,8 @@ client.upgrade(&new_wasm_hash);  // ✓ Succeeds
 
 Each contract version has a schema version number:
 
-- **Version 0**: Initial deployment
-- **Version 1+**: After migrations
+- **Version 0**: Uninitialized; `initialize()` writes schema version 1.
+- **Version 1+**: Schema versions recorded after initialization and migrations.
 
 ### Migration Flow
 
@@ -68,23 +68,22 @@ client.migrate(&new_version);
 // 4. Data transformations are applied (if any)
 ```
 
-### Version Constraints
+### Schema-Version Outcomes
 
-- Versions must be strictly increasing
-- Cannot migrate to same version
-- Cannot downgrade to lower version
-- Cannot migrate to version 0
+`get_schema_version()` only reads the stored version; it does not migrate
+contract state. `initialize()` sets the initial version to 1. Migration outcomes
+for the currently registered resolver are:
 
-### Valid Migration Paths
+| Current version | Request or operation | Outcome |
+|-----------------|----------------------|---------|
+| Any | `get_schema_version()` | Returns the stored version without changing state (0 before initialization). |
+| V1 | `migrate(2, batch_size)` | Supported V1 → V2 migration; quote records are processed in batches and the version advances when complete. |
+| V2 | Migrate to V2 or V1 | Rejected; migrations must advance the version. |
+| V0 | Migrate to V2 | Rejected; no V0 → V2 migration step is registered. |
+| V1 | Migrate to V3 | Rejected; V3 is newer than the version supported by this code. |
 
-```
-0 → 1 ✓
-0 → 5 ✓ (skip versions)
-1 → 2 ✓
-5 → 5 ✗ (same version)
-5 → 3 ✗ (downgrade)
-1 → 0 ✗ (cannot go to 0)
-```
+This table describes the resolver implemented today, not a policy guarantee
+that future schema versions will support any particular transition.
 
 ## Upgrade Preflight (Read-Only Dry Run)
 
