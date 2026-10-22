@@ -198,6 +198,125 @@ fn amount_positive_integer_accepted() {
     assert!(initiate_sep31_payment(raw).is_ok());
 }
 
+// -----------------------------------------------------------------------
+// Optional party fields — minimal and populated fixtures.
+//
+// Cross-border payment payloads vary by corridor and anchor.  Tests here
+// confirm that optional KYC-adjacent fields (memo, asset code, amount,
+// idempotency key) are never treated as universally required: a request
+// with none of them present must succeed, and a request with all of them
+// present must preserve every provided value.
+//
+// Synthetic identifiers are used throughout; no real personal data appears.
+// -----------------------------------------------------------------------
+
+/// Minimal fixture: only the three mandatory fields are populated.
+/// Every optional field is None.  The parser must accept this shape without
+/// error and must not fabricate values for absent fields.
+#[test]
+fn optional_party_fields_absent_shape_accepted() {
+    let raw = RawSep31PaymentResponse {
+        id:                  "pay-minimal-001".into(),
+        stellar_account_id:  VALID_ACCOUNT.into(),
+        sender:              "sender-synthetic-001".into(),
+        stellar_memo:        None,
+        stellar_memo_type:   None,
+        amount:              None,
+        asset_code:          None,
+        idempotency_key:     None,
+    };
+
+    let resp = initiate_sep31_payment(raw).unwrap();
+
+    // Required fields are preserved.
+    assert_eq!(resp.id,                 "pay-minimal-001");
+    assert_eq!(resp.stellar_account_id, VALID_ACCOUNT);
+    assert_eq!(resp.sender,             "sender-synthetic-001");
+
+    // Every optional field must remain absent — no defaults injected.
+    assert!(resp.stellar_memo.is_none(),      "memo must be None when not provided");
+    assert!(resp.stellar_memo_type.is_none(), "memo_type must be None when not provided");
+    assert!(resp.amount.is_none(),            "amount must be None when not provided");
+    assert!(resp.asset_code.is_none(),        "asset_code must be None when not provided");
+    assert!(resp.idempotency_key.is_none(),   "idempotency_key must be None when not provided");
+}
+
+/// Populated fixture: all optional fields are supplied with synthetic values.
+/// Each provided value must be preserved (with asset code normalised to
+/// uppercase per the field contract).
+#[test]
+fn optional_party_fields_present_shape_values_preserved() {
+    let raw = RawSep31PaymentResponse {
+        id:                  "pay-full-001".into(),
+        stellar_account_id:  VALID_ACCOUNT.into(),
+        sender:              "sender-synthetic-002".into(),
+        stellar_memo:        Some("synth-memo-42".into()),
+        stellar_memo_type:   Some("text".into()),
+        amount:              Some("250.75".into()),
+        asset_code:          Some("usdc".into()),   // mixed-case; must be normalised
+        idempotency_key:     Some("idem-synth-xyz-001".into()),
+    };
+
+    let resp = initiate_sep31_payment(raw).unwrap();
+
+    // Required fields.
+    assert_eq!(resp.id,                 "pay-full-001");
+    assert_eq!(resp.stellar_account_id, VALID_ACCOUNT);
+    assert_eq!(resp.sender,             "sender-synthetic-002");
+
+    // Optional fields — values must be preserved exactly (asset code uppercased).
+    assert_eq!(resp.stellar_memo.as_deref(),      Some("synth-memo-42"),        "memo must be preserved");
+    assert_eq!(resp.stellar_memo_type.as_deref(), Some("text"),                  "memo_type must be preserved");
+    assert_eq!(resp.amount.as_deref(),            Some("250.75"),                "amount must be preserved");
+    assert_eq!(resp.asset_code.as_deref(),        Some("USDC"),                  "asset_code must be normalised to uppercase");
+    assert_eq!(resp.idempotency_key.as_deref(),   Some("idem-synth-xyz-001"),    "idempotency_key must be preserved");
+}
+
+/// Required-field validation still fires even when all optional fields are
+/// absent.  An empty id with no optional fields must still be rejected.
+#[test]
+fn required_field_validation_still_enforced_with_all_optionals_absent() {
+    let raw = RawSep31PaymentResponse {
+        id:                  "".into(),   // violates required constraint
+        stellar_account_id:  VALID_ACCOUNT.into(),
+        sender:              "sender-synthetic-003".into(),
+        stellar_memo:        None,
+        stellar_memo_type:   None,
+        amount:              None,
+        asset_code:          None,
+        idempotency_key:     None,
+    };
+
+    assert_eq!(
+        initiate_sep31_payment(raw),
+        Err(Error::invalid_transaction_intent()),
+        "empty id must be rejected regardless of optional field state",
+    );
+}
+
+/// Required-field validation still fires even when all optional fields are
+/// populated.  An empty sender in an otherwise-complete payload must be
+/// rejected, confirming optional presence does not mask required-field errors.
+#[test]
+fn required_field_validation_still_enforced_with_all_optionals_present() {
+    let raw = RawSep31PaymentResponse {
+        id:                  "pay-validation-check".into(),
+        stellar_account_id:  VALID_ACCOUNT.into(),
+        sender:              "   ".into(), // whitespace-only: violates required constraint
+        stellar_memo:        Some("memo-val".into()),
+        stellar_memo_type:   Some("text".into()),
+        amount:              Some("10.00".into()),
+        asset_code:          Some("XLM".into()),
+        idempotency_key:     Some("idem-check-001".into()),
+    };
+
+    assert_eq!(
+        initiate_sep31_payment(raw),
+        Err(Error::invalid_transaction_intent()),
+        "whitespace-only sender must be rejected even when all optional fields are present",
+    );
+}
+
 #[test]
 fn service_type_sep31_detected_in_capability_check() {
     let env = Env::default();

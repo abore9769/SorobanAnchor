@@ -405,6 +405,59 @@ mod contract_init_upgrade_tests {
     }
 
     // -----------------------------------------------------------------------
+    // Pre-initialization guard — NotInitialized regression.
+    //
+    // Public methods that depend on initialized state must fail with the
+    // stable documented error code (NotInitialized = 23) when called before
+    // initialize().  This regression test verifies the guard for one
+    // representative method — get_admin — which is the simplest public
+    // method gated exclusively on the initialized flag with no other
+    // prerequisites.
+    //
+    // Each test deploys a fresh contract so it carries no storage state
+    // from any other test.  Post-initialization behavior is already covered
+    // by initialize_succeeds_first_time above.
+    // -----------------------------------------------------------------------
+
+    /// Calling get_admin before initialize() must return NotInitialized (23),
+    /// not an internal panic or a silent default value.
+    #[test]
+    fn get_admin_before_init_returns_not_initialized() {
+        let env = make_env();
+        set_ledger(&env, 1000);
+        // Fresh deploy — no initialize() call.
+        let (client, _) = deploy(&env);
+
+        assert!(
+            !client.is_initialized(),
+            "precondition: contract must not be initialized before the guard test"
+        );
+
+        let err = client
+            .try_get_admin()
+            .expect_err("get_admin must be rejected on an uninitialized contract")
+            .expect("rejection must be a contract error, not a host failure");
+
+        assert_eq!(
+            err,
+            Error::from_contract_error(ErrorCode::NotInitialized as u32),
+            "get_admin must return NotInitialized (code {}) before initialize()",
+            ErrorCode::NotInitialized as u32,
+        );
+    }
+
+    /// The NotInitialized discriminant is stable at 23.  Pinning it here
+    /// ensures any accidental renumbering of the enum is caught immediately.
+    #[test]
+    fn not_initialized_error_code_discriminant_is_stable() {
+        assert_eq!(
+            ErrorCode::NotInitialized as u32,
+            23,
+            "NotInitialized discriminant must remain 23 per the documented error table"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // is_initialized — reflects state correctly
     // -----------------------------------------------------------------------
 
