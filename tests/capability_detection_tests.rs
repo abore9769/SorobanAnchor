@@ -448,6 +448,144 @@ mod capability_detection_tests {
     }
 
     // -----------------------------------------------------------------------
+    // Disabled service exclusion from get_supported_services.
+    //
+    // Service configuration drives what an anchor advertises.  When an anchor
+    // is reconfigured to remove a previously-enabled service (i.e. it is
+    // omitted from the new services list), that service must no longer appear
+    // in get_supported_services and supports_service must return false for it.
+    //
+    // Tests check the public read result directly (not private storage).
+    // Existing versioned service behaviour is exercised by a separate
+    // reconfiguration assertion that confirms retained services are unchanged.
+    // -----------------------------------------------------------------------
+
+    /// Configuring one enabled service and one absent service: the absent
+    /// service must not appear in get_supported_services and supports_service
+    /// must return false for it.
+    #[test]
+    fn disabled_service_excluded_from_supported_services() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        {
+            let sk = SigningKey::generate(&mut OsRng);
+            register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+        }
+
+        // Configure with only SERVICE_DEPOSITS enabled; SERVICE_WITHDRAWALS is
+        // intentionally absent (i.e. disabled / not configured).
+        client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS]));
+
+        let record = client.get_supported_services(&anchor);
+
+        // The enabled service is present in the returned list.
+        assert!(
+            record.services.contains(&SERVICE_DEPOSITS),
+            "SERVICE_DEPOSITS must appear in get_supported_services when configured"
+        );
+
+        // The absent service is not present in the returned list.
+        assert!(
+            !record.services.contains(&SERVICE_WITHDRAWALS),
+            "SERVICE_WITHDRAWALS must not appear in get_supported_services when not configured"
+        );
+
+        // supports_service mirrors the list result.
+        assert!(
+            client.supports_service(&anchor, &SERVICE_DEPOSITS),
+            "supports_service must return true for the configured service"
+        );
+        assert!(
+            !client.supports_service(&anchor, &SERVICE_WITHDRAWALS),
+            "supports_service must return false for the absent service"
+        );
+    }
+
+    /// Reconfiguring an anchor to remove a previously-enabled service causes
+    /// that service to be excluded from the updated response.  The service
+    /// that is retained must remain visible and unaffected.
+    #[test]
+    fn reconfigured_removed_service_excluded_from_supported_services() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        {
+            let sk = SigningKey::generate(&mut OsRng);
+            register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+        }
+
+        // Initial configuration: both DEPOSITS and WITHDRAWALS are enabled.
+        client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS, SERVICE_WITHDRAWALS]));
+        assert!(client.supports_service(&anchor, &SERVICE_DEPOSITS));
+        assert!(client.supports_service(&anchor, &SERVICE_WITHDRAWALS));
+
+        // Reconfigure: WITHDRAWALS is removed (disabled) by omission.
+        client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS]));
+
+        let record = client.get_supported_services(&anchor);
+
+        // DEPOSITS is retained.
+        assert!(
+            record.services.contains(&SERVICE_DEPOSITS),
+            "SERVICE_DEPOSITS must remain in get_supported_services after reconfiguration"
+        );
+        assert!(
+            client.supports_service(&anchor, &SERVICE_DEPOSITS),
+            "supports_service must still return true for the retained service"
+        );
+
+        // WITHDRAWALS is now excluded.
+        assert!(
+            !record.services.contains(&SERVICE_WITHDRAWALS),
+            "SERVICE_WITHDRAWALS must be excluded from get_supported_services after removal"
+        );
+        assert!(
+            !client.supports_service(&anchor, &SERVICE_WITHDRAWALS),
+            "supports_service must return false for the removed service"
+        );
+    }
+
+    /// Two independent anchors: one configured with a service enabled, the
+    /// other with it absent.  Their responses must be independent — the
+    /// enabled anchor's record is not polluted by the other's configuration.
+    #[test]
+    fn disabled_service_exclusion_is_per_anchor() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor_with = Address::generate(&env);
+        let anchor_without = Address::generate(&env);
+        {
+            let sk1 = SigningKey::generate(&mut OsRng);
+            register_attestor_with_sep10(&env, &client, &anchor_with, &anchor_with, &sk1);
+            let sk2 = SigningKey::generate(&mut OsRng);
+            register_attestor_with_sep10(&env, &client, &anchor_without, &anchor_without, &sk2);
+        }
+
+        // anchor_with has QUOTES; anchor_without has only DEPOSITS.
+        client.configure_services(&anchor_with,    &services(&env, &[SERVICE_DEPOSITS, SERVICE_QUOTES]));
+        client.configure_services(&anchor_without, &services(&env, &[SERVICE_DEPOSITS]));
+
+        // anchor_with sees QUOTES.
+        assert!(
+            client.supports_service(&anchor_with, &SERVICE_QUOTES),
+            "anchor_with must advertise SERVICE_QUOTES"
+        );
+
+        // anchor_without does not see QUOTES.
+        assert!(
+            !client.supports_service(&anchor_without, &SERVICE_QUOTES),
+            "anchor_without must not advertise SERVICE_QUOTES"
+        );
+
+        // The enabled service on anchor_without (DEPOSITS) is unaffected.
+        assert!(
+            client.supports_service(&anchor_without, &SERVICE_DEPOSITS),
+            "anchor_without must still advertise SERVICE_DEPOSITS"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // configure_services_versioned — service-code validation (#ticket)
     //
     // These tests exercise the versioned entry-point directly so that any

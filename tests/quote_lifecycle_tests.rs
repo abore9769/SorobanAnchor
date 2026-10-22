@@ -171,6 +171,106 @@ mod quote_lifecycle_tests {
     }
 
     // -------------------------------------------------------------------------
+    // Expiry boundary tests — deterministic, fixed timestamps.
+    //
+    // The contract uses a strict `valid_until <= now` check, meaning a quote
+    // is considered expired the instant the ledger timestamp reaches its
+    // valid_until value.  One second before that instant the quote is still
+    // usable.
+    //
+    // These tests pin all timestamps so the assertions are independent of
+    // wall-clock time or ledger state left by other tests.
+    // -------------------------------------------------------------------------
+
+    /// A quote whose valid_until equals the current ledger timestamp is
+    /// expired.  receive_quote must panic with QuoteExpired at the exact
+    /// expiry instant.
+    #[test]
+    fn quote_expired_at_exact_boundary_timestamp() {
+        let env = make_env();
+
+        // Pin the clock at an arbitrary but deterministic epoch.
+        const BASE: u64 = 2_000_000;
+        const EXPIRY: u64 = BASE + 3_600; // quote lives for one hour from BASE
+
+        // Submit the quote while it is still valid (ledger < valid_until).
+        set_ledger(&env, BASE);
+        let (_, client) = setup(&env);
+        let anchor = Address::generate(&env);
+        register_anchor(&env, &client, &anchor);
+
+        let qid = submit_quote(&env, &client, &anchor, EXPIRY);
+
+        // Advance ledger to the exact expiry instant: now == valid_until.
+        // The contract treats valid_until <= now as expired.
+        set_ledger(&env, EXPIRY);
+
+        // receive_quote must panic (QuoteExpired) at this exact boundary.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.receive_quote(&anchor, &qid);
+        }));
+        assert!(
+            result.is_err(),
+            "quote must be rejected at valid_until == now (exact boundary)"
+        );
+    }
+
+    /// One second *before* the expiry instant the quote is still usable.
+    /// receive_quote must succeed at valid_until - 1.
+    #[test]
+    fn quote_still_valid_one_second_before_expiry() {
+        let env = make_env();
+
+        const BASE: u64 = 2_000_000;
+        const EXPIRY: u64 = BASE + 3_600;
+
+        set_ledger(&env, BASE);
+        let (_, client) = setup(&env);
+        let anchor = Address::generate(&env);
+        register_anchor(&env, &client, &anchor);
+
+        let qid = submit_quote(&env, &client, &anchor, EXPIRY);
+
+        // Advance to one second before expiry: now == valid_until - 1.
+        // The condition valid_until (EXPIRY) <= now (EXPIRY - 1) is false,
+        // so the quote is still live.
+        set_ledger(&env, EXPIRY - 1);
+
+        // receive_quote must not panic here.
+        let received = client.receive_quote(&anchor, &qid);
+        assert_eq!(received.quote_id, qid, "quote returned at valid_until - 1 must match submitted id");
+    }
+
+    /// One second *after* the expiry instant the quote is expired.
+    /// This companion case confirms the boundary is inclusive on the expired
+    /// side: now == valid_until + 1 must also fail.
+    #[test]
+    fn quote_expired_one_second_after_boundary() {
+        let env = make_env();
+
+        const BASE: u64 = 2_000_000;
+        const EXPIRY: u64 = BASE + 3_600;
+
+        set_ledger(&env, BASE);
+        let (_, client) = setup(&env);
+        let anchor = Address::generate(&env);
+        register_anchor(&env, &client, &anchor);
+
+        let qid = submit_quote(&env, &client, &anchor, EXPIRY);
+
+        // Advance one second past the expiry.
+        set_ledger(&env, EXPIRY + 1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.receive_quote(&anchor, &qid);
+        }));
+        assert!(
+            result.is_err(),
+            "quote must be rejected one second after valid_until (beyond boundary)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Purge expired quotes
     // -------------------------------------------------------------------------
 
