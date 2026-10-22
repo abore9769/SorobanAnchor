@@ -79,6 +79,16 @@ Add property-based tests when:
 - Edge cases are hard to enumerate manually
 - You want to verify round-trip behavior (serialize → deserialize)
 
+### Regression fixtures
+
+When adding a parser regression, prefer the existing mock fixture pattern in [`src/mock.rs`](src/mock.rs) and the representative tests in [`tests/sep_fixtures_tests.rs`](tests/sep_fixtures_tests.rs).
+
+```bash
+cargo test --features mock-only test_sep6_deposit_minimal_fields
+```
+
+Keep fixtures minimal and synthetic: reuse the same mock style, include only the fields required to trigger the bug, and avoid real user IDs, credentials, or network data. If the parser issue is about an edge case, construct the smallest valid JSON payload that reproduces it instead of copying a large production response.
+
 ### Proptest Documentation
 
 - [proptest Guide](https://docs.rs/proptest/latest/proptest/)
