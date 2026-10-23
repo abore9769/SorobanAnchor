@@ -23,8 +23,8 @@ fi
 OLD_NAMES=$(jq -r '.[].name' "$OLD" | sort)
 NEW_NAMES=$(jq -r '.[].name' "$NEW" | sort)
 
-REMOVED=$(diff <(echo "$OLD_NAMES") <(echo "$NEW_NAMES") | grep '^<' | sed 's/^< //')
-ADDED=$(diff   <(echo "$OLD_NAMES") <(echo "$NEW_NAMES") | grep '^>' | sed 's/^> //')
+REMOVED=$(comm -23 <(printf '%s\n' "$OLD_NAMES") <(printf '%s\n' "$NEW_NAMES"))
+ADDED=$(comm -13 <(printf '%s\n' "$OLD_NAMES") <(printf '%s\n' "$NEW_NAMES"))
 
 BREAKING=false
 
