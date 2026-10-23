@@ -112,6 +112,12 @@ git cliff --output CHANGELOG.md
 The script wraps `git-cliff` and applies the project's `cliff.toml`
 configuration (see below).
 
+When the checkout has no version tags, the script uses the version from
+`Cargo.toml` as the fallback tag and reports that it is generating from the
+available local history. This also works in shallow checkouts and does not
+fetch tags or contact a remote. Use `--dry-run` to preview the result without
+writing `CHANGELOG.md`.
+
 ---
 
 ## 3  Changelog format
