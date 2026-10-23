@@ -29,6 +29,10 @@ if [[ -z "$TAG" ]]; then
   TAG="v${VERSION}"
 fi
 
+if ! git -C "$ROOT" describe --tags --match 'v[0-9]*' --abbrev=0 >/dev/null 2>&1; then
+  echo "No version tags found; using available local history with fallback tag $TAG." >&2
+fi
+
 if ! command -v git-cliff &>/dev/null; then
   echo "ERROR: git-cliff is not installed." >&2
   echo "  Install with: cargo install git-cliff" >&2
