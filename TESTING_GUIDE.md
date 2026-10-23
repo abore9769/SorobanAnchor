@@ -10,6 +10,23 @@ AnchorKit uses three layers of testing to ensure robustness:
 2. **Fuzzing** — Continuous random input generation to find crashes and security issues
 3. **Feature-Flag Matrix Testing** — Validation across all supported build configurations
 
+## Running One Integration Test
+
+Cargo's `--test` option selects an integration-test target, while the optional
+test-name argument filters tests within that target:
+
+```bash
+# Run one test by name within the ledger boundary integration target
+cargo test --test ledger_boundary_tests test_rate_limit_window_expires_exactly_at_boundary
+
+# Run every test in that integration target
+cargo test --test ledger_boundary_tests
+```
+
+Cargo matches the supplied test name as a substring. These commands run the
+local integration tests; they do not enable the separately gated live-test
+workflow.
+
 ## Property-Based Testing (#643)
 
 Property-based testing generates randomized valid inputs and verifies the system behaves correctly under all conditions.
