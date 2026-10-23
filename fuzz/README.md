@@ -46,12 +46,18 @@ cargo fuzz run fuzz_target_domain_validation
 # Run for a fixed number of iterations
 cargo fuzz run fuzz_target_json_response_parsing -- -max_len=4096 -runs=10000
 
+# Smoke test: quick build/start check for one target with a fixed bound
+cd fuzz
+cargo fuzz run fuzz_target_json_response_parsing -- -max_len=1024 -runs=100
+
 # Run with a corpus seed
 cargo fuzz run fuzz_target_json_response_parsing -- corpus/
 
 # Run in debug mode (slower, more information)
 RUSTFLAGS="-g" cargo fuzz run fuzz_target_json_response_parsing
 ```
+
+This short smoke run is intended to confirm the target builds and starts cleanly. It is not a security audit, coverage guarantee, or a substitute for a longer fuzz campaign.
 
 ### Continuous Integration
 Add to your CI pipeline to run fuzzing periodically:
