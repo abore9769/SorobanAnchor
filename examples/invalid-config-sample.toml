@@ -1,0 +1,11 @@
+[contract]
+name = "invalid-config-sample"
+version = "1.0.0"
+network = "stellar-testnet"
+
+[attestors]
+[[attestors.registry]]
+name = "synthetic-provider"
+address = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+role = "attestor"
+enabled = true
