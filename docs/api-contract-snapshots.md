@@ -111,6 +111,11 @@ To diff two snapshots side by side:
                                 api_snapshots/anchorkit-0.2.0.json
 ```
 
+The comparison is read-only. Review the listed removed and added names in the
+output; exit status `1` means a breaking removal was found, while status `0`
+means no removed names were found (additions are non-breaking). To inspect the
+full snapshot contents, use `git diff --no-index` with the two JSON paths.
+
 Or compare the working tree against a tagged release:
 
 ```bash
