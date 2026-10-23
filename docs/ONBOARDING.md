@@ -230,6 +230,21 @@ anchor config file entirely and pass them via environment variables or a
 separate secrets store. The anchor config is for structural deployment
 configuration only.
 
+### Deliberately invalid sample
+
+[`examples/invalid-config-sample.toml`](../examples/invalid-config-sample.toml)
+is a non-deployable sample with one intentional schema error: its synthetic
+attestor address does not match the required Stellar address format. All other
+required fields are present so the validator reports that specific problem.
+Run the offline CLI from the repository root; a validation failure is expected:
+
+```bash
+cargo run -- offline validate --config examples/invalid-config-sample.toml
+```
+
+The validator should report an address-format/schema validation failure. This
+command only reads local files and does not contact the network.
+
 ### Generating API docs
 
 Refresh the browsable crate reference whenever the public exports change:
