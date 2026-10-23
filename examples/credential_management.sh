@@ -21,13 +21,21 @@ echo ""
 # ============================================================
 echo "Step 1: Storing credentials in encrypted keystore..."
 
-# Store KYC provider API key
+# Store KYC provider API key. The CLI prompts for the value without echoing it.
 echo "  Storing KYC provider API key..."
-echo "sk_test_kyc_key_12345678901234567890" | anchorkit credentials add --name kyc-provider-api-key 2>/dev/null || echo "    (Skipped - credential may already exist)"
+if anchorkit credentials add --name kyc-provider-api-key; then
+    echo "    Credential stored (value redacted)."
+else
+    echo "    (Skipped - credential may already exist)"
+fi
 
 # Store bank integration token
 echo "  Storing bank integration token..."
-echo "Bearer bank_token_12345678901234567890" | anchorkit credentials add --name bank-integration-token 2>/dev/null || echo "    (Skipped - credential may already exist)"
+if anchorkit credentials add --name bank-integration-token; then
+    echo "    Credential stored (value redacted)."
+else
+    echo "    (Skipped - credential may already exist)"
+fi
 
 echo "  ✓ Credentials stored securely in ~/.anchorkit/keystore.json"
 echo ""
