@@ -2,6 +2,17 @@
 //!
 //! This example shows how to use the domain validator utility
 //! to validate anchor domain URLs before making requests.
+//!
+//! Mode: Offline. Validation is purely syntactic; no DNS lookups or HTTP
+//!   requests are made.
+//!
+//! Prerequisites:
+//!   Binary/build: Rust toolchain (cargo)
+//!   Environment:  None
+//!   Network:      None, except that the first cargo build may download crates
+//!
+//! Run:
+//!   cargo run --example domain_validation_example
 
 use anchorkit::{validate_anchor_domain, Error};
 

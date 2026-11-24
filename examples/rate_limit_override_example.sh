@@ -6,12 +6,19 @@
 # precedence over both the role override and the global default), and
 # reading overrides back.
 #
+# Mode: Illustrative. The script only prints commands and expected output; it
+#   executes nothing and touches no network. The prerequisites below apply
+#   when you copy the printed commands and run them yourself.
+#
 # Prerequisites:
-#   - stellar CLI installed and configured with a signing identity named
-#     "anchor-admin" that holds the contract's admin key (or the
-#     SetRateLimits capability — see docs/governance-and-security.md)
-#   - ANCHOR_CONTRACT_ID env var set
-#   - STELLAR_NETWORK env var set (default: testnet)
+#   Binary/build: None to run this script. For the printed commands: stellar
+#                 CLI in PATH, configured with a signing identity named
+#                 "anchor-admin" that holds the contract's admin key (or the
+#                 SetRateLimits capability — see docs/governance-and-security.md)
+#   Environment:  ANCHOR_CONTRACT_ID (optional; defaults to a CBXXX... placeholder)
+#                 STELLAR_NETWORK    (optional; default: testnet)
+#   Network:      None to run this script. The printed commands need RPC
+#                 access and a deployed contract
 #
 # Run:
 #   bash examples/rate_limit_override_example.sh

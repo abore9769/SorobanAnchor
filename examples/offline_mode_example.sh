@@ -2,10 +2,19 @@
 # offline_mode_example.sh — Demonstrate offline config validation and workflow
 # simulation without any network access.
 #
-# Usage:
-#   ./examples/offline_mode_example.sh
+# Mode: Offline. Runs `anchorkit offline validate` / `offline simulate` via
+#   `cargo run`; these read local files only and need no credentials.
 #
-# Prerequisites: cargo build (native target)
+# Prerequisites:
+#   Binary/build: Rust toolchain (cargo, native target). The script builds and
+#                 runs the CLI with `cargo run --bin anchorkit`, so no
+#                 installed binary is needed. Run from the repository root:
+#                 it reads configs/ by relative path
+#   Environment:  None
+#   Network:      None, except that the first cargo build may download crates
+#
+# Run:
+#   bash examples/offline_mode_example.sh
 
 set -euo pipefail
 

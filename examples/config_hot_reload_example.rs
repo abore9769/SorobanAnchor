@@ -1,6 +1,16 @@
 //! Demonstrates runtime configuration hot-reload (#633): a long-running
 //! process can pick up edits to its config file without restarting.
 //!
+//! Mode: Offline. Loads and re-validates a local config file; it does not
+//!   modify the file.
+//!
+//! Prerequisites:
+//!   Binary/build: Rust toolchain (cargo) with default features (`std`). Run
+//!                 from the repository root: it reads
+//!                 configs/remittance-anchor.toml by relative path
+//!   Environment:  None
+//!   Network:      None, except that the first cargo build may download crates
+//!
 //! Run:
 //!   cargo run --example config_hot_reload_example
 
