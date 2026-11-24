@@ -152,7 +152,19 @@ makes the intent explicit.
 **Non-mainnet networks** (testnet, futurenet, custom profiles) never show this
 prompt regardless of flags.
 
+> **See also:** the [testnet vs. mainnet comparison in the README](../README.md)
+> for a side-by-side summary of the two network profiles and their confirmation
+> expectations. That table is a convenience summary only — this section is the
+> authoritative description of the confirmation behavior. In particular, the
+> two networks are **not** interchangeable: mainnet always requires a
+> deliberate operator confirmation (interactive `y`/`yes`, or an explicit
+> `--yes` in scripted/CI environments), while testnet never prompts. Never
+> commit secrets or private keys to scripts or CI configuration, and do not
+> disable or work around the confirmation prompt outside of an intentional,
+> reviewed automation path.
+
 ### Initial Deployment
+=======
 
 1. Verify the WASM checksum:
 ```bash

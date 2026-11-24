@@ -181,6 +181,31 @@ anchorkit verify --id 42
 anchorkit health --contract-id $ANCHOR_CONTRACT_ID --attestor GANCHOR123...
 ```
 
+### Testnet vs. mainnet deployment
+
+Testnet and mainnet are **not interchangeable**. They use different network
+profiles, different contract IDs, and different confirmation expectations.
+Never reuse a mainnet contract ID or key on testnet, or the reverse.
+
+| Network profile | Command | Confirmation |
+|---|---|---|
+| `testnet` | `anchorkit deploy --network testnet` | Never prompts |
+| `futurenet` | `anchorkit deploy --network futurenet` | Never prompts |
+| `mainnet` | `anchorkit deploy --network mainnet` | Prompts interactively; requires deliberate operator confirmation |
+
+- **Mainnet requires deliberate operator confirmation.** The interactive
+  prompt is a safety gate: read it, verify the target contract ID
+  (e.g. `<CONTRACT_ID>`), and confirm only when you intend to deploy to
+  mainnet.
+- **`--yes` skips the prompt** and is intended for scripted or CI use where
+  the target network and contract ID are already pinned and reviewed. It is
+  not a way to bypass prompts casually, and it does not change which network
+  is targeted.
+- **Never pass secret keys on the command line or commit them.** Supply
+  credentials through the supported keystore or environment variables
+  (see [`examples/credential_management.sh`](examples/credential_management.sh)).
+  Contract IDs in examples are placeholders such as `<CONTRACT_ID>`.
+
 ### Offline mode: what it checks
 
 `anchorkit offline validate` and `anchorkit offline simulate` run without network access and without credentials. They check local files only.

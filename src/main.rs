@@ -3675,6 +3675,57 @@ mod cli_validation_tests {
     fn test_confirm_mainnet_deploy_skips_prompt_with_no_interactive() {
         assert!(confirm_mainnet_deploy("mainnet", false, true));
     }
+
+    // ── documented network names / --yes behavior (README comparison) ────
+    //
+    // The README's testnet-vs-mainnet comparison must only reference network
+    // names and flags that the parser actually accepts.  These tests pin the
+    // documented surface so the comparison cannot drift from the CLI.
+
+    #[test]
+    fn test_documented_builtin_network_names_are_accepted() {
+        // README lists exactly these built-in profiles.
+        for name in ["testnet", "mainnet", "futurenet"] {
+            assert!(
+                BUILTIN_NETWORKS.contains(&name),
+                "'{name}' is documented but not a built-in network"
+            );
+            assert!(
+                validate_network_arg(name).is_ok(),
+                "documented network '{name}' must be accepted by the CLI"
+            );
+        }
+    }
+
+    #[test]
+    fn test_documented_network_names_are_not_interchangeable() {
+        // Each built-in resolves to its own RPC endpoint and passphrase, so
+        // testnet and mainnet can never be treated as aliases of each other.
+        assert_ne!(rpc_url("testnet"), rpc_url("mainnet"));
+        assert_ne!(passphrase("testnet"), passphrase("mainnet"));
+        assert_eq!(
+            passphrase("mainnet"),
+            "Public Global Stellar Network ; September 2015"
+        );
+        assert_eq!(passphrase("testnet"), "Test SDF Network ; September 2015");
+    }
+
+    #[test]
+    fn test_mainnet_requires_confirmation_without_yes() {
+        // The documented rule: mainnet deploys prompt unless --yes (or
+        // --no-interactive) is supplied.  A non-interactive stdin read fails,
+        // so the prompt path returns false and the deploy is aborted.
+        assert!(!confirm_mainnet_deploy("mainnet", false, false));
+    }
+
+    #[test]
+    fn test_yes_flag_only_bypasses_prompt_for_mainnet() {
+        // --yes is documented as a mainnet confirmation bypass; it must not
+        // change behavior for other networks (they never prompt).
+        assert!(confirm_mainnet_deploy("testnet", false, false));
+        assert!(confirm_mainnet_deploy("futurenet", false, false));
+        assert!(confirm_mainnet_deploy("mainnet", true, false));
+    }
 }
 
 // ── CLI flag-vs-environment-variable precedence tests ────────────────────────
