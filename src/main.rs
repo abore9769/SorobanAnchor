@@ -623,7 +623,9 @@ enum Commands {
         /// Admin address for post-deployment initialization
         #[arg(long)]
         admin: Option<String>,
-        /// Validate without deploying
+        /// Run pre-deployment checks only, then exit without building,
+        /// deploying, initializing, or recording a deployment.
+        /// Not honored by --upgrade.
         #[arg(long)]
         dry_run: bool,
         /// List deployment history
@@ -837,12 +839,26 @@ enum OfflineAction {
     ///
     /// This command does not contact any anchor, RPC endpoint, or external
     /// service — it is safe to run in air-gapped or pre-deployment environments.
+    #[command(after_help = "\
+Examples:
+  # Validate one file (no network access or credentials required)
+  anchorkit offline validate --config configs/remittance-anchor.toml
+
+  # Validate every .json and .toml file under configs/
+  anchorkit offline validate")]
     Validate {
         /// Path to a specific config file (validates all in configs/ when omitted)
         #[arg(long)]
         config: Option<String>,
     },
     /// Simulate a named workflow without network access
+    #[command(after_help = "\
+Examples:
+  # Validate one config, then simulate the deploy workflow offline
+  anchorkit offline simulate --workflow deploy --config configs/remittance-anchor.toml
+
+  # Simulate attestor registration using every config under configs/
+  anchorkit offline simulate --workflow register")]
     Simulate {
         /// Path to a config file (uses configs/ when omitted)
         #[arg(long)]
