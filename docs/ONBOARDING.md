@@ -317,6 +317,7 @@ Other points:
 - Keep any key file used with `--keypair-file` out of version control, and encrypt it at rest.
 - Proxy credentials are configured separately. See [`proxy-and-credentials.md`](proxy-and-credentials.md) for how they are set and handled.
 - For encrypting files that hold secrets at rest, see [`secret-file-encryption.md`](secret-file-encryption.md).
+- For a table of every `anchorkit credentials` operation, including which ones are destructive, see [`credential-lifecycle.md`](credential-lifecycle.md).
 
 ### Making a change
 

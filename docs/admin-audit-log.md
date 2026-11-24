@@ -397,6 +397,14 @@ helpers do not enforce an admin check; see the store-specific authorization
 and retention details above. Keep privileged configuration and clearing actions
 restricted to authorized operators.
 
+### Sensitive Fields
+
+Every field is stored on-chain and published in the `("admin", "audit",
+entry_id)` event. Never write credentials or unnecessary personal data into
+`target`, `old_value`, `new_value`, or `error_message`. See
+[audit log and provenance field sensitivity](audit-log-sensitive-fields.md) for
+what each field holds and what must stay out.
+
 ## Troubleshooting
 
 ### Audit Entries Not Being Created
