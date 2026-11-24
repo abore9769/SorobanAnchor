@@ -219,6 +219,32 @@ pub fn my_function(param1: Type1, param2: Type2) -> ReturnType {
 }
 ```
 
+## Public API change review
+
+AnchorKit exposes public Rust types and functions, and API snapshots record
+changes to those exports. Before changing anything that is publicly exported,
+review each of the following surfaces:
+
+- **Public exports** — items exported from `src/lib.rs` (and the modules it
+  re-exports). Check whether a change adds, removes, or alters a public type,
+  function, trait, or signature.
+- **API snapshots** — snapshot files under `api_snapshots/`, produced by
+  `scripts/snapshot_api.sh`. Regenerate the snapshot when exports change and
+  include the result in your PR.
+- **Snapshot diff** — compare the snapshot against the previous one with
+  `scripts/diff_api_snapshot.sh`. The procedure is documented in
+  [api-contract-snapshots.md](api-contract-snapshots.md); follow it and report
+  the diff in your PR description.
+- **Documentation** — update doc comments and the pages listed in the
+  [Documentation Ownership Map](#documentation-ownership-map) when behavior or
+  usage changes.
+- **Tests** — update or add tests that exercise the changed public surface.
+
+Note: the repository does not currently promise semantic-versioning stability
+for its public API. Treat the snapshot diff as a record of what changed, not as
+a guarantee that existing exports will remain compatible across releases. If a
+semver policy is adopted later, this note will be updated to reference it.
+
 ## Generated files
 
 Some files in the repository are produced by scripts, while others are written by hand. Check which kind you are looking at before editing.
