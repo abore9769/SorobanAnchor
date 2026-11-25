@@ -237,4 +237,6 @@ Use both together for maximum assurance.
 - [src/artifact_provenance.rs](../src/artifact_provenance.rs) — Provenance
   record implementation
 - [Governance and Security](governance-and-security.md) — Overall security model
+- [Audit log and provenance field sensitivity](audit-log-sensitive-fields.md) —
+  What must stay out of `build_command`, `build_env`, and `source_repository`
 

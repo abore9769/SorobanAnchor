@@ -186,6 +186,7 @@ mount -t tmpfs -o size=1m tmpfs /mnt/secrets
 
 ## Further reading
 
+- [Credential lifecycle quick reference](credential-lifecycle.md) — `anchorkit credentials` add, list, get, rotate, and remove
 - [Stellar CLI key management](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli)
 - [age encryption tool](https://github.com/FiloSottile/age)
 - [Mozilla SOPS](https://github.com/mozilla/sops) — secrets management for config files

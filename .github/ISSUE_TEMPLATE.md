@@ -47,11 +47,14 @@ input matters, describe its shape or build an equivalent dummy input rather than
 posting the original. See [credential handling](../docs/proxy-and-credentials.md)
 and [secret-file handling](../docs/secret-file-encryption.md).
 
-**Suspected vulnerability?** Do not report it in this public issue. Follow the
+**Suspected vulnerability?** Do not report it in this public issue, and do not
+post exploit steps, proof-of-concept code, or affected deployment details here.
+Follow the
 [private responsible-disclosure process](../docs/governance-and-security.md#responsible-disclosure)
-using the affected repository's private security reporting channel. Never include
-live secrets in a report. If a credential was exposed, revoke or rotate it;
-editing the issue alone does not invalidate it.
+and use GitHub's private vulnerability reporting for the affected repository
+(**Security** tab → **Report a vulnerability**). Never include live secrets in a
+report. If a credential was exposed, revoke or rotate it; editing the issue alone
+does not invalidate it.
 
 ## Context
 <!-- What are you trying to do, and what relevant context should maintainers know? -->
