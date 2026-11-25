@@ -238,6 +238,7 @@ Other scenario walkthroughs live in [`examples/`](examples/):
 | `attestation_workflow.sh` | Registration, plain/session/traced attestations, replay protection |
 | `rate_limit_override_example.sh` | Per-role and per-attestor rate limit overrides |
 | `config_hot_reload_example.rs` | Reloading runtime config without restarting the process |
+| [`minimal_library_usage.rs`](examples/minimal_library_usage.rs) | Smallest library example: one offline `normalize_asset_code` call with explicit error handling (`cargo run --example minimal_library_usage`) |
 | `credential_management.sh` | Encrypted keystore vs. env var vs. keypair file |
 | `mock_mode_example.sh` | Testing CLI flows without a live anchor |
 | [`offline_mode_example.sh`](examples/offline_mode_example.sh) | Config validation and simulated workflows without network access |
