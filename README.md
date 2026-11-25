@@ -48,7 +48,11 @@ examples/                   # Rust and shell usage examples
 scripts/                    # Build, validation, and deploy scripts
 docs/                       # Feature and guide documentation
 test_snapshots/             # Snapshot fixtures for deterministic tests
+ui/                         # React presentation components (@anchorkit/ui-components)
+storybook/                  # Static, data-mocked HTML UI previews (no build step)
 ```
+
+The `storybook/` pages are static mock-ups, not live components. See [`storybook/README.md`](storybook/README.md) for how to open and validate them.
 
 ## Building
 

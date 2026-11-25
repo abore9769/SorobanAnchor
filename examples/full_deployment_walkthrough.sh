@@ -9,6 +9,20 @@
 # execute them, so it's safe to read top-to-bottom or run directly to see the
 # whole flow without touching a live network.
 #
+# Mode: Illustrative. The script only prints commands and expected output; it
+#   executes nothing and touches no network. The prerequisites below apply
+#   when you copy the printed commands and run them yourself.
+#
+# Prerequisites:
+#   Binary/build: None to run this script. For the printed commands: anchorkit
+#                 binary in PATH, the stellar CLI in PATH, and the
+#                 wasm32-unknown-unknown Rust target (for `anchorkit deploy`)
+#   Environment:  None read by this script. The printed commands use
+#                 ANCHOR_CONTRACT_ID and a signing key (ANCHOR_ADMIN_SECRET,
+#                 --credential-name, or a stellar CLI identity)
+#   Network:      None to run this script. The printed deploy/register/attest
+#                 commands need testnet RPC access
+#
 # Run:
 #   bash examples/full_deployment_walkthrough.sh
 

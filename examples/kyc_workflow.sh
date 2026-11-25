@@ -3,10 +3,19 @@
 # Demonstrates a complete KYC lifecycle: submission, approval/rejection,
 # attestation gated by KYC status, and status checks.
 #
+# Mode: Illustrative. The script only prints commands and expected output; it
+#   executes nothing and touches no network. The prerequisites below apply
+#   when you copy the printed commands and run them yourself.
+#
 # Prerequisites:
-#   - anchorkit binary in PATH  (cargo build --release && export PATH="$PWD/target/release:$PATH")
-#   - ANCHOR_CONTRACT_ID env var set to a deployed contract
-#   - STELLAR_NETWORK env var set (default: testnet)
+#   Binary/build: None to run this script. For the printed commands: anchorkit
+#                 binary in PATH
+#                 (cargo build --release && export PATH="$PWD/target/release:$PATH")
+#                 and the stellar CLI (with an "anchor-admin" identity) in PATH
+#   Environment:  ANCHOR_CONTRACT_ID (optional; defaults to a CBXXX... placeholder)
+#                 STELLAR_NETWORK    (optional; default: testnet)
+#   Network:      None to run this script. The printed commands need RPC
+#                 access and a deployed contract
 #
 # Run:
 #   bash examples/kyc_workflow.sh
